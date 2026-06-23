@@ -133,6 +133,55 @@ describe('renderDiagnosis', () => {
     expect(txt).toContain('38 file reads'); // the stored quote
   });
 
+  it('falls back to the injected resolver when an evidence ref has no stored quote', async () => {
+    // The Fugu pipeline leaves `quote` null for some findings; the ref still
+    // names an event, so the drill-down must recover the excerpt from ground
+    // truth rather than show "no excerpt stored".
+    const nullQuote = diagnosis({
+      ranked_findings: [
+        finding({
+          pattern_id: 'CONTEXT_BLOAT',
+          evidence: [{ session_id: 'sess-abcdef0123', turn_id: 'turn-77', event_id: 'evt-12', quote: null }],
+        }),
+      ],
+    });
+    const calls: Array<[string, string]> = [];
+    const resolveEvidence = async (sessionId: string, eventId: string) => {
+      calls.push([sessionId, eventId]);
+      return { quote: 'recovered from event: 38 file reads before compaction', source_path: '/tmp/sess.jsonl' };
+    };
+
+    renderDiagnosis(host, nullQuote, { harnessOf, resolveEvidence });
+    const firstHole = host.querySelector('.diag-hole')!;
+    firstHole.querySelector<HTMLButtonElement>('.evidence-toggle')!.click();
+
+    // Resolver invoked with the ref's (session_id, event_id).
+    expect(calls).toEqual([['sess-abcdef0123', 'evt-12']]);
+
+    // Let the resolver promise settle, then the recovered quote replaces the
+    // placeholder.
+    await Promise.resolve();
+    await Promise.resolve();
+    const item = firstHole.querySelector('.evidence-item')!;
+    expect(item.textContent).toContain('recovered from event: 38 file reads');
+    expect(item.querySelector('.evidence-quote-resolved')).toBeTruthy();
+    expect(item.textContent).not.toContain('no excerpt stored');
+  });
+
+  it('keeps the honest placeholder when a null-quote ref has no resolver wired', () => {
+    const nullQuote = diagnosis({
+      ranked_findings: [
+        finding({
+          evidence: [{ session_id: 'sess-abcdef0123', turn_id: 'turn-77', event_id: 'evt-12', quote: null }],
+        }),
+      ],
+    });
+    renderDiagnosis(host, nullQuote, { harnessOf }); // no resolveEvidence
+    host.querySelector<HTMLButtonElement>('.evidence-toggle')!.click();
+    const item = host.querySelector('.evidence-item')!;
+    expect(item.textContent).toContain('no excerpt stored');
+  });
+
   it('labels findings detector-only when the diagnosis was produced without the API', () => {
     renderDiagnosis(host, diagnosis({ detector_only: true }), { harnessOf });
     expect(host.textContent?.toLowerCase()).toContain('detector-only');

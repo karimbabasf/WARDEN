@@ -1,7 +1,7 @@
 import './style.css';
 import { animate, stagger } from 'animejs';
 import { mountWarRoom } from './viz/mount';
-import { renderDiagnosis as paintDiagnosis, type Diagnosis, type Finding, type FixPreview } from './diagnosis';
+import { renderDiagnosis as paintDiagnosis, type Diagnosis, type Finding, type FixPreview, type ResolvedEvidence } from './diagnosis';
 import { harnessTheme } from './viz/harnessTheme';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -92,6 +92,13 @@ function harnessOf(f: Finding): string {
 function fetchFixPreview(findingId: string): Promise<FixPreview> {
   // Tauri v2 maps camelCase JS args → snake_case Rust params (`finding_id`).
   return invoke<FixPreview>('get_fix_preview', { findingId });
+}
+
+// READ-ONLY evidence fallback: when an EvidenceRef has no stored quote but names
+// an event, the drill-down calls this to recover the excerpt from ground truth.
+// camelCase args → snake_case Rust params (`session_id`, `event_id`).
+function resolveEvidence(sessionId: string, eventId: string): Promise<ResolvedEvidence> {
+  return invoke<ResolvedEvidence>('resolve_evidence', { sessionId, eventId });
 }
 
 function setStatus(text: string) {
@@ -196,7 +203,7 @@ function renderDiagnosis(d: Diagnosis) {
   setStatus(d.detector_only ? 'detector-only diagnosis' : 'verified diagnosis ready');
   latestStreamingLine = null;
 
-  const root = paintDiagnosis(screen, d, { harnessOf, fetchFixPreview });
+  const root = paintDiagnosis(screen, d, { harnessOf, fetchFixPreview, resolveEvidence });
   screen.scrollTop = screen.scrollHeight;
 
   const holes = root.querySelectorAll('.diag-hole');

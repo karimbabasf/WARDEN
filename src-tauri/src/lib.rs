@@ -171,6 +171,7 @@ pub fn run() {
             ask,
             hide_overlay,
             get_fix_preview,
+            resolve_evidence,
             apply_artifact,
             revert_artifact,
             start_voice,

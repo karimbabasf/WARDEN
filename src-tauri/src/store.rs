@@ -189,6 +189,34 @@ impl Store {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
+    /// Resolve one stored event's ground-truth text for the evidence drill-down
+    /// fallback (Task 9). Returns the event's `searchable_text()` (the same
+    /// display surface the detectors quote from) plus its `raw_ref.source_path`,
+    /// keyed by `(session_id, event_id)` so a sibling session's id collision
+    /// cannot leak the wrong row. READ-ONLY — a `SELECT` only. `Ok(None)` when no
+    /// such event exists; the caller keeps the honest "no excerpt" placeholder.
+    pub fn event_text(
+        &self,
+        session_id: &str,
+        event_id: &str,
+    ) -> Result<Option<(String, Option<PathBuf>)>> {
+        let c = self.conn();
+        let row = c
+            .query_row(
+                "SELECT payload_json, raw_ref FROM events WHERE session_id=? AND id=?",
+                params![session_id, event_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((payload, raw)) = row else {
+            return Ok(None);
+        };
+        let event: Event = serde_json::from_str(&payload)?;
+        let source_path = serde_json::from_str::<RawRef>(&raw)
+            .ok()
+            .map(|r| r.source_path);
+        Ok(Some((event.searchable_text(), source_path)))
+    }
     pub fn all_features(&self) -> Result<Vec<FeatureVector>> {
         let c = self.conn();
         let mut st = c.prepare("SELECT vector_json FROM features")?;
@@ -513,5 +541,29 @@ mod tests {
         );
         assert_eq!(store.session_harness("missing").unwrap(), None);
         assert!(store.finding_by_id("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn event_text_resolves_quote_and_source_path_for_evidence_fallback() {
+        let store = Store::memory().unwrap();
+        // seed_session writes UserPrompt events whose text is "prompt {i}" and a
+        // raw_ref source_path of /tmp/{id}.jsonl — the ground truth the null-quote
+        // drill-down must recover.
+        seed_session(&store, "c1", Harness::ClaudeCode, 2);
+
+        let (quote, source_path) = store
+            .event_text("c1", "c1-e1")
+            .unwrap()
+            .expect("event present");
+        assert_eq!(quote, "prompt 1");
+        assert_eq!(
+            source_path.as_deref(),
+            Some(std::path::Path::new("/tmp/c1.jsonl"))
+        );
+
+        // Unknown event id → None (caller keeps the honest placeholder).
+        assert!(store.event_text("c1", "c1-e99").unwrap().is_none());
+        // Right event id under the wrong session must not leak across sessions.
+        assert!(store.event_text("other", "c1-e1").unwrap().is_none());
     }
 }

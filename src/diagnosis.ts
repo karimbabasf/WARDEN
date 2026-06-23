@@ -63,11 +63,25 @@ export type FixPreview = {
 // per candidate. `main.ts` knows the active harness (and the per-pattern harness
 // from `candidates_nominated`), so it injects a resolver. Default: the scope
 // harness, falling through to neutral.
+// Recovered ground truth for an EvidenceRef whose stored `quote` is null (the
+// Fugu pipeline leaves it null for some findings). Mirrors the Rust
+// `ResolvedEvidence` serde shape.
+export type ResolvedEvidence = {
+  quote?: string | null;
+  source_path?: string | null;
+};
+
 export type DiagnosisDeps = {
   harnessOf: (f: Finding) => string;
   // Optional fix-preview fetcher (Tauri `invoke`). When provided, each hole
   // grows a "fix preview" toggle that lazily fetches + renders the diff.
   fetchFixPreview?: (findingId: string) => Promise<FixPreview>;
+  // Optional READ-ONLY evidence resolver (Tauri `invoke('resolve_evidence')`).
+  // The fast path renders the stored `quote` directly; only when a ref has NO
+  // stored quote but DOES carry an event_id do we fall back to this to recover
+  // the excerpt from the underlying event. Absent resolver ⇒ keep the honest
+  // "no excerpt stored" placeholder; never fabricate text.
+  resolveEvidence?: (sessionId: string, eventId: string) => Promise<ResolvedEvidence>;
 };
 
 // ── small DOM helpers (local; main.ts has its own line()/html() for the log) ──
@@ -144,12 +158,16 @@ function severityWord(sev: number): string {
 }
 
 // ── evidence drill-down ───────────────────────────────────────────────────────
-// Each EvidenceRef already carries a stored `quote` (populated at detection
-// time, Rust `detectors::evidence_for`), so the drill-down needs no server round
-// trip — it renders session · turn · quote directly. If a future ref ever lacks
-// a quote we degrade to the location alone rather than inventing text.
+// Fast path: an EvidenceRef that carries a stored `quote` (populated at
+// detection time, Rust `detectors::evidence_for`) renders session · turn · quote
+// directly, no round trip. Fallback: the Fugu pipeline leaves `quote` null for
+// some findings — when that happens but the ref still names an `event_id`, we
+// call the injected READ-ONLY `resolveEvidence` to recover the excerpt from the
+// underlying event (spec §5.3/§7: every claim traceable to ground truth). If no
+// resolver is wired, or it yields nothing, we keep the honest placeholder rather
+// than inventing text.
 
-function evidenceItem(ev: Evidence): HTMLElement {
+function evidenceItem(ev: Evidence, deps: DiagnosisDeps): HTMLElement {
   const item = el('li', 'evidence-item');
   const loc = el('span', 'evidence-loc');
   loc.append(el('span', 'evidence-key', 'session'), el('span', 'evidence-val', shortId(ev.session_id)));
@@ -159,6 +177,25 @@ function evidenceItem(ev: Evidence): HTMLElement {
   item.appendChild(loc);
   if (ev.quote && ev.quote.trim()) {
     item.appendChild(el('blockquote', 'evidence-quote', ev.quote.trim()));
+  } else if (deps.resolveEvidence && ev.event_id && ev.session_id) {
+    // Null stored quote but a resolvable event: show a recovering placeholder,
+    // then swap in the ground-truth excerpt once the read-only fetch returns.
+    const slot = el('div', 'evidence-quote evidence-quote-empty', 'recovering excerpt…');
+    item.appendChild(slot);
+    deps
+      .resolveEvidence(ev.session_id, ev.event_id)
+      .then(res => {
+        const quote = res && res.quote ? res.quote.trim() : '';
+        if (quote) {
+          const block = el('blockquote', 'evidence-quote evidence-quote-resolved', quote);
+          slot.replaceWith(block);
+        } else {
+          slot.textContent = 'no excerpt stored for this reference';
+        }
+      })
+      .catch(() => {
+        slot.textContent = 'no excerpt stored for this reference';
+      });
   } else {
     item.appendChild(el('div', 'evidence-quote evidence-quote-empty', 'no excerpt stored for this reference'));
   }
@@ -224,7 +261,7 @@ function renderHole(f: Finding, rank: number, deps: DiagnosisDeps, detectorOnly:
   toggle.addEventListener('click', () => {
     const open = toggle.getAttribute('aria-expanded') === 'true';
     if (!open && !built) {
-      (f.evidence || []).forEach(ev => evList.appendChild(evidenceItem(ev)));
+      (f.evidence || []).forEach(ev => evList.appendChild(evidenceItem(ev, deps)));
       if (evCount === 0) evList.appendChild(el('li', 'evidence-item evidence-empty', 'no stored references'));
       built = true;
     }

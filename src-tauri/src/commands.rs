@@ -165,6 +165,51 @@ pub async fn get_fix_preview(
 ) -> Result<FixPreview, String> {
     forge::fix_preview(&state.store, &finding_id).map_err(|e| e.to_string())
 }
+/// Recovered ground truth for an `EvidenceRef` whose `quote` the Fugu pipeline
+/// left null (`brain.rs` maps an `Option<String>` the model may omit). Both
+/// fields are optional: the drill-down only swaps in `quote` when it is present,
+/// otherwise it keeps the honest "no excerpt stored" placeholder.
+#[derive(serde::Serialize)]
+pub struct ResolvedEvidence {
+    pub quote: Option<String>,
+    pub source_path: Option<String>,
+}
+
+/// READ-ONLY evidence resolver (Task 9 fallback). When a finding's `EvidenceRef`
+/// carries an `event_id` but no stored `quote`, the diagnosis screen calls this
+/// on expand to recover the excerpt from the underlying event — preserving the
+/// spec's "every claim traceable to ground truth" guarantee without ever
+/// fabricating text. Reads one `events` row (`store::event_text`), truncates the
+/// text to ~220 chars through the same redacting `excerpt` the detectors use, and
+/// returns it with the raw source path. Never writes. `quote` is `None` when the
+/// event is missing or its text is empty, so the UI degrades gracefully.
+#[tauri::command]
+pub async fn resolve_evidence(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    event_id: String,
+) -> Result<ResolvedEvidence, String> {
+    let resolved = state
+        .store
+        .event_text(&session_id, &event_id)
+        .map_err(|e| e.to_string())?;
+    let (quote, source_path) = match resolved {
+        Some((text, source_path)) => {
+            let trimmed = text.trim();
+            let quote = if trimmed.is_empty() {
+                None
+            } else {
+                Some(crate::redaction::excerpt(trimmed, 220))
+            };
+            (quote, source_path.map(|p| p.to_string_lossy().into_owned()))
+        }
+        None => (None, None),
+    };
+    Ok(ResolvedEvidence {
+        quote,
+        source_path,
+    })
+}
 #[tauri::command]
 pub async fn mute_pattern(_id: String) -> Result<(), String> {
     Err(not_in_slice("Live interjection muting"))
