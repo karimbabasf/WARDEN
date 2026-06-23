@@ -30,14 +30,31 @@ import type { RevealFinding } from './compositions/Reveal';
 const PlayerHost = lazy(() => import('./PlayerHost'));
 
 // ── palette (mirrors style.css phosphor tokens) ──────────────────────────────
-const CORE_IDLE = new THREE.Color('#76ff9d'); // emerald phosphor
-const CORE_CONFIRM = new THREE.Color('#ff5a37'); // verdict amber/red flare
+// Spec §6.1: every node nucleus reads HOT-WHITE at its center. The core mesh is
+// an additive near-white nucleus that blooms to a white-hot point; the verdict
+// channel only *tints* that white (emerald-white idle → white-hot amber on
+// confirmed) so the white core is always the brightest thing on screen while the
+// harness colour stays on the cage rim. Refuted collapses + dims the nucleus.
+const CORE_HOT = new THREE.Color('#ffffff'); // hot-white nucleus (bloom seed)
+const CORE_IDLE = new THREE.Color('#d8ffe8'); // emerald-white idle tint
+const CORE_CONFIRM = new THREE.Color('#ffd9c8'); // white-hot amber tint (confirmed)
+const HALO_IDLE = new THREE.Color('#76ff9d'); // emerald phosphor halo
+const HALO_CONFIRM = new THREE.Color('#ff5a37'); // verdict amber/red flare halo
 const CAGE_BASE = new THREE.Color('#1b6f3a'); // dim cage wire
 const STAGE_NAMES = ['Diagnostician', 'Coach', 'Verifier'] as const;
 
 // Frame-rate-independent damping (r3f-mastery key math pattern).
 function damp(current: number, target: number, lambda: number, dt: number): number {
   return THREE.MathUtils.lerp(current, target, 1 - Math.exp(-lambda * dt));
+}
+
+// Pure visibility→frameloop decision, extracted so it is unit-testable without a
+// GPU/jsdom Canvas (Task 10 viz smoke). The overlay pauses its RAF whenever the
+// window is hidden — `frameloop="never"` halts r3f's loop entirely — and runs
+// `"always"` when visible. Keep this the single source of the pause rule so the
+// test asserts exactly what the Canvas uses.
+export function frameloopFor(hidden: boolean): 'always' | 'never' {
+  return hidden ? 'never' : 'always';
 }
 
 // Deterministic placement on a sphere shell so node layout is stable per index
@@ -64,9 +81,14 @@ type NodeView = {
 };
 
 // ── one Wireframe-Cell ───────────────────────────────────────────────────────
-// A SINGLE wireframe icosahedron cage + a hot-white inner core. No double
-// shells, no vertex sparkle — clarity over noise. The core colour is the verdict
-// channel; the cage rim is tinted by harness (secondary accent).
+// Three concentric shells, clarity over noise (no vertex sparkle):
+//   1. a HOT-WHITE additive nucleus at the center (spec §6.1) — the brightest
+//      thing on screen, the bloom seed; verdict only *tints* the white
+//      (emerald-white idle → white-hot amber on confirmed);
+//   2. an emissive halo carrying the full verdict colour (emerald → amber) so
+//      the verdict reads at a glance even past the white blowout;
+//   3. a single wireframe cage whose rim is tinted by harness (secondary accent).
+// Refuted collapses + dims all three.
 function WireframeCell({
   node,
   verdict,
@@ -78,6 +100,7 @@ function WireframeCell({
 }) {
   const group = useRef<THREE.Group>(null!);
   const coreMat = useRef<THREE.MeshBasicMaterial>(null!);
+  const haloMat = useRef<THREE.MeshBasicMaterial>(null!);
   const cageMat = useRef<THREE.MeshBasicMaterial>(null!);
   const theme = harnessTheme(node.harness);
 
@@ -85,35 +108,46 @@ function WireframeCell({
   const cageColor = useMemo(() => CAGE_BASE.clone().lerp(new THREE.Color(theme.color), 0.55), [theme.color]);
   const baseScale = node.kind === 'stage' ? 0.62 : 0.34;
 
+  // Scratch colours mutated in-place each frame (never reallocate in useFrame).
+  const coreColor = useRef(CORE_IDLE.clone());
+  const haloColor = useRef(HALO_IDLE.clone());
+
   // Smoothed visual state lives in a ref so we don't re-render per frame.
-  const sim = useRef({ scale: baseScale, glow: 0.5, dead: 0 });
+  // `heat` 0..1 drives how hot-white the nucleus reads (confirmed → 1, refuted → 0).
+  const sim = useRef({ scale: baseScale, glow: 0.5, dead: 0, heat: node.kind === 'stage' ? 0.35 : 0.25 });
 
   useFrame((_, dtRaw) => {
     const dt = Math.min(dtRaw, 0.05); // clamp huge tab-restore deltas
     const t = performance.now() / 1000;
     const s = sim.current;
 
-    // Verdict → core colour + size + persistence.
-    let targetColor = CORE_IDLE;
+    // Verdict → core/halo tint + size + persistence + nucleus heat.
+    let targetCore = CORE_IDLE;
+    let targetHalo = HALO_IDLE;
     let targetScale = baseScale;
     let targetGlow = node.kind === 'stage' ? 0.4 + stageWeight * 1.6 : 0.55;
     let targetDead = 0;
+    let targetHeat = node.kind === 'stage' ? 0.3 + stageWeight * 0.45 : 0.25;
 
     if (verdict?.verdict === 'confirmed') {
-      targetColor = CORE_CONFIRM;
+      targetCore = CORE_CONFIRM;
+      targetHalo = HALO_CONFIRM;
       // grow with confirmed severity (real signal), then persist.
       targetScale = baseScale * (1.35 + Math.min(verdict.severity, 5) * 0.12);
       targetGlow = 2.2;
+      targetHeat = 1; // white-hot nucleus
     } else if (verdict?.verdict === 'refuted') {
-      // collapse + die: shrink toward nothing and fade out.
+      // collapse + die: shrink toward nothing, cool the nucleus, fade out.
       targetScale = baseScale * 0.18;
       targetGlow = 0.05;
       targetDead = 1;
+      targetHeat = 0;
     }
 
     s.scale = damp(s.scale, targetScale, 5, dt);
     s.glow = damp(s.glow, targetGlow, 4, dt);
     s.dead = damp(s.dead, targetDead, 3, dt);
+    s.heat = damp(s.heat, targetHeat, 4, dt);
 
     if (group.current) {
       // gentle breathing + slow tumble; idle stages breathe to token weight.
@@ -123,8 +157,18 @@ function WireframeCell({
       group.current.rotation.x += dt * 0.07;
     }
     if (coreMat.current) {
-      coreMat.current.color.copy(targetColor);
-      coreMat.current.opacity = (0.85 + s.glow * 0.05) * (1 - s.dead);
+      // Nucleus: lerp the verdict tint toward pure hot-white by `heat`, then push
+      // past 1.0 (toneMapped off) so it blows out and seeds the bloom.
+      coreColor.current.copy(targetCore).lerp(CORE_HOT, 0.45 + s.heat * 0.55);
+      coreMat.current.color.copy(coreColor.current);
+      coreMat.current.opacity = Math.min(1, (0.9 + s.glow * 0.06) * (1 - s.dead));
+    }
+    if (haloMat.current) {
+      // Halo carries the verdict colour at lower opacity so the hue survives the
+      // white blowout (and the amber/emerald reads even at a glance).
+      haloColor.current.copy(targetHalo);
+      haloMat.current.color.copy(haloColor.current);
+      haloMat.current.opacity = (0.16 + s.glow * 0.16) * (1 - s.dead);
     }
     if (cageMat.current) {
       cageMat.current.opacity = (0.45 + s.glow * 0.12) * (1 - s.dead * 0.9);
@@ -133,12 +177,32 @@ function WireframeCell({
 
   return (
     <group ref={group} position={node.position}>
-      {/* hot-white core (verdict colour channel) */}
+      {/* 1 — hot-white additive nucleus (bloom seed; verdict only tints it) */}
+      <mesh scale={0.66}>
+        <icosahedronGeometry args={[0.5, 0]} />
+        <meshBasicMaterial
+          ref={coreMat}
+          color={CORE_IDLE}
+          transparent
+          toneMapped={false}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
+      </mesh>
+      {/* 2 — verdict-coloured halo (emerald → amber) so the hue reads past white */}
       <mesh>
         <icosahedronGeometry args={[0.5, 0]} />
-        <meshBasicMaterial ref={coreMat} color={CORE_IDLE} transparent toneMapped={false} />
+        <meshBasicMaterial
+          ref={haloMat}
+          color={HALO_IDLE}
+          transparent
+          opacity={0.22}
+          toneMapped={false}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
       </mesh>
-      {/* single wireframe cage, harness-tinted rim */}
+      {/* 3 — single wireframe cage, harness-tinted rim */}
       <mesh scale={1.55}>
         <icosahedronGeometry args={[0.5, node.kind === 'stage' ? 1 : 0]} />
         <meshBasicMaterial ref={cageMat} color={cageColor} wireframe transparent opacity={0.5} toneMapped={false} />
@@ -400,8 +464,12 @@ function Scene({ scene }: { scene: SceneState }) {
       ))}
       <Pulses pulses={scene.pulses} stagePositions={stagePositions} />
       <EffectComposer>
-        <Bloom intensity={1.0} luminanceThreshold={0.15} luminanceSmoothing={0.9} mipmapBlur radius={0.7} />
-        <Vignette eskil={false} offset={0.25} darkness={0.85} />
+        {/* Modestly punchier bloom for cinematic glow. The threshold is RAISED
+            (0.15→0.2) so only the hot-white nuclei + confirmed flares blow out
+            and bloom hard — the dim emerald cages/dust stay phosphor-dim and the
+            green mood is preserved (honest-viz: glow still tracks real signals). */}
+        <Bloom intensity={1.35} luminanceThreshold={0.2} luminanceSmoothing={0.85} mipmapBlur radius={0.78} />
+        <Vignette eskil={false} offset={0.24} darkness={0.88} />
         <Noise premultiply blendFunction={BlendFunction.OVERLAY} opacity={0.06} />
       </EffectComposer>
     </>
@@ -503,7 +571,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     <div className={`viz-root viz-phase-${scene.phase}`}>
       <Canvas
         dpr={[1, 2]}
-        frameloop={active ? 'always' : 'never'}
+        frameloop={frameloopFor(!active)}
         gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}
         camera={{ position: [0, 0, 8.5], fov: 50, near: 0.1, far: 100 }}
       >
