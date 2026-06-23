@@ -46,13 +46,57 @@ body::after {
   pointer-events: none;
 }
 
-#war-room {
+/* Ambient R3F war-room island — full-bleed backdrop BEHIND the terminal. */
+#war-room-root,
+.viz-root {
   position: fixed;
   inset: 0;
+  z-index: 1;
   width: 100vw;
   height: 100vh;
-  opacity: 0.72;
-  filter: drop-shadow(0 0 8px rgba(118, 255, 157, 0.35));
+  pointer-events: none;
+}
+
+.viz-root canvas {
+  /* The constellation sits behind the terminal; keep it luminous but recessed. */
+  opacity: 0.82;
+  transition: opacity 600ms ease;
+}
+
+/* Phase tints: idle is dim, the reveal lifts the backdrop slightly. */
+.viz-phase-idle canvas { opacity: 0.6; }
+.viz-phase-reveal canvas { opacity: 0.92; }
+
+/* Legend — colour ALWAYS paired with glyph + label (color-blind a11y). */
+.viz-legend {
+  position: absolute;
+  left: 18px;
+  bottom: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  max-width: 60vw;
+  font-family: WardenMono, Menlo, Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9dffc0;
+  text-shadow: 0 0 8px rgba(2, 4, 3, 0.9);
+  pointer-events: none;
+}
+
+.viz-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.viz-legend-dim { opacity: 0.6; }
+
+.viz-glyph {
+  font-size: 13px;
+  line-height: 1;
+  filter: drop-shadow(0 0 6px currentColor);
 }
 
 #terminal {

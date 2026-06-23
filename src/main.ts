@@ -1,6 +1,6 @@
 import './style.css';
 import { animate } from 'animejs';
-import { WarRoom } from './warRoom';
+import { mountWarRoom } from './viz/mount';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -74,6 +74,22 @@ type FuguUsage = {
   orchestration_output_tokens?: number;
 };
 
+// Task-6 viz event contract (consumed by the R3F bridge). `harness` is snake_case.
+type CandidateNomination = {
+  pattern_id: string;
+  session_id: string;
+  harness: string;
+  severity_hint: number;
+};
+type CandidatesNominated = { candidates: CandidateNomination[] };
+type FindingVerdict = {
+  finding_id: string;
+  pattern_id: string;
+  harness: string;
+  verdict: 'confirmed' | 'refuted';
+  severity: number;
+};
+
 const screen = document.querySelector<HTMLDivElement>('#screen')!;
 const form = document.querySelector<HTMLFormElement>('#prompt')!;
 const input = document.querySelector<HTMLInputElement>('#command')!;
@@ -84,7 +100,9 @@ const hudEvents = document.querySelector<HTMLDivElement>('#hud-events')!;
 const hudFindings = document.querySelector<HTMLDivElement>('#hud-findings')!;
 const hudStage = document.querySelector<HTMLDivElement>('#hud-stage')!;
 const appWindow = getCurrentWindow();
-const war = new WarRoom(document.querySelector<HTMLCanvasElement>('#war-room')!);
+// Mount the R3F war-room island ONCE (pre-warmed on the hidden overlay window);
+// every Tauri viz event below is routed into this bridge via `bridge.ingest`.
+const bridge = mountWarRoom('war-room-root');
 
 let running = false;
 let latestStreamingLine: HTMLDivElement | null = null;
@@ -227,8 +245,11 @@ form.addEventListener('submit', async ev => {
 
 listen<IngestProgress>('ingest_progress', e => {
   const p = e.payload;
-  setStatus(`${p.phase} · ${p.status}`);
-  war.pulse({ stage: p.phase, input: p.ingested_events ?? p.event_count ?? 0, output: p.ingested_sessions ?? p.session_count ?? 0 });
+  // Tolerate both the live-tail shape `{ harness, path, events, phase:"live" }`
+  // and the M1 batch shape `{ phase, status }`.
+  const anyP = p as IngestProgress & { harness?: string; path?: string; events?: number };
+  setStatus(p.status ? `${p.phase} · ${p.status}` : `${anyP.harness ?? 'ingest'} · ${p.phase}`);
+  bridge.ingest('ingest_progress', anyP);
 
   if (p.status === 'complete' && p.phase === 'ingest') {
     updateHud({ session_count: p.total_sessions ?? 0, event_count: p.total_events ?? 0, finding_count: p.finding_count ?? 0 });
@@ -242,18 +263,30 @@ listen<IngestProgress>('ingest_progress', e => {
 
 listen<{ phase: string; status: string }>('diagnosis_status', e => {
   setStatus(`${e.payload.phase} · ${e.payload.status}`);
-  war.pulse({ stage: e.payload.phase, input: 128, output: 32 });
+});
+
+// Task-6: candidate nominations spawn war-room nodes (real candidate count).
+listen<CandidatesNominated>('candidates_nominated', e => {
+  bridge.ingest('candidates_nominated', e.payload);
+  const n = e.payload?.candidates?.length ?? 0;
+  setStatus(`nominated · ${n} candidate${n === 1 ? '' : 's'}`);
+});
+
+// Task-6: per-finding verdicts drive the core flare (confirmed) / collapse (refuted).
+listen<FindingVerdict>('finding_verdict', e => {
+  bridge.ingest('finding_verdict', e.payload);
 });
 
 listen<{ id: string; finding_count: number }>('diagnosis_ready', e => {
   setStatus('diagnosis ready');
   hudFindings.textContent = e.payload.finding_count.toLocaleString();
+  bridge.ingest('diagnosis_ready', e.payload);
 });
 
 listen<FuguDelta>('fugu_delta', e => {
   const delta = String(e.payload.delta || '');
   setStatus(`${e.payload.stage} · streaming`);
-  war.pulse({ stage: e.payload.stage, output: delta.length });
+  bridge.ingest('fugu_delta', e.payload);
 
   if (!delta.trim()) return;
   const preview = delta.replace(/\s+/g, ' ').slice(0, 120);
@@ -267,13 +300,7 @@ listen<FuguDelta>('fugu_delta', e => {
 
 listen<FuguUsage>('fugu_usage', e => {
   const p = e.payload;
-  war.pulse({
-    stage: p.stage,
-    input: p.input_tokens,
-    output: p.output_tokens,
-    orchestrationInput: p.orchestration_input_tokens,
-    orchestrationOutput: p.orchestration_output_tokens
-  });
+  bridge.ingest('fugu_usage', p);
   line(`  FUGU ${p.stage}: ${formatCount(p.input_tokens)} in · ${formatCount(p.output_tokens)} out · orchestration ${formatCount((p.orchestration_input_tokens ?? 0) + (p.orchestration_output_tokens ?? 0))}`, 'muted');
 });
 
