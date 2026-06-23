@@ -13,3 +13,7 @@
 restart.sh
 status.sh
 .superpowers/
+
+# playwright-mcp + viz verification artifacts
+.playwright-mcp/
+/warden-warroom-*.png
