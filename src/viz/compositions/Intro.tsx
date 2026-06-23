@@ -12,12 +12,7 @@
 
 import { AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig } from 'remotion';
 import { FPS } from './timing';
-
-const BG = '#020403';
-const GREEN = '#76ff9d';
-const ACID = '#b8ff6b';
-const AMBER = '#ff5a37';
-const MONO = 'WardenMono, Menlo, Consolas, monospace';
+import { BG, GREEN, ACID, AMBER, MONO } from './palette';
 
 /** Intro length in frames — a tight ~2.3s brand power-on. */
 export const INTRO_DURATION = Math.round(FPS * 2.3);

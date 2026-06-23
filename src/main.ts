@@ -330,6 +330,9 @@ listen<FuguUsage>('fugu_usage', e => {
 
 listen('warden_hotkey', () => {
   input.focus();
+  // Select the existing text on summon so the pre-filled suggestion (or the last
+  // query) can be typed over immediately — address-bar ergonomics.
+  input.select();
   setStatus('summoned');
   animate('#terminal', { scale: [0.985, 1], duration: 220, ease: 'outQuad' });
 });

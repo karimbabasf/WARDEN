@@ -88,6 +88,7 @@ The signature visual is the hot-white R3F war-room core with amber verdict flare
 - `PROGRESS.md` — replaced stale pending-M2 ledger with a verified M3-ready ledger.
 - `README.md` — added a clean project entry point and run/verify instructions.
 - `SUMMARY.md` — this handoff summary.
+- `docs/superpowers/specs/2026-06-23-m2-forensic-reconstruction-design.md` — forward-looking M2 forensic-reconstruction enhancement spec (not part of the verified M2 baseline; see caveats).
 
 No production code path was changed in this cleanup pass. The codebase already contained the M2 implementation; the cleanup made the repo’s documentation and handoff match reality.
 
@@ -115,7 +116,7 @@ cd src-tauri && cargo build
 
 cd src-tauri && cargo test
   exit 0
-  69 tests passed
+  71 tests passed
 
 pnpm tauri build
   exit 0

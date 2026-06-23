@@ -64,13 +64,16 @@ Env: `WARDEN_DB_PATH` (db override) · `SAKANA_API_KEY` (Fugu key) · M2 adds `W
 **Frontend `src/`**
 - `index.html` — overlay DOM: `#war-room-root` R3F island mount, `#terminal`, `#screen`, `#prompt`/`#command`,
   HUD `#hud-{sessions,events,findings,stage}`, `#status`.
-- `main.ts` — vanilla-TS screen router. Listens `warden_hotkey`,`ingest_progress`,`fugu_delta`,`fugu_usage`;
-  invokes `query_profile`,`get_diagnosis`,`run_diagnosis`.
+- `main.ts` — vanilla-TS screen router. Listens `warden_hotkey`,`ingest_progress`,`fugu_delta`,`fugu_usage`,
+  `candidates_nominated`,`finding_verdict`,`diagnosis_ready`; invokes `query_profile`,`get_diagnosis`,`run_diagnosis`.
+- `diagnosis.ts` — pure-DOM forensic readout: ranked holes, discrete severity meter, cost ledger, harness
+  badges, evidence drill-down (`resolve_evidence` fallback), read-only fix-preview diff. jsdom-unit-tested.
 - `warRoom.ts` — Three.js viz. *(M2: **retired**, replaced by the R3F island in `src/viz/`.)*
 - `style.css` — green-phosphor tokens: `--bg #020403`, `--green #76ff9d`, `--dim #1b6f3a`,
-  `--acid #b8ff6b`, `--warn #ffd166`, `--red #ff5470`.
-- M2 new `src/viz/` — React + R3F + Remotion island: `WarRoom.tsx`, `compositions/`, `bridge.ts`,
-  `harnessTheme.ts`, mounted once into `#war-room-root` on the pre-warmed hidden window.
+  `--acid #b8ff6b`, `--warn #ffd166`, `--red #ff5470`, verdict `--amber #ff5a37`.
+- M2 new `src/viz/` — React + R3F + Remotion island: `WarRoom.tsx`, `compositions/` (`Intro`/`Reveal`/`Recap`
+  + pure `timing.ts` + shared `palette.ts`), `bridge.ts`, `harnessTheme.ts`, `PlayerHost.tsx`,
+  mounted once into `#war-room-root` on the pre-warmed hidden window.
 
 ## Conventions
 - **Env helper**: `std::env::var("X").ok().map(...).unwrap_or_else(default)` (see `util.rs`).

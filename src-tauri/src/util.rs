@@ -288,4 +288,30 @@ mod tests {
         assert_eq!(high, "low");
         assert_eq!(low, "low");
     }
+
+    // ── claude_md_path ────────────────────────────────────────────────────────
+    // Covers the fix-preview target resolution. The forge fix-preview tests were
+    // made pure (target injected) to kill a cross-thread `WARDEN_CLAUDE_MD` race,
+    // so the override→path behaviour is covered here instead — safely, under the
+    // shared ENV_LOCK that serialises every env-mutating test in this module.
+
+    #[test]
+    fn claude_md_path_reads_env_override() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("WARDEN_CLAUDE_MD", "/tmp/warden-test/CLAUDE.md");
+        let result = claude_md_path();
+        std::env::remove_var("WARDEN_CLAUDE_MD");
+        assert_eq!(result, PathBuf::from("/tmp/warden-test/CLAUDE.md"));
+    }
+
+    #[test]
+    fn claude_md_path_defaults_under_home_claude_dir() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("WARDEN_CLAUDE_MD");
+        let result = claude_md_path();
+        assert!(
+            result.ends_with(".claude/CLAUDE.md"),
+            "expected default under ~/.claude/CLAUDE.md, got {result:?}"
+        );
+    }
 }

@@ -80,14 +80,15 @@ Install dependencies:
 pnpm install
 ```
 
-Verify the slate:
+Verify the slate (each cargo step runs in a subshell so the shell stays at repo
+root and `pnpm tauri build` runs from the correct directory):
 
 ```bash
 pnpm build
 pnpm test
-cd src-tauri && cargo check
-cd src-tauri && cargo test
-cd src-tauri && cargo build
+(cd src-tauri && cargo check)
+(cd src-tauri && cargo build)
+(cd src-tauri && cargo test)
 pnpm tauri build
 ```
 
@@ -122,9 +123,9 @@ The M3-ready slate was freshly verified on 2026-06-23 from `/Users/karimbaba/WAR
 
 - `pnpm build` passed.
 - `pnpm test` passed: 6 files, 38 tests.
-- `cd src-tauri && cargo check` passed.
-- `cd src-tauri && cargo build` passed.
-- `cd src-tauri && cargo test` passed: 69 Rust tests.
+- `(cd src-tauri && cargo check)` passed.
+- `(cd src-tauri && cargo build)` passed.
+- `(cd src-tauri && cargo test)` passed: 71 Rust tests.
 - `pnpm tauri build` passed and produced `src-tauri/target/release/bundle/macos/WARDEN.app`.
 - Browser smoke of `dev-viz.html` mounted the R3F canvas and Remotion player and reached the reveal phase.
 

@@ -35,14 +35,23 @@ pub fn fix_preview(store: &Store, finding_id: &str) -> Result<FixPreview> {
     Ok(preview_for_finding(&finding))
 }
 
-/// Pure core, isolated from the store so the diff strategy is unit-testable: pick
-/// the fix for the finding's pattern, read its target file, render old→new diff.
+/// Resolve the real target (env-overridable `~/.claude/CLAUDE.md`) and render the
+/// preview against it. Thin wrapper over the pure, target-injected core below.
 pub fn preview_for_finding(finding: &Finding) -> FixPreview {
     let fix = fix_for_pattern(&finding.pattern_id);
     let target = fix.target_path();
-    let current = std::fs::read_to_string(&target).unwrap_or_default();
+    preview_against(finding, &fix, &target)
+}
+
+/// Pure core, isolated from the store AND from global path resolution: read the
+/// injected `target` file (missing → empty), append the per-pattern guidance
+/// block if absent, and render the old→new unified diff. Taking `target` as a
+/// parameter — instead of reading the process-wide `WARDEN_CLAUDE_MD` here — is
+/// what lets the unit tests run in parallel without racing on that shared env var.
+fn preview_against(finding: &Finding, fix: &PatternFix, target: &std::path::Path) -> FixPreview {
+    let current = std::fs::read_to_string(target).unwrap_or_default();
     let proposed = ensure_block(&current, &fix.block);
-    let diff = unified_diff(&target, &current, &proposed);
+    let diff = unified_diff(target, &current, &proposed);
     FixPreview {
         finding_id: finding.id.clone(),
         pattern_id: finding.pattern_id.clone(),
@@ -148,15 +157,22 @@ mod tests {
         }
     }
 
+    // Render directly against an explicit target path. No `WARDEN_CLAUDE_MD`
+    // mutation, so these tests are deterministic and parallel-safe — the shared
+    // process-global env var previously raced across the parallel test threads
+    // (the missing-target case could read a sibling test's already-blocked file
+    // and see an empty diff).
+    fn preview_at(pattern: &str, target: &std::path::Path) -> FixPreview {
+        preview_against(&finding(pattern), &fix_for_pattern(pattern), target)
+    }
+
     #[test]
     fn preview_is_nonempty_diff_and_never_applied() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("CLAUDE.md");
         std::fs::write(&target, "# Project\n\nexisting line\n").unwrap();
-        std::env::set_var("WARDEN_CLAUDE_MD", &target);
 
-        let preview = preview_for_finding(&finding("UNVERIFIED_COMPLETION"));
-        std::env::remove_var("WARDEN_CLAUDE_MD");
+        let preview = preview_at("UNVERIFIED_COMPLETION", &target);
 
         assert!(!preview.applied, "preview must never be applied (apply = M4)");
         assert!(!preview.diff.is_empty(), "expected a non-empty unified diff");
@@ -176,9 +192,8 @@ mod tests {
     fn preview_against_missing_target_still_produces_diff() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("nonexistent-CLAUDE.md");
-        std::env::set_var("WARDEN_CLAUDE_MD", &target);
-        let preview = preview_for_finding(&finding("CONTEXT_BLOAT"));
-        std::env::remove_var("WARDEN_CLAUDE_MD");
+
+        let preview = preview_at("CONTEXT_BLOAT", &target);
 
         assert!(!preview.diff.is_empty());
         assert!(preview.diff.contains("WARDEN guardrail — CONTEXT_BLOAT"));
@@ -190,9 +205,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("CLAUDE.md");
         std::fs::write(&target, format!("# Project\n{block}")).unwrap();
-        std::env::set_var("WARDEN_CLAUDE_MD", &target);
-        let preview = preview_for_finding(&finding("CONTEXT_BLOAT"));
-        std::env::remove_var("WARDEN_CLAUDE_MD");
+
+        let preview = preview_at("CONTEXT_BLOAT", &target);
 
         assert!(
             preview.diff.is_empty(),

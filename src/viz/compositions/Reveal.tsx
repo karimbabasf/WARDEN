@@ -14,14 +14,8 @@
 import { AbsoluteFill, Sequence, interpolate, spring, useCurrentFrame, useVideoConfig } from 'remotion';
 import { FPS, INTRO_FRAMES, revealDuration } from './timing';
 import { harnessTheme } from '../harnessTheme';
-
-// ── phosphor language (mirrors style.css tokens) ─────────────────────────────
-const BG = '#020403';
-const GREEN = '#76ff9d';
-const ACID = '#b8ff6b';
-const AMBER = '#ff5a37'; // verdict amber (matches war-room CORE_CONFIRM)
-const DIM = '#1b6f3a';
-const MONO = 'WardenMono, Menlo, Consolas, monospace';
+// Phosphor language — single source in ./palette (mirrors style.css tokens).
+import { BG, GREEN, ACID, AMBER, DIM, MONO } from './palette';
 
 // Harness identity (paired colour + glyph + label) comes from the SINGLE source
 // in harnessTheme.ts. That module is pure — no React/Remotion import — so it

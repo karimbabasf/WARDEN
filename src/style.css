@@ -6,7 +6,6 @@
 
 :root {
   --bg: #020403;
-  --panel: rgba(0, 18, 10, 0.78);
   --green: #76ff9d;
   --dim: #1b6f3a;
   --acid: #b8ff6b;
@@ -448,9 +447,9 @@ body::after {
 }
 
 .evidence-toggle:hover,
-.evidence-toggle:focus,
+.evidence-toggle:focus-visible,
 .fix-toggle:hover,
-.fix-toggle:focus {
+.fix-toggle:focus-visible {
   background: rgba(118, 255, 157, 0.12);
   outline: 1px solid var(--acid);
 }
@@ -667,7 +666,7 @@ button {
 }
 
 button:hover,
-button:focus {
+button:focus-visible {
   background: rgba(118, 255, 157, 0.16);
   outline: 1px solid var(--acid);
 }

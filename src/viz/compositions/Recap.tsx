@@ -13,13 +13,8 @@ import { AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig } fr
 import { FPS } from './timing';
 import type { RevealFinding } from './Reveal';
 import { harnessTheme } from '../harnessTheme';
-
-const BG = '#020403';
-const GREEN = '#76ff9d';
-const ACID = '#b8ff6b';
-const AMBER = '#ff5a37';
-const DIM = '#1b6f3a';
-const MONO = 'WardenMono, Menlo, Consolas, monospace';
+// Phosphor language — single source in ./palette (mirrors style.css tokens).
+import { BG, GREEN, ACID, AMBER, DIM, MONO } from './palette';
 
 // Harness identity from the SINGLE source (harnessTheme.ts) — pure, so it stays
 // in this lazy chunk without pulling anything onto the summon hot path.
