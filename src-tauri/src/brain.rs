@@ -3,7 +3,8 @@ use crate::featurizer;
 use crate::ir::*;
 use crate::redaction::excerpt;
 use crate::store::Store;
-use crate::util::{hash64, stable_id};
+use crate::util::{brain_api_key, brain_diagnose_model, brain_effort, brain_responses_url,
+                  brain_verify_model, hash64, stable_id};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -36,7 +37,7 @@ impl Brain {
         Self {
             store,
             client,
-            api_key: std::env::var("SAKANA_API_KEY").ok(),
+            api_key: brain_api_key(),
             app: None,
         }
     }
@@ -247,8 +248,8 @@ impl Brain {
         let out: DiagnosticianOutput = self
             .call_json(
                 "diagnostician",
-                "fugu-ultra",
-                "xhigh",
+                &brain_diagnose_model(),
+                &brain_effort(true),
                 serde_json::to_value(schema_for!(DiagnosticianOutput))?,
                 &input,
             )
@@ -296,8 +297,8 @@ impl Brain {
         let out: DiagnosticianOutput = self
             .call_json(
                 "diagnostician_compact",
-                "fugu",
-                "high",
+                &brain_diagnose_model(),
+                &brain_effort(false),
                 serde_json::to_value(schema_for!(DiagnosticianOutput))?,
                 &input,
             )
@@ -344,8 +345,8 @@ impl Brain {
         });
         self.call_json(
             "coach",
-            "fugu-ultra",
-            "xhigh",
+            &brain_diagnose_model(),
+            &brain_effort(true),
             serde_json::to_value(schema_for!(CoachOutput))?,
             &input,
         )
@@ -359,8 +360,8 @@ impl Brain {
         });
         self.call_json(
             "verifier",
-            "fugu",
-            "high",
+            &brain_verify_model(),
+            &brain_effort(false),
             serde_json::to_value(schema_for!(VerifyOutput))?,
             &input,
         )
@@ -568,7 +569,7 @@ impl Brain {
             .arg("Accept-Encoding: identity")
             .arg("--data-binary")
             .arg("@-")
-            .arg("https://api.sakana.ai/v1/responses")
+            .arg(brain_responses_url())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -600,7 +601,7 @@ impl Brain {
 
     fn send_fugu(&self, body: &Value) -> reqwest::RequestBuilder {
         self.client
-            .post("https://api.sakana.ai/v1/responses")
+            .post(brain_responses_url())
             .bearer_auth(self.api_key.as_ref().expect("checked before Fugu call"))
             .header(header::ACCEPT, "application/json")
             // The Responses SSE endpoint has intermittently returned compressed chunks that
