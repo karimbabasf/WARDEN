@@ -16,4 +16,4 @@ status.sh
 
 # playwright-mcp + viz verification artifacts
 .playwright-mcp/
-/warden-warroom-*.png
+/warden-*.png
