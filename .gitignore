@@ -1,0 +1,10 @@
+/target
+/src-tauri/target
+/node_modules
+/dist
+/src-tauri/gen
+/.env
+.DS_Store
+*.log
+.build_prompt.txt
+.resume_prompt.txt

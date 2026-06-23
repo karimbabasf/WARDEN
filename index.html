@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WARDEN</title>
+  </head>
+  <body>
+    <canvas id="war-room"></canvas>
+    <main id="terminal" aria-label="WARDEN terminal overlay">
+      <section class="chrome">
+        <div class="sigil">WARDEN</div>
+        <div class="status" id="status">cold boot</div>
+      </section>
+      <section id="screen" class="screen" role="log" aria-live="polite"></section>
+      <form id="prompt" autocomplete="off">
+        <span class="chevron">&gt;</span>
+        <input id="command" autofocus spellcheck="false" value="what's wrong with how I use my agents?" />
+        <button type="submit">RUN</button>
+      </form>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

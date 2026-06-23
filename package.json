@@ -1,0 +1,22 @@
+{
+  "name": "warden",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc && vite build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.0",
+    "animejs": "^4.2.0",
+    "three": "^0.181.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0",
+    "@types/three": "^0.181.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
+  }
+}
