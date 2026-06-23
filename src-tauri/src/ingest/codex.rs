@@ -123,10 +123,22 @@ impl Adapter for CodexAdapter {
         start_offset: u64,
         raw_hash: u64,
     ) -> Result<Vec<SessionBatch>> {
-        if start_offset > 0 {
-            anyhow::bail!("incremental tail parse lands in Task 4");
-        }
-        let batch = parse_file(path, bytes, raw_hash)?;
+        // offset 0 → full parse (session_meta is present, resolves external_id).
+        // offset > 0 → incremental tail: `bytes` is the slice starting at
+        // `start_offset`. No `session_meta` is in the slice, so the session is
+        // derived from the path (`external_id_from_filename`) and every line's
+        // local offset is shifted to an ABSOLUTE position by `start_offset`.
+        let batch = if start_offset == 0 {
+            parse_file(path, bytes, raw_hash)?
+        } else {
+            parse_slice(
+                path,
+                bytes,
+                start_offset,
+                raw_hash,
+                Some(external_id_from_filename(path)),
+            )?
+        };
         Ok(vec![batch])
     }
 
@@ -165,11 +177,34 @@ fn external_id_from_filename(path: &Path) -> String {
     }
 }
 
+/// Full (offset-0) parse: `session_meta` is present, so the external id is
+/// resolved from the records (falling back to the filename uuid).
 fn parse_file(path: &Path, bytes: &[u8], raw_hash: u64) -> Result<SessionBatch> {
+    parse_slice(path, bytes, 0, raw_hash, None)
+}
+
+/// Core parser shared by the full parse and the incremental tail.
+///
+/// * `base_offset` is added to every line's local byte position so `RawRef.offset`
+///   and the returned watermark are ABSOLUTE positions in the on-disk file. For a
+///   full parse it is 0; for a tail parse it is the saved watermark (`bytes` is the
+///   slice from that offset to EOF).
+/// * `external_id_override` short-circuits session-id resolution. A tail slice has
+///   no `session_meta`, so the caller passes the path-derived id; this keeps the
+///   tail's `Session::id` identical to the original full-parse session id (same
+///   `stable_id` inputs), so events/turns attach to the already-backfilled row.
+fn parse_slice(
+    path: &Path,
+    bytes: &[u8],
+    base_offset: u64,
+    raw_hash: u64,
+    external_id_override: Option<String>,
+) -> Result<SessionBatch> {
     // Track the byte position of each line's start into `offset` so RawRef and the
-    // persisted watermark agree (FSEvents coalesces writes — Task 4 seeks to this
-    // byte offset and reads to EOF). `line_no` is 1-based.
-    let mut offset = 0u64;
+    // persisted watermark agree (FSEvents coalesces writes — we seek to this byte
+    // offset and read to EOF). `line_no` is 1-based within the slice. `offset`
+    // starts at `base_offset` so positions are absolute in the file.
+    let mut offset = base_offset;
     let mut line_no = 0u32;
     let mut raw_records: Vec<(u64, u32, Value)> = Vec::new();
     for raw_line in bytes.split_inclusive(|b| *b == b'\n') {
@@ -188,20 +223,23 @@ fn parse_file(path: &Path, bytes: &[u8], raw_hash: u64) -> Result<SessionBatch> 
         anyhow::bail!("empty jsonl");
     }
 
-    // Resolve the session external id from the first `session_meta` record (the
-    // canonical source); fall back to the rollout filename uuid when absent.
-    let external_id = raw_records
-        .iter()
-        .find_map(|(_, _, v)| {
-            if v.get("type").and_then(Value::as_str) == Some("session_meta") {
-                v.pointer("/payload/id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| external_id_from_filename(path));
+    // Resolve the session external id. A tail parse passes an override (the
+    // session_meta record is not in the slice); otherwise take it from the first
+    // `session_meta` record, falling back to the rollout filename uuid.
+    let external_id = external_id_override.unwrap_or_else(|| {
+        raw_records
+            .iter()
+            .find_map(|(_, _, v)| {
+                if v.get("type").and_then(Value::as_str) == Some("session_meta") {
+                    v.pointer("/payload/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| external_id_from_filename(path))
+    });
 
     let sid = stable_id(&["codex", &external_id, &path.to_string_lossy()]);
 
@@ -782,6 +820,21 @@ mod tests {
             "SystemNotice subtype must be '{{type}}/{{payload.type}}'"
         );
 
+        // The `turn_aborted` record maps to Event::Error{source:"codex",message:"turn_aborted"}.
+        let (err_source, err_message) = b
+            .events
+            .iter()
+            .find_map(|e| match &e.event {
+                Event::Error { source, message } => Some((source.clone(), message.clone())),
+                _ => None,
+            })
+            .expect("turn_aborted must produce an Error event");
+        assert_eq!(err_source, "codex", "Error.source must be 'codex'");
+        assert_eq!(
+            err_message, "turn_aborted",
+            "Error.message must be 'turn_aborted'"
+        );
+
         // TokenUsage equals the per-event last_token_usage numbers.
         let (input, output, cache_read, cache_creation) = b
             .events
@@ -947,18 +1000,97 @@ mod tests {
         assert_eq!(first.0, 1, "exactly one session ingested");
     }
 
-    /// `parse_range` with a non-zero start offset is reserved for the Task 4
-    /// incremental tail and must error today.
+    /// Incremental tail parse: starting from the EOF offset of the original file,
+    /// appending exactly one `agent_message` line and parsing only the appended
+    /// slice yields exactly ONE new event whose absolute `RawRef.offset` equals
+    /// the original EOF (the start of the appended line) and whose text matches.
     #[test]
-    fn parse_range_nonzero_offset_errors() {
+    fn parse_range_incremental_offset_yields_only_appended_event() {
+        // Use a realistically-named rollout file: its filename encodes the SAME
+        // session uuid as the in-file `session_meta.payload.id`. This is what real
+        // Codex rollouts do, and it is what lets a tail parse (which derives the id
+        // from the filename) land on the SAME session id as the full backfill.
+        let src = fixture("codex_rollout_sample.jsonl");
+        let original = std::fs::read(&src).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(
+            "rollout-2026-06-19T16-33-00-019ee0ba-8295-7ba0-9971-c5af95e77191.jsonl",
+        );
+        std::fs::write(&path, &original).unwrap();
+        let original_eof = original.len() as u64;
+
+        // Parse the original fully to know the baseline event count.
+        let base = parse_file(&path, &original, hash64(&original)).unwrap();
+        let base_eof = base.offset;
+        assert_eq!(base_eof, original_eof, "baseline watermark must be EOF");
+
+        // Append one new agent_message line to the byte buffer (simulating a write).
+        let appended_line =
+            b"{\"timestamp\":\"2026-06-19T16:50:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"freshly appended\"}}\n";
+        let mut full = original.clone();
+        full.extend_from_slice(appended_line);
+
+        // Tail parse: feed ONLY the appended slice with start_offset = original EOF.
+        let slice = &full[original_eof as usize..];
         let store = Store::memory().unwrap();
         let adapter = CodexAdapter::with_root(
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/archived"),
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
             store,
         );
-        let res = adapter.parse_range(Path::new("/tmp/x.jsonl"), b"{}", 42, 0);
-        assert!(res.is_err(), "non-zero offset must error until Task 4");
+        let batches = adapter
+            .parse_range(&path, slice, original_eof, hash64(&full))
+            .expect("tail parse_range ok");
+        assert_eq!(batches.len(), 1, "tail parse yields one session batch");
+        let b = &batches[0];
+
+        // Exactly one new event (the appended agent_message → AssistantText).
+        assert_eq!(
+            b.events.len(),
+            1,
+            "exactly one appended event, got kinds: {:?}",
+            b.events.iter().map(|e| e.event.kind_name()).collect::<Vec<_>>()
+        );
+        let ev = &b.events[0];
+        assert!(
+            matches!(&ev.event, Event::AssistantText { text } if text == "freshly appended"),
+            "appended event must be the AssistantText we wrote"
+        );
+
+        // Absolute offset must equal the original EOF (start of the appended line).
+        assert_eq!(
+            ev.raw_ref.offset, original_eof,
+            "RawRef.offset must be ABSOLUTE (start_offset + local), i.e. original EOF"
+        );
+        // The returned watermark must equal the new full length.
+        assert_eq!(
+            b.offset,
+            full.len() as u64,
+            "tail watermark must advance to the new EOF"
+        );
+        // Session id must match the full-parse session id (derived from the same path).
+        assert_eq!(
+            b.session.id, base.session.id,
+            "tail-derived session id must equal the full-parse session id"
+        );
+    }
+
+    /// A tail parse has no `session_meta` in its slice, so the derived
+    /// `external_id` must fall back to the filename ULID — exercising
+    /// `external_id_from_filename`.
+    #[test]
+    fn external_id_from_filename_recovers_uuid_tail() {
+        let p = PathBuf::from(
+            "/Users/x/.codex/sessions/2026/06/19/rollout-2026-06-19T09-33-00-019ee0ba-8295-7ba0-9971-c5af95e77191.jsonl",
+        );
+        assert_eq!(
+            external_id_from_filename(&p),
+            "019ee0ba-8295-7ba0-9971-c5af95e77191",
+            "filename fallback must recover the trailing uuid"
+        );
+        // No uuid tail → stem is returned verbatim.
+        let q = PathBuf::from("/tmp/weird-name.jsonl");
+        assert_eq!(external_id_from_filename(&q), "weird-name");
     }
 
     /// `roots()` returns both the live and archived session roots.

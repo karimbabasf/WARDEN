@@ -71,7 +71,27 @@ impl Store {
     ) -> Result<()> {
         let mut c = self.conn();
         let tx = c.transaction()?;
-        tx.execute("INSERT INTO sessions(id,harness,external_id,project_json,model_ids_json,started_at,ended_at,source_path,raw_hash,ingested_at,meta_json) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_json=excluded.project_json,model_ids_json=excluded.model_ids_json,started_at=excluded.started_at,ended_at=excluded.ended_at,raw_hash=excluded.raw_hash,ingested_at=excluded.ingested_at,meta_json=excluded.meta_json", params![session.id, session.harness.as_str(), session.external_id, serde_json::to_string(&session.project)?, serde_json::to_string(&session.model_ids)?, session.started_at.to_rfc3339(), session.ended_at.map(|d| d.to_rfc3339()), session.source_path.to_string_lossy(), session.raw_hash as i64, session.ingested_at.to_rfc3339(), serde_json::to_string(&session.meta)?])?;
+        // Merge-safe upsert: a later *tail* parse (offset>0) synthesizes a session
+        // with sparse fields (no session_meta → empty model_ids, default meta, a
+        // later started_at, null project). It must NOT clobber the good values an
+        // earlier backfill wrote. So each field is merged monotonically:
+        //   project/model_ids/meta → keep existing when the incoming value is the
+        //     "empty" sentinel (null / '[]' / default meta);
+        //   started_at → MIN (true session start wins); ended_at → MAX (extend);
+        //   raw_hash/ingested_at → always take the latest (reflect current file).
+        // Backfill is unaffected: it has no prior row, or arrives with full data.
+        tx.execute(
+            "INSERT INTO sessions(id,harness,external_id,project_json,model_ids_json,started_at,ended_at,source_path,raw_hash,ingested_at,meta_json) VALUES(?,?,?,?,?,?,?,?,?,?,?) \
+             ON CONFLICT(id) DO UPDATE SET \
+               project_json=CASE WHEN excluded.project_json IN ('null','') THEN sessions.project_json ELSE excluded.project_json END, \
+               model_ids_json=CASE WHEN excluded.model_ids_json IN ('[]','') THEN sessions.model_ids_json ELSE excluded.model_ids_json END, \
+               started_at=MIN(sessions.started_at, excluded.started_at), \
+               ended_at=MAX(COALESCE(sessions.ended_at, excluded.ended_at), COALESCE(excluded.ended_at, sessions.ended_at)), \
+               raw_hash=excluded.raw_hash, \
+               ingested_at=excluded.ingested_at, \
+               meta_json=CASE WHEN excluded.meta_json IN ('{\"ignored_record_types\":{}}','{}','') THEN sessions.meta_json ELSE excluded.meta_json END",
+            params![session.id, session.harness.as_str(), session.external_id, serde_json::to_string(&session.project)?, serde_json::to_string(&session.model_ids)?, session.started_at.to_rfc3339(), session.ended_at.map(|d| d.to_rfc3339()), session.source_path.to_string_lossy(), session.raw_hash as i64, session.ingested_at.to_rfc3339(), serde_json::to_string(&session.meta)?],
+        )?;
         for t in turns {
             tx.execute("INSERT INTO turns(id,session_id,parent_id,role,idx,started_at,duration_ms,is_sidechain) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET duration_ms=COALESCE(excluded.duration_ms, turns.duration_ms), idx=excluded.idx", params![t.id,t.session_id,t.parent_id,format!("{:?}",t.role).to_lowercase(),t.index,t.started_at.to_rfc3339(),t.duration_ms.map(|x| x as i64), if t.is_sidechain{1}else{0}])?;
         }
@@ -85,6 +105,20 @@ impl Store {
         tx.execute("INSERT INTO watermarks(source_path,offset,rowid,cursor,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(source_path) DO UPDATE SET offset=excluded.offset, updated_at=excluded.updated_at", params![session.source_path.to_string_lossy(), watermark_offset as i64, 0i64, Option::<String>::None, Utc::now().to_rfc3339()])?;
         tx.commit()?;
         Ok(())
+    }
+    /// Byte watermark for a source file: the absolute offset up to which we have
+    /// already ingested. Returns 0 when the file has never been seen, so callers
+    /// read the whole file on first sight and only `bytes[offset..]` thereafter.
+    pub fn watermark_offset(&self, path: &Path) -> Result<u64> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT offset FROM watermarks WHERE source_path=?",
+                [path.to_string_lossy().to_string()],
+                |r| Ok(r.get::<_, i64>(0)? as u64),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
     pub fn source_raw_hash(&self, path: &Path) -> Result<Option<u64>> {
         self.conn()

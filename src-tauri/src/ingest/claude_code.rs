@@ -85,10 +85,20 @@ impl Adapter for ClaudeCodeAdapter {
         start_offset: u64,
         raw_hash: u64,
     ) -> Result<Vec<SessionBatch>> {
-        if start_offset > 0 {
-            anyhow::bail!("incremental tail parse lands in Task 4");
-        }
-        let batch = parse_file(path, bytes, raw_hash)?;
+        // offset 0 → full parse (the first record carries `sessionId`).
+        // offset > 0 → incremental tail: `bytes` is the slice from `start_offset`
+        // to EOF. The slice has no first-record `sessionId`, so the session is
+        // derived from the file stem and every line's local offset is shifted to
+        // an ABSOLUTE position by `start_offset` (matching the full-parse ids).
+        let batch = if start_offset == 0 {
+            parse_file(path, bytes, raw_hash)?
+        } else {
+            let external_id = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| stable_id(&[&path.to_string_lossy()]));
+            parse_slice(path, bytes, start_offset, raw_hash, Some(external_id))?
+        };
         Ok(vec![batch])
     }
 
@@ -116,12 +126,35 @@ pub fn ingest_all(
     Ok((sessions, events))
 }
 
+/// Full (offset-0) parse: the first record carries `sessionId`, which resolves
+/// the external id (falling back to the file stem).
 fn parse_file(path: &Path, bytes: &[u8], raw_hash: u64) -> Result<SessionBatch> {
-    let mut offset = 0u64;
+    parse_slice(path, bytes, 0, raw_hash, None)
+}
+
+/// Core parser shared by the full parse and the incremental tail.
+///
+/// * `base_offset` is added to every line's local byte position so `RawRef.offset`
+///   and the returned watermark are ABSOLUTE positions in the on-disk file (0 for
+///   a full parse; the saved watermark for a tail, where `bytes` is the slice from
+///   that offset to EOF).
+/// * `external_id_override` short-circuits session-id resolution. A tail slice has
+///   no first-record `sessionId`, so the caller passes the file-stem id. Because a
+///   Claude transcript filename IS its session UUID, this yields the SAME
+///   `stable_id` as the full parse — so tail events attach to the backfilled row.
+fn parse_slice(
+    path: &Path,
+    bytes: &[u8],
+    base_offset: u64,
+    raw_hash: u64,
+    external_id_override: Option<String>,
+) -> Result<SessionBatch> {
+    let mut offset = base_offset;
     let mut line_no = 0u32;
     let mut raw_records: Vec<(u64, u32, Value)> = Vec::new();
     // Parse directly from the bytes we already read (avoids a redundant file re-read).
-    // `offset` tracks the byte position of each line's start, preserving RawRef semantics.
+    // `offset` tracks the ABSOLUTE byte position of each line's start (= base_offset
+    // + bytes seen so far), preserving RawRef semantics across incremental tails.
     for raw_line in bytes.split_inclusive(|b| *b == b'\n') {
         line_no += 1;
         let line_len = raw_line.len() as u64;
@@ -138,12 +171,14 @@ fn parse_file(path: &Path, bytes: &[u8], raw_hash: u64) -> Result<SessionBatch> 
         .first()
         .map(|(_, _, v)| v)
         .context("empty jsonl")?;
-    let external_id = first
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()))
-        .unwrap_or_else(|| stable_id(&[&path.to_string_lossy()]));
+    let external_id = external_id_override.unwrap_or_else(|| {
+        first
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()))
+            .unwrap_or_else(|| stable_id(&[&path.to_string_lossy()]))
+    });
     let sid = stable_id(&["claude_code", &external_id, &path.to_string_lossy()]);
     let mut turns = Vec::new();
     let mut events = Vec::new();
@@ -657,6 +692,60 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(&e.event, Event::AssistantText { text } if text == "plain answer")));
+    }
+
+    /// Incremental tail parse (Claude): appending one `assistant` line and
+    /// parsing only the appended slice at the original EOF offset yields only the
+    /// appended events, each with an ABSOLUTE `RawRef.offset` ≥ the original EOF.
+    #[test]
+    fn parse_range_incremental_offset_yields_only_appended_events() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        let original = b"{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"s\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
+        std::fs::write(&p, original as &[u8]).unwrap();
+        let original_eof = original.len() as u64;
+
+        // Append one assistant line carrying a single AssistantText.
+        let appended = b"{\"type\":\"assistant\",\"uuid\":\"a1\",\"parentUuid\":\"u1\",\"sessionId\":\"s\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude\",\"content\":\"appended answer\"}}\n";
+        let mut full = original.to_vec();
+        full.extend_from_slice(appended);
+
+        let store = Store::memory().unwrap();
+        let adapter = ClaudeCodeAdapter::with_root(dir.path().to_path_buf(), store);
+        let slice = &full[original_eof as usize..];
+        let batches = adapter
+            .parse_range(&p, slice, original_eof, hash64(&full))
+            .expect("tail parse_range ok");
+        assert_eq!(batches.len(), 1);
+        let b = &batches[0];
+
+        // Only the appended AssistantText event is present (the original user line is not in the slice).
+        assert!(
+            b.events
+                .iter()
+                .any(|e| matches!(&e.event, Event::AssistantText { text } if text == "appended answer")),
+            "appended AssistantText must be parsed"
+        );
+        assert!(
+            !b.events.iter().any(|e| matches!(e.event, Event::UserPrompt { .. })),
+            "the original user prompt is outside the slice and must not reappear"
+        );
+
+        // Every appended event's offset is ABSOLUTE (≥ original EOF).
+        for e in &b.events {
+            assert!(
+                e.raw_ref.offset >= original_eof,
+                "RawRef.offset must be absolute (start_offset + local); got {} < {}",
+                e.raw_ref.offset,
+                original_eof
+            );
+            assert_eq!(
+                full[e.raw_ref.offset as usize], b'{',
+                "absolute offset must point at the appended line start"
+            );
+        }
+        // Watermark advances to the new EOF.
+        assert_eq!(b.offset, full.len() as u64, "watermark advances to new EOF");
     }
 
     #[test]

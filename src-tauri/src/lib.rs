@@ -7,6 +7,7 @@ pub mod ingest;
 pub mod ir;
 pub mod redaction;
 pub mod scaffold;
+pub mod scheduler;
 pub mod store;
 pub mod util;
 
@@ -23,6 +24,17 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let state = AppState::init().map_err(|e| format!("state init: {e}"))?;
+            // Spawn live FSEvents watchers (one per adapter root) before managing
+            // state, using a clone of the store. Best-effort: a watch failure logs
+            // and does not abort startup — backfill + on-ask ingest still work.
+            let registry =
+                std::sync::Arc::new(ingest::AdapterRegistry::new(state.store.clone()));
+            match scheduler::spawn_watchers(registry, state.store.clone(), app.handle().clone()) {
+                Ok(watchers) => {
+                    app.manage(scheduler::WatcherGuard::new(watchers));
+                }
+                Err(e) => tracing::warn!(error=%format!("{e:#}"), "live watchers failed to start"),
+            }
             app.manage(state);
             let handle = app.handle().clone();
             let shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);

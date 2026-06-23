@@ -44,6 +44,19 @@ impl AdapterRegistry {
         Self { adapters }
     }
 
+    /// Build a registry from an explicit adapter list. Used by the scheduler's
+    /// cross-module tests (and any caller that needs a bespoke root set) since the
+    /// `adapters` field is private.
+    pub fn from_adapters(adapters: Vec<Box<dyn Adapter>>) -> Self {
+        Self { adapters }
+    }
+
+    /// Test-only alias for [`Self::from_adapters`].
+    #[doc(hidden)]
+    pub fn for_test(adapters: Vec<Box<dyn Adapter>>) -> Self {
+        Self::from_adapters(adapters)
+    }
+
     pub fn adapters(&self) -> &[Box<dyn Adapter>] {
         &self.adapters
     }
@@ -177,15 +190,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_range_nonzero_offset_errors() {
+    fn parse_range_nonzero_offset_parses_tail_slice() {
+        // Task 4 lit up the tail path: a non-zero start offset now parses the
+        // appended slice (no longer an error). Feed one appended assistant line
+        // with start_offset = original EOF; expect exactly that event back, with
+        // an absolute RawRef.offset equal to the start offset.
         let dir = tempdir().unwrap();
         let p = dir.path().join("s.jsonl");
-        std::fs::write(&p, b"dummy" as &[u8]).unwrap();
+        let original = b"{\"type\":\"user\",\"uuid\":\"u\",\"sessionId\":\"s\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{\"content\":\"hi\"}}\n";
+        std::fs::write(&p, original as &[u8]).unwrap();
+        let eof = original.len() as u64;
+        let appended = b"{\"type\":\"assistant\",\"uuid\":\"a\",\"parentUuid\":\"u\",\"sessionId\":\"s\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude\",\"content\":\"tail\"}}\n";
         let store = Store::memory().unwrap();
         let adapter =
             crate::ingest::claude_code::ClaudeCodeAdapter::with_root(dir.path().to_path_buf(), store);
-        let result = adapter.parse_range(&p, b"dummy", 100, 0);
-        assert!(result.is_err(), "non-zero offset must error until Task 4");
+        let batches = adapter
+            .parse_range(&p, appended, eof, 0)
+            .expect("tail slice parses");
+        assert_eq!(batches.len(), 1);
+        let ev = batches[0]
+            .events
+            .iter()
+            .find(|e| matches!(&e.event, Event::AssistantText { text } if text == "tail"))
+            .expect("appended AssistantText present");
+        assert_eq!(ev.raw_ref.offset, eof, "tail offset must be absolute");
     }
 
     #[test]

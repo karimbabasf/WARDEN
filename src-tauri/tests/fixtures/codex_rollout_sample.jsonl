@@ -11,3 +11,4 @@
 {"timestamp":"2026-06-19T16:42:48.769Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call_xyz","turn_id":"t1","stdout":"Success. Updated the following files:\nA src-tauri/src/foo.rs\n","stderr":"","success":true,"changes":{"/Users/karimbaba/Developer/Agent Organization/src-tauri/src/foo.rs":{"type":"add","content":"fn foo(){}\n"}}}}
 {"timestamp":"2026-06-19T16:42:49.000Z","type":"event_msg","payload":{"type":"some_future_event","turn_id":"t1","detail":"schema drift never drops a session"}}
 {"timestamp":"2026-06-19T16:42:50.343Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":null,"completed_at":1781886827,"duration_ms":1508}}
+{"timestamp":"2026-06-19T16:42:51.000Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1","reason":"interrupted"}}
