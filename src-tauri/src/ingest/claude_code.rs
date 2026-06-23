@@ -77,6 +77,24 @@ impl Adapter for ClaudeCodeAdapter {
         }
         Ok(out)
     }
+
+    fn parse_range(
+        &self,
+        path: &std::path::Path,
+        bytes: &[u8],
+        start_offset: u64,
+        raw_hash: u64,
+    ) -> Result<Vec<SessionBatch>> {
+        if start_offset > 0 {
+            anyhow::bail!("incremental tail parse lands in Task 4");
+        }
+        let batch = parse_file(path, bytes, raw_hash)?;
+        Ok(vec![batch])
+    }
+
+    fn roots(&self) -> Vec<std::path::PathBuf> {
+        vec![self.root.clone()]
+    }
 }
 
 pub fn ingest_all(

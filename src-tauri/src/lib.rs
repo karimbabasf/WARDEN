@@ -2,6 +2,7 @@ pub mod brain;
 pub mod commands;
 pub mod detectors;
 pub mod featurizer;
+pub mod harness_theme;
 pub mod ingest;
 pub mod ir;
 pub mod redaction;
