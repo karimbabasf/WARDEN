@@ -1,4 +1,5 @@
 pub mod claude_code;
+pub mod codex;
 
 use crate::ir::*;
 use anyhow::Result;
@@ -36,9 +37,10 @@ pub struct AdapterRegistry {
 
 impl AdapterRegistry {
     pub fn new(store: crate::store::Store) -> Self {
-        let mut adapters: Vec<Box<dyn Adapter>> = Vec::new();
-        adapters.push(Box::new(claude_code::ClaudeCodeAdapter::new(store)));
-        // Task 3: register CodexAdapter here
+        let adapters: Vec<Box<dyn Adapter>> = vec![
+            Box::new(claude_code::ClaudeCodeAdapter::new(store.clone())),
+            Box::new(codex::CodexAdapter::new(store)),
+        ];
         Self { adapters }
     }
 

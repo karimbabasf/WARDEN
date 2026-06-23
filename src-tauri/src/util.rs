@@ -40,6 +40,16 @@ pub fn default_claude_projects() -> PathBuf {
         .map(|s| expand_tilde(&s))
         .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".claude/projects"))
 }
+pub fn default_codex_sessions() -> PathBuf {
+    std::env::var("WARDEN_CODEX_SESSIONS")
+        .map(|s| expand_tilde(&s))
+        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".codex/sessions"))
+}
+pub fn default_codex_archived_sessions() -> PathBuf {
+    std::env::var("WARDEN_CODEX_ARCHIVED_SESSIONS")
+        .map(|s| expand_tilde(&s))
+        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".codex/archived_sessions"))
+}
 pub fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p).with_context(|| format!("create {}", p.display()))?;
