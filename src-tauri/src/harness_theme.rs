@@ -61,6 +61,7 @@ mod tests {
         let t = harness_theme(&Harness::Cursor);
         assert_eq!(t.color, "#8a9099");
         assert_eq!(t.glyph, "●");
+        assert!(!t.label.is_empty());
     }
 
     #[test]
@@ -68,5 +69,6 @@ mod tests {
         let t = harness_theme(&Harness::Hermes);
         assert_eq!(t.color, "#8a9099");
         assert_eq!(t.glyph, "●");
+        assert!(!t.label.is_empty());
     }
 }

@@ -105,7 +105,7 @@ mod tests {
         );
         adapter.max_files = None;
         // Create registry manually with the temp-root adapter
-        let mut registry = AdapterRegistry {
+        let registry = AdapterRegistry {
             adapters: vec![Box::new(adapter)],
         };
         let summary = registry.backfill_all(&store);
@@ -195,5 +195,68 @@ mod tests {
         let roots = adapter.roots();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0], dir.path());
+    }
+
+    /// A test-only adapter that always fails on backfill.
+    struct FailingAdapter;
+
+    impl Adapter for FailingAdapter {
+        fn harness(&self) -> Harness {
+            Harness::Generic("fail".into())
+        }
+        fn detect(&self) -> anyhow::Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
+        fn backfill(&self) -> anyhow::Result<Vec<SessionBatch>> {
+            anyhow::bail!("boom")
+        }
+        fn parse_range(
+            &self,
+            _path: &Path,
+            _bytes: &[u8],
+            _start_offset: u64,
+            _raw_hash: u64,
+        ) -> anyhow::Result<Vec<SessionBatch>> {
+            anyhow::bail!("boom")
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn backfill_all_continues_past_failing_adapter() {
+        // Registry: [FailingAdapter, ClaudeCodeAdapter(empty root)]
+        // After backfill_all: exactly 1 error AND the succeeding adapter's entry is present,
+        // proving the loop continued past the failure.
+        let dir = tempdir().unwrap();
+        let store = Store::memory().unwrap();
+        let succeeding = crate::ingest::claude_code::ClaudeCodeAdapter::with_root(
+            dir.path().to_path_buf(),
+            store.clone(),
+        );
+        let registry = AdapterRegistry {
+            adapters: vec![Box::new(FailingAdapter), Box::new(succeeding)],
+        };
+        let summary = registry.backfill_all(&store);
+
+        // The failing adapter must have produced exactly one error.
+        assert_eq!(
+            summary.errors.len(),
+            1,
+            "expected exactly 1 error from FailingAdapter; got: {:?}",
+            summary.errors
+        );
+
+        // The succeeding adapter must still have an entry in by_harness,
+        // proving the loop continued past the failure.
+        let has_claude_code_entry = summary
+            .by_harness
+            .iter()
+            .any(|(h, _, _)| matches!(h, Harness::ClaudeCode));
+        assert!(
+            has_claude_code_entry,
+            "ClaudeCodeAdapter entry missing — loop did not continue past FailingAdapter"
+        );
     }
 }
