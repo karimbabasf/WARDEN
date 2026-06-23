@@ -1,41 +1,11 @@
 import './style.css';
-import { animate } from 'animejs';
+import { animate, stagger } from 'animejs';
 import { mountWarRoom } from './viz/mount';
+import { renderDiagnosis as paintDiagnosis, type Diagnosis, type Finding, type FixPreview } from './diagnosis';
+import { harnessTheme } from './viz/harnessTheme';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-
-type Evidence = {
-  session_id: string;
-  turn_id?: string | null;
-  event_id?: string | null;
-  quote?: string | null;
-  source_path?: string | null;
-};
-
-type Finding = {
-  id: string;
-  pattern_id: string;
-  title: string;
-  severity: number;
-  frequency: number;
-  confidence: number;
-  est_cost_tokens: number;
-  est_cost_minutes: number;
-  rationale: string;
-  evidence: Evidence[];
-  verifier_verdict?: string | null;
-};
-
-type Diagnosis = {
-  id: string;
-  created_at: string;
-  ranked_findings: Finding[];
-  do_items: string[];
-  stop_items: string[];
-  narrative: string;
-  detector_only: boolean;
-};
 
 type HarnessRollup = {
   harness: string;
@@ -107,9 +77,57 @@ const bridge = mountWarRoom('war-room-root');
 let running = false;
 let latestStreamingLine: HTMLDivElement | null = null;
 
+// Harness provenance for the diagnosis screen. The web `Finding` carries no
+// harness field, but `candidates_nominated` tells us which harness each pattern
+// was nominated from — so we tag each rendered hole with its REAL harness
+// (color+glyph+label) instead of guessing. `scopeHarness` is the run's target
+// harness, used as the fallback when a finding has no nomination on record.
+const harnessByPattern = new Map<string, string>();
+let scopeHarness = 'claude_code';
+
+function harnessOf(f: Finding): string {
+  return harnessByPattern.get(f.pattern_id) ?? scopeHarness;
+}
+
+function fetchFixPreview(findingId: string): Promise<FixPreview> {
+  // Tauri v2 maps camelCase JS args → snake_case Rust params (`finding_id`).
+  return invoke<FixPreview>('get_fix_preview', { findingId });
+}
+
 function setStatus(text: string) {
   status.textContent = text;
   hudStage.textContent = text;
+}
+
+// Boot HUD per-harness breakdown (spec §5.3 step 1): render the `by_harness`
+// rollup as a phosphor strip under the totals — "◆ 47 Claude · ▲ 12 Codex" —
+// colour ALWAYS paired with the glyph + label (color-blind a11y).
+function renderHarnessBreakdown(rollup: HarnessRollup[]): void {
+  const live = rollup.filter(r => r.sessions > 0 || r.events > 0);
+  if (live.length === 0) return;
+  const strip = document.createElement('div');
+  strip.className = 'line muted harness-breakdown';
+  strip.append(document.createTextNode('  '));
+  live.forEach((r, i) => {
+    const t = harnessTheme(r.harness);
+    if (i > 0) strip.append(document.createTextNode(' · '));
+    const chip = document.createElement('span');
+    chip.className = 'breakdown-chip';
+    chip.style.setProperty('--harness', t.color);
+    chip.setAttribute('aria-label', `${r.sessions} ${t.label} sessions`);
+    const glyph = document.createElement('span');
+    glyph.className = 'breakdown-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = t.glyph;
+    const label = document.createElement('span');
+    label.className = 'breakdown-label';
+    label.textContent = `${r.sessions.toLocaleString()} ${t.label}`;
+    chip.append(glyph, label);
+    strip.appendChild(chip);
+  });
+  strip.append(document.createTextNode(' sessions'));
+  screen.appendChild(strip);
+  screen.scrollTop = screen.scrollHeight;
 }
 
 function formatCount(value: number | undefined) {
@@ -139,14 +157,6 @@ function html(markup: string) {
   return d;
 }
 
-function esc(s: string) {
-  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-}
-
-function shortId(value: string | undefined | null) {
-  return value ? value.slice(0, 10) : 'unknown';
-}
-
 async function boot() {
   line('▌ WARDEN v0.1 — mounting Claude Code memory spine…');
   setStatus('cold boot');
@@ -155,6 +165,7 @@ async function boot() {
     const profile = await invoke<Profile>('query_profile');
     updateHud(profile);
     line(`  MEMORY online: ${profile.session_count} sessions · ${profile.event_count.toLocaleString()} events · ${profile.finding_count} findings`, 'muted');
+    if (profile.by_harness?.length) renderHarnessBreakdown(profile.by_harness);
   } catch (e) {
     line(`  MEMORY cold: ${String(e)}`, 'warn');
   }
@@ -169,45 +180,36 @@ async function boot() {
   }
 
   line('  Ask: "what is wrong with how I use my agents?"');
-  line('  Press Esc to dismiss. Press ⌥Space to summon WARDEN.');
+  line('  Press Esc to dismiss. Press ⌘⇧Space to summon WARDEN.');
   line('  ');
   html('<span class="cursor" aria-hidden="true"></span>');
   animate('#terminal', { opacity: [0, 1], translateY: [12, 0], duration: 650, ease: 'outExpo' });
 }
 
+// Router → Diagnosis state. The cinematic slam-in is the R3F/Remotion reveal
+// (driven separately by `diagnosis_ready`); here we paint the PERSISTENT,
+// drill-downable readout into the terminal log via the pure `diagnosis.ts`
+// renderer, tagging each hole with its real harness and wiring the read-only
+// fix-preview fetch. A calm staggered fade-in echoes the reveal without
+// re-staging it.
 function renderDiagnosis(d: Diagnosis) {
   setStatus(d.detector_only ? 'detector-only diagnosis' : 'verified diagnosis ready');
   latestStreamingLine = null;
-  line('');
-  line('┌─ VERIFIED DIAGNOSIS ─────────────────────────────────────────┐');
-  line(`│ ${d.narrative.slice(0, 76).padEnd(76)} │`);
-  line('└───────────────────────────────────────────────────────────────┘');
 
-  d.ranked_findings.forEach((f, idx) => {
-    const pct = Math.max(8, Math.min(100, f.severity * 20));
-    const evidence = (f.evidence || [])
-      .slice(0, 3)
-      .map(e => `${esc(shortId(e.session_id))}${e.quote ? ` — ${esc(e.quote.slice(0, 150))}` : ''}`)
-      .join('<br/>');
-    html(`<article class="hole">
-      <div class="hole-head">
-        <h3>HOLE #${idx + 1} — ${esc(f.title || f.pattern_id)}</h3>
-        <span class="bar" style="--pct:${pct}%" title="severity ${f.severity}/5"></span>
-      </div>
-      <div>${esc(f.rationale)}</div>
-      <div class="evidence">confidence ${(f.confidence * 100).toFixed(0)}% · seen ${(f.frequency * 100).toFixed(0)}% · est ${Math.round(f.est_cost_tokens).toLocaleString()} tokens / ${Math.round(f.est_cost_minutes)} min<br/>Evidence:<br/>${evidence || 'detector evidence unavailable'}</div>
-      ${f.verifier_verdict ? `<div class="verdict">Verifier: ${esc(f.verifier_verdict.slice(0, 220))}</div>` : ''}
-    </article>`);
-  });
+  const root = paintDiagnosis(screen, d, { harnessOf, fetchFixPreview });
+  screen.scrollTop = screen.scrollHeight;
 
-  if (d.do_items?.length) {
-    line('DO:', 'muted');
-    d.do_items.forEach(x => line(`  ✓ ${x}`));
+  const holes = root.querySelectorAll('.diag-hole');
+  if (holes.length) {
+    animate(holes, {
+      opacity: [0, 1],
+      translateX: [-18, 0],
+      delay: stagger(90, { start: 80 }),
+      duration: 460,
+      ease: 'outExpo',
+    });
   }
-  if (d.stop_items?.length) {
-    line('STOP:', 'warn');
-    d.stop_items.forEach(x => line(`  ✗ ${x}`));
-  }
+  animate(root.querySelector('.diag-header') ?? root, { opacity: [0, 1], duration: 380, ease: 'outQuad' });
 }
 
 function setRunning(value: boolean) {
@@ -228,10 +230,14 @@ form.addEventListener('submit', async ev => {
   setRunning(true);
   setStatus('ingesting transcripts');
   line('  Diagnostician entering war room…');
+  // Fresh run: forget the previous run's nominations so harness tags reflect
+  // THIS diagnosis only.
+  harnessByPattern.clear();
+  scopeHarness = 'claude_code';
 
   try {
     const d = await invoke<Diagnosis>('run_diagnosis', {
-      scope: { harness: 'claude_code', query: q, force: false, max_files: null }
+      scope: { harness: scopeHarness, query: q, force: false, max_files: null }
     });
     renderDiagnosis(d);
   } catch (e) {
@@ -266,15 +272,26 @@ listen<{ phase: string; status: string }>('diagnosis_status', e => {
 });
 
 // Task-6: candidate nominations spawn war-room nodes (real candidate count).
+// We also record each pattern's source harness so the diagnosis screen can tag
+// every hole with its REAL harness identity (color+glyph+label).
 listen<CandidatesNominated>('candidates_nominated', e => {
   bridge.ingest('candidates_nominated', e.payload);
-  const n = e.payload?.candidates?.length ?? 0;
+  const candidates = e.payload?.candidates ?? [];
+  candidates.forEach(c => {
+    if (c.pattern_id && c.harness) harnessByPattern.set(c.pattern_id, c.harness);
+  });
+  const n = candidates.length;
   setStatus(`nominated · ${n} candidate${n === 1 ? '' : 's'}`);
 });
 
 // Task-6: per-finding verdicts drive the core flare (confirmed) / collapse (refuted).
 listen<FindingVerdict>('finding_verdict', e => {
   bridge.ingest('finding_verdict', e.payload);
+  // Backstop the harness map: a verdict names the pattern + harness, so even if
+  // a nomination event was missed the rendered hole still tags the right harness.
+  if (e.payload.pattern_id && e.payload.harness) {
+    harnessByPattern.set(e.payload.pattern_id, e.payload.harness);
+  }
 });
 
 listen<{ id: string; finding_count: number }>('diagnosis_ready', e => {

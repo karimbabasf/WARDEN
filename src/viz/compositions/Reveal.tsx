@@ -13,6 +13,7 @@
 
 import { AbsoluteFill, Sequence, interpolate, spring, useCurrentFrame, useVideoConfig } from 'remotion';
 import { FPS, INTRO_FRAMES, revealDuration } from './timing';
+import { harnessTheme } from '../harnessTheme';
 
 // ── phosphor language (mirrors style.css tokens) ─────────────────────────────
 const BG = '#020403';
@@ -22,13 +23,11 @@ const AMBER = '#ff5a37'; // verdict amber (matches war-room CORE_CONFIRM)
 const DIM = '#1b6f3a';
 const MONO = 'WardenMono, Menlo, Consolas, monospace';
 
-// Harness identity, paired colour + glyph + label (single source mirrors
-// harnessTheme.ts; inlined so the lazy reveal chunk has zero extra imports).
-function harnessBadge(h: string): { color: string; glyph: string; label: string } {
-  if (h === 'codex') return { color: '#b98cff', glyph: '▲', label: 'Codex' };
-  if (h === 'claude_code') return { color: '#3dffa0', glyph: '◆', label: 'Claude' };
-  return { color: GREEN, glyph: '●', label: 'Unknown' };
-}
+// Harness identity (paired colour + glyph + label) comes from the SINGLE source
+// in harnessTheme.ts. That module is pure — no React/Remotion import — so it
+// stays inside this lazy reveal chunk without dragging anything onto the summon
+// hot path.
+const harnessBadge = harnessTheme;
 
 export type RevealFinding = {
   title: string;

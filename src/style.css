@@ -12,6 +12,10 @@
   --acid: #b8ff6b;
   --warn: #ffd166;
   --red: #ff5470;
+  /* Verdict amber — the single "this is critical / confirmed" accent, shared
+     with the war-room CORE_CONFIRM and the Remotion reveal so every surface
+     agrees on what red-hot means. */
+  --amber: #ff5a37;
   --line: rgba(118, 255, 157, 0.26);
   --glow: 0 0 18px rgba(118, 255, 157, 0.48), 0 0 60px rgba(118, 255, 157, 0.16);
 }
@@ -184,46 +188,444 @@ body::after {
 .bad { color: var(--red); }
 .stream { color: #9dffc0; opacity: 0.88; }
 
-.hole {
+/* ─────────────────────────────────────────────────────────────────────────
+   BOOT HUD — per-harness breakdown strip ("◆ 47 Claude · ▲ 12 Codex sessions")
+   Colour ALWAYS paired with glyph + label (color-blind a11y).
+   ───────────────────────────────────────────────────────────────────────── */
+.harness-breakdown { letter-spacing: 0.04em; }
+
+.breakdown-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--harness, var(--green));
+}
+
+.breakdown-glyph {
+  filter: drop-shadow(0 0 5px var(--harness, var(--green)));
+}
+
+.breakdown-label {
+  color: #cfe;
+  letter-spacing: 0.06em;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   DIAGNOSIS READOUT — the forensic payload. A deepening of the phosphor CRT
+   language: box-drawn header, ranked "holes" with a discrete severity meter,
+   a cost ledger, harness badges, evidence drill-down and a read-only fix diff.
+   ───────────────────────────────────────────────────────────────────────── */
+.diagnosis {
+  margin: 18px 0 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.diag-header { margin-bottom: 14px; }
+
+.diag-title {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  letter-spacing: 0.2em;
+}
+
+.diag-sigil {
+  color: var(--acid);
+  font-size: 20px;
+  font-weight: 800;
+  text-shadow: var(--glow);
+}
+
+.diag-verdict {
+  color: var(--amber);
+  font-size: 15px;
+  letter-spacing: 0.24em;
+  text-shadow: 0 0 14px rgba(255, 90, 55, 0.55);
+}
+
+/* Detector-only readouts drop the amber heat — honest about being unverified. */
+.diagnosis[data-detector-only="true"] .diag-verdict {
+  color: #70a980;
+  text-shadow: none;
+}
+
+.diag-meta {
+  margin-top: 6px;
+  color: #70a980;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.diag-degraded {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px dashed rgba(255, 209, 102, 0.5);
+  background: rgba(255, 209, 102, 0.06);
+  color: var(--warn);
+  font-size: 12px;
+  letter-spacing: 0.03em;
+}
+
+.diag-narrative {
+  margin: 0 0 16px;
+  color: #cfe;
+  font-size: 14px;
+  line-height: 1.5;
+  max-width: 70ch;
+}
+
+/* ── one ranked hole ─────────────────────────────────────────────────────── */
+.diag-hole {
+  position: relative;
   border: 1px solid var(--line);
-  background: rgba(6, 42, 21, 0.58);
-  padding: 14px;
-  margin: 14px 0;
+  border-left: 3px solid var(--dim);
+  background: linear-gradient(180deg, rgba(6, 42, 21, 0.62), rgba(2, 14, 8, 0.72));
+  padding: 14px 16px 14px 18px;
+  margin: 12px 0;
   box-shadow: inset 0 0 26px rgba(118, 255, 157, 0.05);
+}
+
+/* The left rail reddens with severity — a peripheral cue, doubled by the meter
+   and the severity word so colour is never the only signal. */
+.diag-hole[data-severity-band="high"] { border-left-color: var(--acid); }
+.diag-hole[data-severity-band="crit"] {
+  border-left-color: var(--amber);
+  box-shadow: inset 0 0 26px rgba(255, 90, 55, 0.08), -1px 0 14px rgba(255, 90, 55, 0.18);
 }
 
 .hole-head {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 12px;
-  align-items: center;
-  margin-bottom: 8px;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: start;
+  margin-bottom: 10px;
 }
 
-.hole h3 {
+.hole-rank {
+  color: var(--amber);
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.1;
+  text-shadow: 0 0 12px rgba(255, 90, 55, 0.5);
+}
+
+.hole-title-wrap { min-width: 0; }
+
+.hole-title {
   margin: 0;
   color: var(--acid);
   font-size: 16px;
+  letter-spacing: 0.02em;
+  text-shadow: 0 0 10px rgba(184, 255, 107, 0.3);
 }
 
-.bar {
-  display: inline-block;
-  height: 10px;
-  width: 92px;
+.hole-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 6px;
+}
+
+.hole-pattern {
+  color: #5f8a6f;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tag {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+
+.tag-detector { color: var(--warn); }
+.tag-verified { color: var(--amber); }
+
+/* harness badge — colour ALWAYS with glyph + label */
+.harness-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--harness, var(--green));
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.harness-glyph {
+  font-size: 13px;
+  line-height: 1;
+  filter: drop-shadow(0 0 6px var(--harness, var(--green)));
+}
+
+/* ── signature: the discrete severity meter (5 ticks, never a smooth bar) ── */
+.hole-meter {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+}
+
+.sev-meter {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.sev-tick {
+  width: 14px;
+  height: 12px;
   border: 1px solid var(--dim);
-  background: linear-gradient(90deg, var(--green) var(--pct), transparent var(--pct));
-  box-shadow: 0 0 12px rgba(118, 255, 157, 0.2);
+  background: transparent;
+  transition: background 200ms ease, box-shadow 200ms ease;
 }
 
-.evidence,
-.verdict {
+.sev-tick.on { background: var(--green); box-shadow: 0 0 8px rgba(118, 255, 157, 0.45); }
+.sev-tick.on[data-band="high"] { background: var(--acid); box-shadow: 0 0 8px rgba(184, 255, 107, 0.5); }
+.sev-tick.on[data-band="crit"] { background: var(--amber); box-shadow: 0 0 9px rgba(255, 90, 55, 0.6); }
+
+.sev-word {
+  color: #70a980;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hole-summary {
+  margin: 0 0 10px;
+  color: #cfe;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── cost ledger — the forensic line ─────────────────────────────────────── */
+.hole-ledger {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(118, 255, 157, 0.12);
+}
+
+.ledger-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.ledger-key {
+  color: #5f8a6f;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ledger-val {
+  color: var(--green);
+  font-size: 13px;
+}
+
+/* ── evidence drill-down ─────────────────────────────────────────────────── */
+.evidence-wrap,
+.fix-wrap { margin-top: 8px; }
+
+.evidence-toggle,
+.fix-toggle {
+  border: 1px solid rgba(118, 255, 157, 0.28);
+  background: rgba(118, 255, 157, 0.05);
   color: #9dffc0;
+  font: inherit;
   font-size: 12px;
+  letter-spacing: 0.06em;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.evidence-toggle:hover,
+.evidence-toggle:focus,
+.fix-toggle:hover,
+.fix-toggle:focus {
+  background: rgba(118, 255, 157, 0.12);
+  outline: 1px solid var(--acid);
+}
+
+.evidence-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.evidence-item {
+  border-left: 2px solid var(--dim);
+  padding: 6px 0 6px 12px;
+  margin: 6px 0;
+}
+
+.evidence-loc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11px;
+}
+
+.evidence-key {
+  color: #5f8a6f;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.evidence-key::after { content: " "; }
+.evidence-val { color: var(--acid); }
+
+.evidence-quote {
+  margin: 5px 0 0;
+  padding-left: 10px;
+  border-left: 2px solid rgba(184, 255, 107, 0.35);
+  color: #cfe;
+  font-size: 12px;
+  line-height: 1.5;
+  font-style: normal;
+}
+
+.evidence-quote-empty,
+.evidence-empty { color: #5f8a6f; font-style: italic; }
+
+/* ── read-only fix preview — unified diff + DISABLED apply ────────────────── */
+.fix-slot { margin-top: 8px; }
+
+.fix-preview {
+  border: 1px solid rgba(255, 90, 55, 0.3);
+  background: rgba(8, 5, 3, 0.55);
   margin-top: 8px;
 }
 
-.verdict {
+.fix-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 90, 55, 0.22);
+}
+
+.fix-label {
+  color: var(--amber);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.fix-path {
+  color: #70a980;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fix-diff {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.diff-line { display: inline; color: #8fb89f; }
+.diff-file { color: #5f8a6f; }
+.diff-hunk { color: var(--acid); }
+.diff-add { color: var(--green); background: rgba(118, 255, 157, 0.08); }
+.diff-del { color: var(--red); background: rgba(255, 84, 112, 0.08); }
+
+.fix-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(255, 90, 55, 0.22);
+}
+
+/* The apply affordance is present but inert: M2 is preview-only. */
+.apply-prompt {
+  border: 1px solid #4a6a55;
+  background: transparent;
+  color: #5f8a6f;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  padding: 5px 12px;
+  cursor: not-allowed;
+  opacity: 0.8;
+}
+
+.fix-note {
   color: var(--warn);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.fix-error { color: var(--red); font-size: 12px; }
+
+/* ── Do / Stop guidance ──────────────────────────────────────────────────── */
+.diag-guidance {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.diag-do,
+.diag-stop {
+  border: 1px solid var(--line);
+  background: rgba(4, 28, 13, 0.4);
+  padding: 12px 14px;
+}
+
+.diag-stop {
+  border-color: rgba(255, 90, 55, 0.32);
+  background: rgba(28, 8, 6, 0.34);
+}
+
+.action-head {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  margin-bottom: 8px;
+}
+
+.diag-do .action-head { color: var(--green); }
+.diag-stop .action-head { color: var(--amber); }
+
+.action-list { list-style: none; margin: 0; padding: 0; }
+
+.action-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 9px;
+  align-items: baseline;
+  margin: 6px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.action-glyph { font-weight: 800; }
+.diag-do .action-glyph { color: var(--green); }
+.diag-stop .action-glyph { color: var(--amber); }
+.action-text { color: #cfe; }
+.action-empty { color: #5f8a6f; }
+
+.diag-empty {
+  color: #70a980;
+  font-style: italic;
+  padding: 14px 0;
 }
 
 #prompt {
@@ -314,4 +716,14 @@ button:disabled {
 
   .status { justify-self: start; }
   .screen { height: calc(100% - 220px); font-size: 12px; }
+
+  .diag-guidance { grid-template-columns: 1fr; }
+
+  .hole-head {
+    grid-template-columns: auto 1fr;
+    grid-template-areas: "rank title" "meter meter";
+  }
+  .hole-rank { grid-area: rank; }
+  .hole-title-wrap { grid-area: title; }
+  .hole-meter { grid-area: meter; align-items: flex-start; margin-top: 4px; }
 }

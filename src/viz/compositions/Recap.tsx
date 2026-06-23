@@ -12,6 +12,7 @@
 import { AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig } from 'remotion';
 import { FPS } from './timing';
 import type { RevealFinding } from './Reveal';
+import { harnessTheme } from '../harnessTheme';
 
 const BG = '#020403';
 const GREEN = '#76ff9d';
@@ -20,11 +21,9 @@ const AMBER = '#ff5a37';
 const DIM = '#1b6f3a';
 const MONO = 'WardenMono, Menlo, Consolas, monospace';
 
-function badge(h: string): { color: string; glyph: string; label: string } {
-  if (h === 'codex') return { color: '#b98cff', glyph: '▲', label: 'Codex' };
-  if (h === 'claude_code') return { color: '#3dffa0', glyph: '◆', label: 'Claude' };
-  return { color: GREEN, glyph: '●', label: 'Unknown' };
-}
+// Harness identity from the SINGLE source (harnessTheme.ts) — pure, so it stays
+// in this lazy chunk without pulling anything onto the summon hot path.
+const badge = harnessTheme;
 
 export type RecapProps = {
   findings: RevealFinding[];
