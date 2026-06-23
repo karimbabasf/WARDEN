@@ -7,22 +7,39 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct Store { conn: Arc<Mutex<Connection>>, pub path: PathBuf }
+pub struct Store {
+    conn: Arc<Mutex<Connection>>,
+    pub path: PathBuf,
+}
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         ensure_parent(path.as_ref())?;
-        let conn = Connection::open(path.as_ref()).with_context(|| format!("open sqlite {}", path.as_ref().display()))?;
+        let conn = Connection::open(path.as_ref())
+            .with_context(|| format!("open sqlite {}", path.as_ref().display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let s = Store { conn: Arc::new(Mutex::new(conn)), path: path.as_ref().to_path_buf() };
+        let s = Store {
+            conn: Arc::new(Mutex::new(conn)),
+            path: path.as_ref().to_path_buf(),
+        };
         s.migrate()?;
         Ok(s)
     }
-    pub fn memory() -> Result<Self> { let conn=Connection::open_in_memory()?; let s=Store{conn:Arc::new(Mutex::new(conn)), path:PathBuf::from(":memory:")}; s.migrate()?; Ok(s) }
-    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> { self.conn.lock().expect("sqlite mutex poisoned") }
+    pub fn memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let s = Store {
+            conn: Arc::new(Mutex::new(conn)),
+            path: PathBuf::from(":memory:"),
+        };
+        s.migrate()?;
+        Ok(s)
+    }
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().expect("sqlite mutex poisoned")
+    }
     pub fn migrate(&self) -> Result<()> {
-        let c=self.conn();
+        let c = self.conn();
         c.execute_batch(r#"
         PRAGMA foreign_keys=ON;
         CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -45,34 +62,199 @@ impl Store {
         "#)?;
         Ok(())
     }
-    pub fn upsert_session_batch(&self, session:&Session, turns:&[Turn], events:&[EventRecord], watermark_offset:u64) -> Result<()> {
-        let mut c=self.conn(); let tx=c.transaction()?;
+    pub fn upsert_session_batch(
+        &self,
+        session: &Session,
+        turns: &[Turn],
+        events: &[EventRecord],
+        watermark_offset: u64,
+    ) -> Result<()> {
+        let mut c = self.conn();
+        let tx = c.transaction()?;
         tx.execute("INSERT INTO sessions(id,harness,external_id,project_json,model_ids_json,started_at,ended_at,source_path,raw_hash,ingested_at,meta_json) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_json=excluded.project_json,model_ids_json=excluded.model_ids_json,started_at=excluded.started_at,ended_at=excluded.ended_at,raw_hash=excluded.raw_hash,ingested_at=excluded.ingested_at,meta_json=excluded.meta_json", params![session.id, session.harness.as_str(), session.external_id, serde_json::to_string(&session.project)?, serde_json::to_string(&session.model_ids)?, session.started_at.to_rfc3339(), session.ended_at.map(|d| d.to_rfc3339()), session.source_path.to_string_lossy(), session.raw_hash as i64, session.ingested_at.to_rfc3339(), serde_json::to_string(&session.meta)?])?;
-        for t in turns { tx.execute("INSERT INTO turns(id,session_id,parent_id,role,idx,started_at,duration_ms,is_sidechain) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET duration_ms=COALESCE(excluded.duration_ms, turns.duration_ms), idx=excluded.idx", params![t.id,t.session_id,t.parent_id,format!("{:?}",t.role).to_lowercase(),t.index,t.started_at.to_rfc3339(),t.duration_ms.map(|x| x as i64), if t.is_sidechain{1}else{0}])?; }
+        for t in turns {
+            tx.execute("INSERT INTO turns(id,session_id,parent_id,role,idx,started_at,duration_ms,is_sidechain) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET duration_ms=COALESCE(excluded.duration_ms, turns.duration_ms), idx=excluded.idx", params![t.id,t.session_id,t.parent_id,format!("{:?}",t.role).to_lowercase(),t.index,t.started_at.to_rfc3339(),t.duration_ms.map(|x| x as i64), if t.is_sidechain{1}else{0}])?;
+        }
         for e in events {
-            let payload=serde_json::to_string(&e.event)?; let raw=serde_json::to_string(&e.raw_ref)?; let text=e.event.searchable_text();
+            let payload = serde_json::to_string(&e.event)?;
+            let raw = serde_json::to_string(&e.raw_ref)?;
+            let text = e.event.searchable_text();
             tx.execute("INSERT OR REPLACE INTO events(id,turn_id,session_id,ts,kind,payload_json,raw_ref) VALUES(?,?,?,?,?,?,?)", params![e.id,e.turn_id,e.session_id,e.ts.to_rfc3339(),e.event.kind_name(),payload,raw])?;
             tx.execute("INSERT INTO events_fts(rowid,event_id,session_id,text) VALUES((SELECT rowid FROM events WHERE id=?1),?1,?2,?3) ON CONFLICT DO NOTHING", params![e.id,e.session_id,text]).ok();
         }
         tx.execute("INSERT INTO watermarks(source_path,offset,rowid,cursor,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(source_path) DO UPDATE SET offset=excluded.offset, updated_at=excluded.updated_at", params![session.source_path.to_string_lossy(), watermark_offset as i64, 0i64, Option::<String>::None, Utc::now().to_rfc3339()])?;
-        tx.commit()?; Ok(())
+        tx.commit()?;
+        Ok(())
     }
-    pub fn source_raw_hash(&self, path:&Path) -> Result<Option<u64>> { self.conn().query_row("SELECT raw_hash FROM sessions WHERE source_path=? LIMIT 1", [path.to_string_lossy().to_string()], |r| Ok(r.get::<_,i64>(0)? as u64)).optional().map_err(Into::into) }
-    pub fn sessions(&self) -> Result<Vec<Session>> { let c=self.conn(); let mut st=c.prepare("SELECT id,harness,external_id,project_json,model_ids_json,started_at,ended_at,source_path,raw_hash,ingested_at,meta_json FROM sessions ORDER BY started_at DESC")?; let rows=st.query_map([], |r| row_session(r))?; rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into) }
-    pub fn session_events(&self, sid:&str) -> Result<Vec<(Turn,EventRecord)>> {
-        let c=self.conn(); let mut st=c.prepare("SELECT t.id,t.session_id,t.parent_id,t.role,t.idx,t.started_at,t.duration_ms,t.is_sidechain,e.id,e.ts,e.payload_json,e.raw_ref FROM events e JOIN turns t ON e.turn_id=t.id WHERE e.session_id=? ORDER BY t.idx,e.ts,e.id")?;
-        let rows=st.query_map([sid], |r| { let role=parse_role(r.get::<_,String>(3)?.as_str()); let turn=Turn{id:r.get(0)?,session_id:r.get(1)?,parent_id:r.get(2)?,role,index:r.get::<_,i64>(4)? as u32,started_at:parse_dt(&r.get::<_,String>(5)?),duration_ms:r.get::<_,Option<i64>>(6)?.map(|x| x as u64),is_sidechain:r.get::<_,i64>(7)?!=0}; let payload:String=r.get(10)?; let raw:String=r.get(11)?; let ev=EventRecord{id:r.get(8)?,turn_id:turn.id.clone(),session_id:turn.session_id.clone(),ts:parse_dt(&r.get::<_,String>(9)?),event:serde_json::from_str(&payload).unwrap(),raw_ref:serde_json::from_str(&raw).unwrap()}; Ok((turn,ev)) })?; rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    pub fn source_raw_hash(&self, path: &Path) -> Result<Option<u64>> {
+        self.conn()
+            .query_row(
+                "SELECT raw_hash FROM sessions WHERE source_path=? LIMIT 1",
+                [path.to_string_lossy().to_string()],
+                |r| Ok(r.get::<_, i64>(0)? as u64),
+            )
+            .optional()
+            .map_err(Into::into)
     }
-    pub fn all_features(&self) -> Result<Vec<FeatureVector>> { let c=self.conn(); let mut st=c.prepare("SELECT vector_json FROM features")?; let rows=st.query_map([], |r| { let s:String=r.get(0)?; Ok(serde_json::from_str(&s).unwrap()) })?; rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into) }
-    pub fn save_feature(&self, f:&FeatureVector, version:&str) -> Result<()> { self.conn().execute("INSERT OR REPLACE INTO features(session_id,vector_json,computed_at,featurizer_version) VALUES(?,?,?,?)", params![f.session_id, serde_json::to_string(f)?, Utc::now().to_rfc3339(), version])?; Ok(()) }
-    pub fn save_profile(&self, p:&CompetenceProfile) -> Result<()> { let s=serde_json::to_string(p)?; let now=Utc::now().to_rfc3339(); let c=self.conn(); c.execute("INSERT OR REPLACE INTO profile(id,vector_json,updated_at) VALUES(1,?,?)", params![s,now])?; c.execute("INSERT INTO profile_history(ts,vector_json) VALUES(?,?)", params![now,s])?; Ok(()) }
-    pub fn profile(&self) -> Result<CompetenceProfile> { let opt:String=self.conn().query_row("SELECT vector_json FROM profile WHERE id=1", [], |r| r.get(0)).optional()?.unwrap_or_default(); if opt.is_empty(){ Ok(CompetenceProfile::default()) } else { Ok(serde_json::from_str(&opt)?) } }
-    pub fn counts(&self) -> Result<(u32,u64,u32)> { let c=self.conn(); let s:i64=c.query_row("SELECT COUNT(*) FROM sessions",[],|r|r.get(0))?; let e:i64=c.query_row("SELECT COUNT(*) FROM events",[],|r|r.get(0))?; let f:i64=c.query_row("SELECT COUNT(*) FROM findings",[],|r|r.get(0))?; Ok((s as u32,e as u64,f as u32)) }
-    pub fn save_findings(&self, findings:&[Finding]) -> Result<()> { let c=self.conn(); for f in findings { let sids:Vec<_>=f.evidence.iter().map(|e| e.session_id.clone()).collect(); c.execute("INSERT OR REPLACE INTO findings(id,pattern_id,session_ids_json,severity,frequency,est_cost_tokens,est_cost_minutes,confidence,evidence_json,status,created_at,rationale,title,verifier_verdict) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", params![f.id,f.pattern_id,serde_json::to_string(&sids)?,f.severity as i64,f.frequency,f.est_cost_tokens as i64,f.est_cost_minutes as i64,f.confidence,serde_json::to_string(&f.evidence)?,f.status,Utc::now().to_rfc3339(),f.rationale,f.title,f.verifier_verdict])?; } Ok(()) }
-    pub fn save_diagnosis(&self, d:&Diagnosis) -> Result<()> { self.conn().execute("INSERT OR REPLACE INTO diagnoses(id,created_at,ranked_findings_json,do_json,stop_json,narrative,detector_only) VALUES(?,?,?,?,?,?,?)", params![d.id,d.created_at.to_rfc3339(),serde_json::to_string(&d.ranked_findings)?,serde_json::to_string(&d.do_items)?,serde_json::to_string(&d.stop_items)?,d.narrative, if d.detector_only{1}else{0}])?; Ok(()) }
-    pub fn latest_diagnosis(&self) -> Result<Option<Diagnosis>> { self.conn().query_row("SELECT id,created_at,ranked_findings_json,do_json,stop_json,narrative,detector_only FROM diagnoses ORDER BY created_at DESC LIMIT 1", [], |r| Ok(Diagnosis{id:r.get(0)?,created_at:parse_dt(&r.get::<_,String>(1)?),ranked_findings:serde_json::from_str(&r.get::<_,String>(2)?).unwrap(),do_items:serde_json::from_str(&r.get::<_,String>(3)?).unwrap(),stop_items:serde_json::from_str(&r.get::<_,String>(4)?).unwrap(),narrative:r.get(5)?,detector_only:r.get::<_,i64>(6)?!=0})).optional().map_err(Into::into) }
-    pub fn save_fugu_run(&self, stage:&str, model:&str, effort:&str, req_hash:&str, input:u64, output:u64, oi:u64, oo:u64, latency_ms:u64) -> Result<()> { let id=stable_id(&[stage,model,req_hash,&Utc::now().timestamp_nanos_opt().unwrap_or_default().to_string()]); self.conn().execute("INSERT INTO fugu_runs(id,stage,model,effort,req_hash,input_tokens,output_tokens,orchestration_input_tokens,orchestration_output_tokens,latency_ms,cost_usd,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", params![id,stage,model,effort,req_hash,input as i64,output as i64,oi as i64,oo as i64,latency_ms as i64,0.0f64,Utc::now().to_rfc3339()])?; Ok(()) }
+    pub fn sessions(&self) -> Result<Vec<Session>> {
+        let c = self.conn();
+        let mut st=c.prepare("SELECT id,harness,external_id,project_json,model_ids_json,started_at,ended_at,source_path,raw_hash,ingested_at,meta_json FROM sessions ORDER BY started_at DESC")?;
+        let rows = st.query_map([], |r| row_session(r))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+    pub fn session_events(&self, sid: &str) -> Result<Vec<(Turn, EventRecord)>> {
+        let c = self.conn();
+        let mut st=c.prepare("SELECT t.id,t.session_id,t.parent_id,t.role,t.idx,t.started_at,t.duration_ms,t.is_sidechain,e.id,e.ts,e.payload_json,e.raw_ref FROM events e JOIN turns t ON e.turn_id=t.id WHERE e.session_id=? ORDER BY t.idx,e.ts,e.id")?;
+        let rows = st.query_map([sid], |r| {
+            let role = parse_role(r.get::<_, String>(3)?.as_str());
+            let turn = Turn {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                parent_id: r.get(2)?,
+                role,
+                index: r.get::<_, i64>(4)? as u32,
+                started_at: parse_dt(&r.get::<_, String>(5)?),
+                duration_ms: r.get::<_, Option<i64>>(6)?.map(|x| x as u64),
+                is_sidechain: r.get::<_, i64>(7)? != 0,
+            };
+            let payload: String = r.get(10)?;
+            let raw: String = r.get(11)?;
+            let ev = EventRecord {
+                id: r.get(8)?,
+                turn_id: turn.id.clone(),
+                session_id: turn.session_id.clone(),
+                ts: parse_dt(&r.get::<_, String>(9)?),
+                event: serde_json::from_str(&payload).unwrap(),
+                raw_ref: serde_json::from_str(&raw).unwrap(),
+            };
+            Ok((turn, ev))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+    pub fn all_features(&self) -> Result<Vec<FeatureVector>> {
+        let c = self.conn();
+        let mut st = c.prepare("SELECT vector_json FROM features")?;
+        let rows = st.query_map([], |r| {
+            let s: String = r.get(0)?;
+            Ok(serde_json::from_str(&s).unwrap())
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+    pub fn save_feature(&self, f: &FeatureVector, version: &str) -> Result<()> {
+        self.conn().execute("INSERT OR REPLACE INTO features(session_id,vector_json,computed_at,featurizer_version) VALUES(?,?,?,?)", params![f.session_id, serde_json::to_string(f)?, Utc::now().to_rfc3339(), version])?;
+        Ok(())
+    }
+    pub fn save_profile(&self, p: &CompetenceProfile) -> Result<()> {
+        let s = serde_json::to_string(p)?;
+        let now = Utc::now().to_rfc3339();
+        let c = self.conn();
+        c.execute(
+            "INSERT OR REPLACE INTO profile(id,vector_json,updated_at) VALUES(1,?,?)",
+            params![s, now],
+        )?;
+        c.execute(
+            "INSERT INTO profile_history(ts,vector_json) VALUES(?,?)",
+            params![now, s],
+        )?;
+        Ok(())
+    }
+    pub fn profile(&self) -> Result<CompetenceProfile> {
+        let opt: String = self
+            .conn()
+            .query_row("SELECT vector_json FROM profile WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or_default();
+        if opt.is_empty() {
+            Ok(CompetenceProfile::default())
+        } else {
+            Ok(serde_json::from_str(&opt)?)
+        }
+    }
+    pub fn counts(&self) -> Result<(u32, u64, u32)> {
+        let c = self.conn();
+        let s: i64 = c.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
+        let e: i64 = c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+        let f: i64 = c.query_row("SELECT COUNT(*) FROM findings", [], |r| r.get(0))?;
+        Ok((s as u32, e as u64, f as u32))
+    }
+    pub fn save_findings(&self, findings: &[Finding]) -> Result<()> {
+        let c = self.conn();
+        for f in findings {
+            let sids: Vec<_> = f.evidence.iter().map(|e| e.session_id.clone()).collect();
+            c.execute("INSERT OR REPLACE INTO findings(id,pattern_id,session_ids_json,severity,frequency,est_cost_tokens,est_cost_minutes,confidence,evidence_json,status,created_at,rationale,title,verifier_verdict) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", params![f.id,f.pattern_id,serde_json::to_string(&sids)?,f.severity as i64,f.frequency,f.est_cost_tokens as i64,f.est_cost_minutes as i64,f.confidence,serde_json::to_string(&f.evidence)?,f.status,Utc::now().to_rfc3339(),f.rationale,f.title,f.verifier_verdict])?;
+        }
+        Ok(())
+    }
+    pub fn save_diagnosis(&self, d: &Diagnosis) -> Result<()> {
+        self.conn().execute("INSERT OR REPLACE INTO diagnoses(id,created_at,ranked_findings_json,do_json,stop_json,narrative,detector_only) VALUES(?,?,?,?,?,?,?)", params![d.id,d.created_at.to_rfc3339(),serde_json::to_string(&d.ranked_findings)?,serde_json::to_string(&d.do_items)?,serde_json::to_string(&d.stop_items)?,d.narrative, if d.detector_only{1}else{0}])?;
+        Ok(())
+    }
+    pub fn latest_diagnosis(&self) -> Result<Option<Diagnosis>> {
+        self.conn().query_row("SELECT id,created_at,ranked_findings_json,do_json,stop_json,narrative,detector_only FROM diagnoses ORDER BY created_at DESC LIMIT 1", [], |r| Ok(Diagnosis{id:r.get(0)?,created_at:parse_dt(&r.get::<_,String>(1)?),ranked_findings:serde_json::from_str(&r.get::<_,String>(2)?).unwrap(),do_items:serde_json::from_str(&r.get::<_,String>(3)?).unwrap(),stop_items:serde_json::from_str(&r.get::<_,String>(4)?).unwrap(),narrative:r.get(5)?,detector_only:r.get::<_,i64>(6)?!=0})).optional().map_err(Into::into)
+    }
+    pub fn save_fugu_run(
+        &self,
+        stage: &str,
+        model: &str,
+        effort: &str,
+        req_hash: &str,
+        input: u64,
+        output: u64,
+        oi: u64,
+        oo: u64,
+        latency_ms: u64,
+    ) -> Result<()> {
+        let id = stable_id(&[
+            stage,
+            model,
+            req_hash,
+            &Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .to_string(),
+        ]);
+        self.conn().execute("INSERT INTO fugu_runs(id,stage,model,effort,req_hash,input_tokens,output_tokens,orchestration_input_tokens,orchestration_output_tokens,latency_ms,cost_usd,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", params![id,stage,model,effort,req_hash,input as i64,output as i64,oi as i64,oo as i64,latency_ms as i64,0.0f64,Utc::now().to_rfc3339()])?;
+        Ok(())
+    }
 }
-fn parse_dt(s:&str)->DateTime<Utc>{ DateTime::parse_from_rfc3339(s).map(|d|d.with_timezone(&Utc)).unwrap_or_else(|_|Utc::now()) }
-fn parse_role(s:&str)->Role{ match s {"user"=>Role::User,"assistant"=>Role::Assistant,"system"=>Role::System,"tool"=>Role::Tool,_=>Role::System} }
-fn row_session(r:&rusqlite::Row<'_>) -> rusqlite::Result<Session> { let h:String=r.get(1)?; Ok(Session{id:r.get(0)?,harness:match h.as_str(){"claude_code"=>Harness::ClaudeCode,"codex"=>Harness::Codex,"cursor"=>Harness::Cursor,"hermes"=>Harness::Hermes,x=>Harness::Generic(x.to_string())},external_id:r.get(2)?,project:serde_json::from_str(&r.get::<_,String>(3)?).ok().flatten(),model_ids:serde_json::from_str(&r.get::<_,String>(4)?).unwrap_or_default(),started_at:parse_dt(&r.get::<_,String>(5)?),ended_at:r.get::<_,Option<String>>(6)?.map(|s|parse_dt(&s)),source_path:PathBuf::from(r.get::<_,String>(7)?),raw_hash:r.get::<_,i64>(8)? as u64,ingested_at:parse_dt(&r.get::<_,String>(9)?),meta:serde_json::from_str(&r.get::<_,String>(10)?).unwrap_or(serde_json::Value::Null)}) }
+fn parse_dt(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+fn parse_role(s: &str) -> Role {
+    match s {
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        "system" => Role::System,
+        "tool" => Role::Tool,
+        _ => Role::System,
+    }
+}
+fn row_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+    let h: String = r.get(1)?;
+    Ok(Session {
+        id: r.get(0)?,
+        harness: match h.as_str() {
+            "claude_code" => Harness::ClaudeCode,
+            "codex" => Harness::Codex,
+            "cursor" => Harness::Cursor,
+            "hermes" => Harness::Hermes,
+            x => Harness::Generic(x.to_string()),
+        },
+        external_id: r.get(2)?,
+        project: serde_json::from_str(&r.get::<_, String>(3)?).ok().flatten(),
+        model_ids: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+        started_at: parse_dt(&r.get::<_, String>(5)?),
+        ended_at: r.get::<_, Option<String>>(6)?.map(|s| parse_dt(&s)),
+        source_path: PathBuf::from(r.get::<_, String>(7)?),
+        raw_hash: r.get::<_, i64>(8)? as u64,
+        ingested_at: parse_dt(&r.get::<_, String>(9)?),
+        meta: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or(serde_json::Value::Null),
+    })
+}

@@ -1,1 +1,3 @@
-fn main() { warden_lib::run() }
+fn main() {
+    warden_lib::run()
+}

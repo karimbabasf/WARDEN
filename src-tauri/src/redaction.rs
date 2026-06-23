@@ -1,11 +1,14 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-static SECRET_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| vec![
-    Regex::new(r#"(?i)(api[_-]?key|token|secret|password|passwd)\s*[:=]\s*['"]?[^\s'"]{8,}"#).unwrap(),
-    Regex::new(r"sk-[A-Za-z0-9_\-]{16,}").unwrap(),
-    Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").unwrap(),
-]);
+static SECRET_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    vec![
+        Regex::new(r#"(?i)(api[_-]?key|token|secret|password|passwd)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
+            .unwrap(),
+        Regex::new(r"sk-[A-Za-z0-9_\-]{16,}").unwrap(),
+        Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").unwrap(),
+    ]
+});
 
 pub fn redact(s: &str) -> String {
     let mut out = s.to_string();

@@ -8,3 +8,7 @@
 *.log
 .build_prompt.txt
 .resume_prompt.txt
+.autorestart.sh
+.watchdog.sh
+restart.sh
+status.sh
