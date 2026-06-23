@@ -130,14 +130,15 @@ mod tests {
 
     #[test]
     fn brain_base_url_defaults_to_sakana() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("WARDEN_BRAIN_BASE_URL");
-        assert_eq!(brain_base_url(), "https://api.sakana.ai/v1");
+        let result = brain_base_url();
+        assert_eq!(result, "https://api.sakana.ai/v1");
     }
 
     #[test]
     fn brain_base_url_reads_env_and_strips_trailing_slash() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("WARDEN_BRAIN_BASE_URL", "https://example.test/v2/");
         let result = brain_base_url();
         std::env::remove_var("WARDEN_BRAIN_BASE_URL");
@@ -148,17 +149,15 @@ mod tests {
 
     #[test]
     fn brain_responses_url_default_is_sakana_responses() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("WARDEN_BRAIN_BASE_URL");
-        assert_eq!(
-            brain_responses_url(),
-            "https://api.sakana.ai/v1/responses"
-        );
+        let result = brain_responses_url();
+        assert_eq!(result, "https://api.sakana.ai/v1/responses");
     }
 
     #[test]
     fn brain_responses_url_uses_custom_base() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("WARDEN_BRAIN_BASE_URL", "https://example.test/v2");
         let result = brain_responses_url();
         std::env::remove_var("WARDEN_BRAIN_BASE_URL");
@@ -169,14 +168,15 @@ mod tests {
 
     #[test]
     fn brain_diagnose_model_defaults_to_fugu_ultra() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("WARDEN_BRAIN_DIAGNOSE_MODEL");
-        assert_eq!(brain_diagnose_model(), "fugu-ultra");
+        let result = brain_diagnose_model();
+        assert_eq!(result, "fugu-ultra");
     }
 
     #[test]
     fn brain_diagnose_model_reads_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("WARDEN_BRAIN_DIAGNOSE_MODEL", "my-model");
         let result = brain_diagnose_model();
         std::env::remove_var("WARDEN_BRAIN_DIAGNOSE_MODEL");
@@ -187,14 +187,15 @@ mod tests {
 
     #[test]
     fn brain_verify_model_defaults_to_fugu() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("WARDEN_BRAIN_VERIFY_MODEL");
-        assert_eq!(brain_verify_model(), "fugu");
+        let result = brain_verify_model();
+        assert_eq!(result, "fugu");
     }
 
     #[test]
     fn brain_verify_model_reads_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("WARDEN_BRAIN_VERIFY_MODEL", "fugu-lite");
         let result = brain_verify_model();
         std::env::remove_var("WARDEN_BRAIN_VERIFY_MODEL");
@@ -205,7 +206,7 @@ mod tests {
 
     #[test]
     fn brain_api_key_prefers_warden_over_sakana() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("WARDEN_BRAIN_API_KEY", "warden-key");
         std::env::set_var("SAKANA_API_KEY", "sakana-key");
         let result = brain_api_key();
@@ -216,7 +217,7 @@ mod tests {
 
     #[test]
     fn brain_api_key_falls_back_to_sakana() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("WARDEN_BRAIN_API_KEY");
         std::env::set_var("SAKANA_API_KEY", "sakana-key");
         let result = brain_api_key();
@@ -226,31 +227,34 @@ mod tests {
 
     #[test]
     fn brain_api_key_returns_none_when_neither_set() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("WARDEN_BRAIN_API_KEY");
         std::env::remove_var("SAKANA_API_KEY");
-        assert_eq!(brain_api_key(), None);
+        let result = brain_api_key();
+        assert_eq!(result, None);
     }
 
     // ── brain_effort ──────────────────────────────────────────────────────────
 
     #[test]
     fn brain_effort_high_tier_default_is_xhigh() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("WARDEN_BRAIN_EFFORT");
-        assert_eq!(brain_effort(true), "xhigh");
+        let result = brain_effort(true);
+        assert_eq!(result, "xhigh");
     }
 
     #[test]
     fn brain_effort_low_tier_default_is_high() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("WARDEN_BRAIN_EFFORT");
-        assert_eq!(brain_effort(false), "high");
+        let result = brain_effort(false);
+        assert_eq!(result, "high");
     }
 
     #[test]
     fn brain_effort_reads_env_override_for_both_tiers() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("WARDEN_BRAIN_EFFORT", "low");
         let high = brain_effort(true);
         let low = brain_effort(false);
