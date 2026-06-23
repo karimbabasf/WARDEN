@@ -8,12 +8,12 @@ evidence-cited diagnosis overlay summoned by a global hotkey.
 ## Milestones (7 total)
 - **M0 — Spine** ✅ IR + Claude adapter + rusqlite/FTS5 store + featurizer (commit `d87497d`).
 - **M1 — Brain** ✅ Fugu Diagnostician→Coach→Verifier pipeline + detectors (commit `7ac9b10`).
-- **M2 — Face** ⬅️ *current*. Always-on daemon, ⌘⇧Space hotkey, pre-warmed overlay, R3F/Remotion
+- **M2 — Face** ✅ verified. Always-on daemon, ⌘⇧Space hotkey, pre-warmed overlay, R3F/Remotion
   war-room, diagnosis/evidence/fix-preview, **Codex adapter**, live FSEvents tailing, env-swappable
   engine, harness differentiation.
   - Spec: `docs/superpowers/specs/2026-06-22-m2-face-design.md`
   - Plan: `docs/superpowers/plans/2026-06-22-m2-face.md`
-- M3 RADAR · M4 Forge(apply) · M5 Live · M6 Voice · M7 Adapters — future; **stubbed** via
+- **M3 — RADAR** ⬅️ next. M4 Forge(apply) · M5 Live · M6 Voice · M7 Adapters — future; **stubbed** via
   `scaffold::not_in_slice()`. Do NOT implement these.
 
 ## How we work in this repo
@@ -52,16 +52,17 @@ Env: `WARDEN_DB_PATH` (db override) · `SAKANA_API_KEY` (Fugu key) · M2 adds `W
 - `brain.rs` — Fugu client: `run_pipeline`, `diagnose/coach/verify`; emits `fugu_delta`,`fugu_usage`.
   *(M2: env-config the base URL/models/key/effort; emit `candidates_nominated`,`finding_verdict`.)*
 - `commands.rs` — `#[tauri::command]`s. Real: `query_profile`,`get_diagnosis`,`get_findings`,
-  `run_diagnosis`,`ask`. Stubs (return `not_in_slice`): apply/revert/voice/screen/fleet/`set_config`/`mute_pattern`.
+  `run_diagnosis`,`ask`,`hide_overlay`,`get_fix_preview`,`resolve_evidence`,`set_config`.
+  Stubs (return `not_in_slice`): apply/revert/voice/screen/fleet/`mute_pattern`.
 - `scaffold.rs` — `not_in_slice(feature)` seam helper. `redaction.rs` — PII scrub.
-- `lib.rs` — Tauri builder/`setup()`; registers `tauri_plugin_global_shortcut` (currently the *poisoned*
-  Alt+Space → change to ⌘⇧Space) and shows a visible `main` window.
-  *(M2: `ActivationPolicy::Accessory` + tray + pre-warmed hidden `overlay` window + spawn watchers.)*
+- `lib.rs` — Tauri builder/`setup()`; `ActivationPolicy::Accessory`, tray menu, pre-warmed hidden
+  `overlay` window, click-through idle state, blur/Esc dismissal, startup backfill, live watchers,
+  and guarded ⌘⇧Space global shortcut.
 - `util.rs` — `default_db_path()` is the **env-helper template** to copy for new env vars.
 - M2 new: `config.rs` (`~/.warden/config.toml` loader), `scheduler.rs` (live-ingest tasks + on-ask trigger).
 
 **Frontend `src/`**
-- `index.html` — overlay DOM: `#war-room` canvas, `#terminal`, `#screen`, `#prompt`/`#command`,
+- `index.html` — overlay DOM: `#war-room-root` R3F island mount, `#terminal`, `#screen`, `#prompt`/`#command`,
   HUD `#hud-{sessions,events,findings,stage}`, `#status`.
 - `main.ts` — vanilla-TS screen router. Listens `warden_hotkey`,`ingest_progress`,`fugu_delta`,`fugu_usage`;
   invokes `query_profile`,`get_diagnosis`,`run_diagnosis`.
