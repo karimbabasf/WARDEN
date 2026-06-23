@@ -37,10 +37,20 @@ type Diagnosis = {
   detector_only: boolean;
 };
 
+type HarnessRollup = {
+  harness: string;
+  sessions: number;
+  events: number;
+};
+
+// `query_profile` now returns a per-harness breakdown (Task 6). The three
+// top-level counts are unchanged, so existing HUD usage is unaffected; the
+// `by_harness` rollup is consumed by the harness-breakdown HUD in a later task.
 type Profile = {
   session_count: number;
   event_count: number;
   finding_count: number;
+  by_harness?: HarnessRollup[];
 };
 
 type IngestProgress = {

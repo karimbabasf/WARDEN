@@ -1,9 +1,10 @@
 use crate::brain::Brain;
 use crate::featurizer;
+use crate::forge::{self, FixPreview};
 use crate::ingest::claude_code;
 use crate::ir::*;
 use crate::scaffold::{not_in_slice, AgentInstance};
-use crate::store::Store;
+use crate::store::{ProfileBreakdown, Store};
 use crate::util::default_db_path;
 use anyhow::Result;
 use std::sync::Arc;
@@ -26,13 +27,13 @@ impl AppState {
 }
 
 #[tauri::command]
-pub async fn query_profile(state: tauri::State<'_, AppState>) -> Result<CompetenceProfile, String> {
-    let mut p = state.store.profile().map_err(|e| e.to_string())?;
-    let (s, e, f) = state.store.counts().map_err(|e| e.to_string())?;
-    p.session_count = s;
-    p.event_count = e;
-    p.finding_count = f;
-    Ok(p)
+pub async fn query_profile(
+    state: tauri::State<'_, AppState>,
+) -> Result<ProfileBreakdown, String> {
+    state
+        .store
+        .profile_with_harness_breakdown()
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn get_diagnosis(state: tauri::State<'_, AppState>) -> Result<Option<Diagnosis>, String> {
@@ -148,9 +149,21 @@ pub async fn stop_voice() -> Result<(), String> {
 pub async fn capture_screen() -> Result<(), String> {
     Err(not_in_slice("Screen Q&A"))
 }
+/// Persist a partial config patch to `~/.warden/config.toml`. Forward-only and
+/// merge-based: only keys present in `value` are written (see `config::save`).
 #[tauri::command]
-pub async fn set_config(_value: serde_json::Value) -> Result<(), String> {
-    Err(not_in_slice("Config UI persistence"))
+pub async fn set_config(value: serde_json::Value) -> Result<(), String> {
+    crate::config::save(value).map_err(|e| e.to_string())
+}
+
+/// Read-only fix preview for a saved finding: returns a unified diff against the
+/// real target file with `applied: false`. Never writes (apply is the M4 slice).
+#[tauri::command]
+pub async fn get_fix_preview(
+    state: tauri::State<'_, AppState>,
+    finding_id: String,
+) -> Result<FixPreview, String> {
+    forge::fix_preview(&state.store, &finding_id).map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn mute_pattern(_id: String) -> Result<(), String> {

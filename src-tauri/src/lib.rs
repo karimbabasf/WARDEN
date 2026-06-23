@@ -1,7 +1,9 @@
 pub mod brain;
 pub mod commands;
+pub mod config;
 pub mod detectors;
 pub mod featurizer;
+pub mod forge;
 pub mod harness_theme;
 pub mod ingest;
 pub mod ir;
@@ -168,6 +170,7 @@ pub fn run() {
             run_diagnosis,
             ask,
             hide_overlay,
+            get_fix_preview,
             apply_artifact,
             revert_artifact,
             start_voice,

@@ -114,6 +114,10 @@ impl Brain {
             return Ok(d);
         }
 
+        // Candidates exist: announce them to the war-room before any Fugu call so
+        // nodes can spawn from real nominated holes. No-op when headless.
+        self.emit_candidates(&candidates);
+
         let Some(_) = self.api_key else {
             let d = detector_only_diagnosis(
                 candidates,
@@ -185,18 +189,23 @@ impl Brain {
                         f.confidence = (f.confidence * v.confidence).min(0.99);
                         f.status = "confirmed".into();
                         f.verifier_verdict = Some(v.verdict);
+                        self.emit_verdict(&f, "confirmed");
                         verified.push(f);
                     }
-                    Ok(v) => tracing::info!(
-                        pattern = %f.pattern_id,
-                        verdict = %v.verdict,
-                        "finding refuted"
-                    ),
+                    Ok(v) => {
+                        tracing::info!(
+                            pattern = %f.pattern_id,
+                            verdict = %v.verdict,
+                            "finding refuted"
+                        );
+                        self.emit_verdict(&f, "refuted");
+                    }
                     Err(e) => {
                         f.status = "confirmed".into();
                         f.verifier_verdict = Some(format!(
                             "Verifier unavailable; retained detector+diagnostician finding: {e}"
                         ));
+                        self.emit_verdict(&f, "confirmed");
                         verified.push(f);
                     }
                 }
@@ -206,9 +215,11 @@ impl Brain {
                     "Retained from deterministic detectors to keep the diagnosis at the requested top-three coverage after Fugu confirmation."
                         .into(),
                 );
+                self.emit_verdict(&f, "confirmed");
                 verified.push(f);
             } else {
                 f.status = "confirmed".into();
+                self.emit_verdict(&f, "confirmed");
                 verified.push(f);
             }
         }
@@ -854,6 +865,77 @@ fn repair_json_text(s: &str) -> String {
     }
 }
 
+/// Resolve the harness for a finding from the session its first evidence cites.
+/// `Finding` carries no harness field, so we look up the harness of
+/// `finding.evidence[0].session_id` in the store. No evidence, an unknown
+/// session, or a store error all degrade to `"unknown"` — a verdict is never
+/// dropped just because its harness can't be resolved.
+fn resolve_harness(store: &Store, finding: &Finding) -> String {
+    finding
+        .evidence
+        .first()
+        .and_then(|e| store.session_harness(&e.session_id).ok().flatten())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Build the `candidates_nominated` event payload from the deterministic
+/// candidate findings. Pure + store-only so the event contract is unit-testable
+/// without a Tauri runtime; `emit_candidates` just forwards this to `app.emit`.
+/// Shape (locked, consumed by the war-room):
+/// `{ "candidates": [ { "pattern_id", "session_id", "harness", "severity_hint" } ] }`.
+/// `harness` is the snake_case `Harness::as_str()` value resolved per candidate.
+fn candidates_payload(candidates: &[Finding], store: &Store) -> Value {
+    let items = candidates
+        .iter()
+        .map(|f| {
+            let session_id = f
+                .evidence
+                .first()
+                .map(|e| e.session_id.clone())
+                .unwrap_or_default();
+            json!({
+                "pattern_id": f.pattern_id,
+                "session_id": session_id,
+                "harness": resolve_harness(store, f),
+                "severity_hint": f.severity,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({ "candidates": items })
+}
+
+/// Build one `finding_verdict` event payload. Pure + store-only for the same
+/// reason as `candidates_payload`. Shape (locked):
+/// `{ "finding_id", "pattern_id", "harness", "verdict":"confirmed"|"refuted", "severity" }`.
+fn verdict_payload(finding: &Finding, verdict: &str, store: &Store) -> Value {
+    json!({
+        "finding_id": finding.id,
+        "pattern_id": finding.pattern_id,
+        "harness": resolve_harness(store, finding),
+        "verdict": verdict,
+        "severity": finding.severity,
+    })
+}
+
+impl Brain {
+    /// Emit `candidates_nominated` once the deterministic candidates exist and
+    /// before any Fugu call. No-op when headless (`app` is None, e.g. tests).
+    fn emit_candidates(&self, candidates: &[Finding]) {
+        if let Some(app) = &self.app {
+            let _ = app.emit("candidates_nominated", candidates_payload(candidates, &self.store));
+        }
+    }
+
+    /// Emit one `finding_verdict` during/after the Verifier. `confirmed` =
+    /// survived (or verifier unavailable but retained); `refuted` = dropped.
+    /// No-op when headless.
+    fn emit_verdict(&self, finding: &Finding, verdict: &str) {
+        if let Some(app) = &self.app {
+            let _ = app.emit("finding_verdict", verdict_payload(finding, verdict, &self.store));
+        }
+    }
+}
+
 fn usage_tokens(u: &Value) -> (u64, u64, u64, u64) {
     (
         u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
@@ -920,5 +1002,113 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b", "a", "c"]
         );
+    }
+
+    // ── Event contract: candidates_nominated / finding_verdict payload shapes ──
+    // These lock the exact keys + snake_case harness the Task 7 war-room consumes.
+    // `app.emit` only forwards these values, so testing the pure builders gives
+    // the contract real coverage without a Tauri runtime.
+
+    fn finding_with_evidence(pattern: &str, session_id: &str, severity: u8) -> Finding {
+        Finding {
+            id: format!("fid-{pattern}"),
+            pattern_id: pattern.into(),
+            title: pattern.into(),
+            severity,
+            frequency: 0.5,
+            est_cost_tokens: 1,
+            est_cost_minutes: 1,
+            confidence: 0.7,
+            rationale: "r".into(),
+            evidence: vec![EvidenceRef {
+                session_id: session_id.into(),
+                turn_id: None,
+                event_id: None,
+                quote: None,
+                source_path: None,
+            }],
+            status: "candidate".into(),
+            verifier_verdict: None,
+        }
+    }
+
+    /// Seed one session of the given harness so harness resolution has a row.
+    fn seed_session(store: &Store, id: &str, harness: Harness) {
+        let now = Utc::now();
+        let session = Session {
+            id: id.into(),
+            harness,
+            external_id: id.into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: std::path::PathBuf::from(format!("/tmp/{id}.jsonl")),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: json!({}),
+        };
+        let turn = Turn {
+            id: format!("{id}-t"),
+            session_id: id.into(),
+            parent_id: None,
+            role: Role::User,
+            index: 0,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        store.upsert_session_batch(&session, &[turn], &[], 0).unwrap();
+    }
+
+    #[test]
+    fn candidates_payload_has_locked_shape_with_snake_case_harness() {
+        let store = Store::memory().unwrap();
+        seed_session(&store, "c1", Harness::ClaudeCode);
+        seed_session(&store, "x1", Harness::Codex);
+        let candidates = vec![
+            finding_with_evidence("CONTEXT_BLOAT", "c1", 4),
+            finding_with_evidence("UNVERIFIED_COMPLETION", "x1", 5),
+        ];
+
+        let payload = candidates_payload(&candidates, &store);
+        let arr = payload["candidates"].as_array().expect("candidates array");
+        assert_eq!(arr.len(), 2);
+
+        // Exactly the four locked keys, in the locked snake_case harness form.
+        assert_eq!(arr[0]["pattern_id"], "CONTEXT_BLOAT");
+        assert_eq!(arr[0]["session_id"], "c1");
+        assert_eq!(arr[0]["harness"], "claude_code");
+        assert_eq!(arr[0]["severity_hint"], 4);
+        assert_eq!(arr[1]["harness"], "codex");
+        assert_eq!(arr[1]["severity_hint"], 5);
+    }
+
+    #[test]
+    fn candidates_payload_no_evidence_defaults_harness_unknown() {
+        let store = Store::memory().unwrap();
+        let mut f = finding_with_evidence("WHACK_A_MOLE", "ignored", 4);
+        f.evidence.clear();
+        let payload = candidates_payload(&[f], &store);
+        let item = &payload["candidates"][0];
+        assert_eq!(item["session_id"], "");
+        assert_eq!(item["harness"], "unknown");
+    }
+
+    #[test]
+    fn verdict_payload_has_locked_shape() {
+        let store = Store::memory().unwrap();
+        seed_session(&store, "c1", Harness::ClaudeCode);
+        let f = finding_with_evidence("CONTEXT_BLOAT", "c1", 4);
+
+        let confirmed = verdict_payload(&f, "confirmed", &store);
+        assert_eq!(confirmed["finding_id"], "fid-CONTEXT_BLOAT");
+        assert_eq!(confirmed["pattern_id"], "CONTEXT_BLOAT");
+        assert_eq!(confirmed["harness"], "claude_code");
+        assert_eq!(confirmed["verdict"], "confirmed");
+        assert_eq!(confirmed["severity"], 4);
+
+        let refuted = verdict_payload(&f, "refuted", &store);
+        assert_eq!(refuted["verdict"], "refuted");
     }
 }

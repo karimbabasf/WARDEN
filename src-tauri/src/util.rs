@@ -35,6 +35,22 @@ pub fn default_db_path() -> PathBuf {
         .map(|s| expand_tilde(&s))
         .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".warden/warden.db"))
 }
+/// Path to the user's `~/.warden/config.toml`. Same env-helper shape as
+/// `default_db_path`: `WARDEN_CONFIG_PATH` overrides (tests point it at a temp
+/// file), otherwise the well-known location next to the database.
+pub fn warden_config_path() -> PathBuf {
+    std::env::var("WARDEN_CONFIG_PATH")
+        .map(|s| expand_tilde(&s))
+        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".warden/config.toml"))
+}
+/// Path to the user's `~/.claude/CLAUDE.md` — the durable Claude Code guidance
+/// file that several fix-preview patterns target. `WARDEN_CLAUDE_MD` overrides
+/// (tests point it at a temp file).
+pub fn claude_md_path() -> PathBuf {
+    std::env::var("WARDEN_CLAUDE_MD")
+        .map(|s| expand_tilde(&s))
+        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".claude/CLAUDE.md"))
+}
 pub fn default_claude_projects() -> PathBuf {
     std::env::var("WARDEN_CLAUDE_PROJECTS")
         .map(|s| expand_tilde(&s))

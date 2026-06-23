@@ -3,6 +3,7 @@ use crate::util::{ensure_parent, stable_id};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +11,27 @@ use std::sync::{Arc, Mutex};
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
     pub path: PathBuf,
+}
+
+/// Per-harness rollup of ingested volume. `harness` is the snake_case
+/// `Harness::as_str()` value so the war-room can theme it directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessRollup {
+    pub harness: String,
+    pub sessions: u32,
+    pub events: u64,
+}
+
+/// The profile shape the overlay HUD consumes: global totals plus a per-harness
+/// breakdown. Replaces the bare `CompetenceProfile` previously returned by
+/// `query_profile`; the three top-level counts are byte-identical to the old
+/// fields so existing consumers keep working.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileBreakdown {
+    pub session_count: u32,
+    pub event_count: u64,
+    pub finding_count: u32,
+    pub by_harness: Vec<HarnessRollup>,
 }
 
 impl Store {
@@ -216,6 +238,76 @@ impl Store {
         let f: i64 = c.query_row("SELECT COUNT(*) FROM findings", [], |r| r.get(0))?;
         Ok((s as u32, e as u64, f as u32))
     }
+    /// Global counts plus a per-harness rollup (sessions + their events), grouped
+    /// by the stored harness string. The per-harness session/event sums equal the
+    /// global `session_count`/`event_count` totals (every session has a harness,
+    /// every event belongs to a session). Rows are ordered by session volume so
+    /// the dominant harness leads the HUD.
+    pub fn profile_with_harness_breakdown(&self) -> Result<ProfileBreakdown> {
+        let (session_count, event_count, finding_count) = self.counts()?;
+        let c = self.conn();
+        // LEFT JOIN so a harness with sessions but zero events still appears with
+        // events=0, and the session count stays exact (one row per session).
+        let mut st = c.prepare(
+            "SELECT s.harness, COUNT(DISTINCT s.id), COUNT(e.id) \
+             FROM sessions s LEFT JOIN events e ON e.session_id = s.id \
+             GROUP BY s.harness ORDER BY COUNT(DISTINCT s.id) DESC, s.harness ASC",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(HarnessRollup {
+                harness: r.get::<_, String>(0)?,
+                sessions: r.get::<_, i64>(1)? as u32,
+                events: r.get::<_, i64>(2)? as u64,
+            })
+        })?;
+        let by_harness = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ProfileBreakdown {
+            session_count,
+            event_count,
+            finding_count,
+            by_harness,
+        })
+    }
+    /// Resolve the harness string for a single session, if known. Used by the
+    /// brain to tag candidates/verdicts with the harness of the session their
+    /// evidence references. `None` when the session id is unknown.
+    pub fn session_harness(&self, session_id: &str) -> Result<Option<String>> {
+        self.conn()
+            .query_row(
+                "SELECT harness FROM sessions WHERE id=? LIMIT 1",
+                [session_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+    /// Load a persisted finding by id (reconstructed from the `findings` table).
+    /// Returns `None` when no such finding has been saved. Used by fix preview.
+    pub fn finding_by_id(&self, id: &str) -> Result<Option<Finding>> {
+        self.conn()
+            .query_row(
+                "SELECT id,pattern_id,title,severity,frequency,est_cost_tokens,est_cost_minutes,confidence,rationale,evidence_json,status,verifier_verdict FROM findings WHERE id=? LIMIT 1",
+                [id],
+                |r| {
+                    Ok(Finding {
+                        id: r.get(0)?,
+                        pattern_id: r.get(1)?,
+                        title: r.get(2)?,
+                        severity: r.get::<_, i64>(3)? as u8,
+                        frequency: r.get(4)?,
+                        est_cost_tokens: r.get::<_, i64>(5)? as u64,
+                        est_cost_minutes: r.get::<_, i64>(6)? as u64,
+                        confidence: r.get(7)?,
+                        rationale: r.get(8)?,
+                        evidence: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
+                        status: r.get(10)?,
+                        verifier_verdict: r.get(11)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
     pub fn save_findings(&self, findings: &[Finding]) -> Result<()> {
         let c = self.conn();
         for f in findings {
@@ -291,4 +383,135 @@ fn row_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         ingested_at: parse_dt(&r.get::<_, String>(9)?),
         meta: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or(serde_json::Value::Null),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Seed one session of `harness` with `n_events` UserPrompt events under a
+    /// single turn, via the real upsert path.
+    fn seed_session(store: &Store, id: &str, harness: Harness, n_events: usize) {
+        let now = Utc::now();
+        let session = Session {
+            id: id.into(),
+            harness,
+            external_id: id.into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: PathBuf::from(format!("/tmp/{id}.jsonl")),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({}),
+        };
+        let turn = Turn {
+            id: format!("{id}-t0"),
+            session_id: id.into(),
+            parent_id: None,
+            role: Role::User,
+            index: 0,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let events = (0..n_events)
+            .map(|i| EventRecord {
+                id: format!("{id}-e{i}"),
+                turn_id: turn.id.clone(),
+                session_id: id.into(),
+                ts: now,
+                event: Event::UserPrompt {
+                    text: format!("prompt {i}"),
+                    attachments: vec![],
+                    is_meta: false,
+                },
+                raw_ref: RawRef {
+                    source_path: session.source_path.clone(),
+                    offset: i as u64,
+                    line: i as u32,
+                },
+            })
+            .collect::<Vec<_>>();
+        store
+            .upsert_session_batch(&session, &[turn], &events, 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn harness_breakdown_sums_to_totals() {
+        let store = Store::memory().unwrap();
+        seed_session(&store, "c1", Harness::ClaudeCode, 3);
+        seed_session(&store, "c2", Harness::ClaudeCode, 2);
+        seed_session(&store, "x1", Harness::Codex, 4);
+
+        let pb = store.profile_with_harness_breakdown().unwrap();
+
+        // Global totals: 3 sessions, 3+2+4 = 9 events.
+        assert_eq!(pb.session_count, 3);
+        assert_eq!(pb.event_count, 9);
+
+        // Per-harness rows sum back to the global totals.
+        let summed_sessions: u32 = pb.by_harness.iter().map(|h| h.sessions).sum();
+        let summed_events: u64 = pb.by_harness.iter().map(|h| h.events).sum();
+        assert_eq!(summed_sessions, pb.session_count);
+        assert_eq!(summed_events, pb.event_count);
+
+        // Two harnesses, keyed by the snake_case as_str() value.
+        let claude = pb
+            .by_harness
+            .iter()
+            .find(|h| h.harness == "claude_code")
+            .expect("claude_code rollup present");
+        assert_eq!(claude.sessions, 2);
+        assert_eq!(claude.events, 5);
+        let codex = pb
+            .by_harness
+            .iter()
+            .find(|h| h.harness == "codex")
+            .expect("codex rollup present");
+        assert_eq!(codex.sessions, 1);
+        assert_eq!(codex.events, 4);
+    }
+
+    #[test]
+    fn finding_by_id_round_trips_and_resolves_session_harness() {
+        let store = Store::memory().unwrap();
+        seed_session(&store, "c1", Harness::ClaudeCode, 1);
+        let finding = Finding {
+            id: "f1".into(),
+            pattern_id: "CONTEXT_BLOAT".into(),
+            title: "Context bloat".into(),
+            severity: 4,
+            frequency: 0.5,
+            est_cost_tokens: 10,
+            est_cost_minutes: 5,
+            confidence: 0.8,
+            rationale: "r".into(),
+            evidence: vec![EvidenceRef {
+                session_id: "c1".into(),
+                turn_id: None,
+                event_id: None,
+                quote: Some("q".into()),
+                source_path: None,
+            }],
+            status: "confirmed".into(),
+            verifier_verdict: Some("v".into()),
+        };
+        store.save_findings(&[finding.clone()]).unwrap();
+
+        let got = store.finding_by_id("f1").unwrap().expect("finding present");
+        assert_eq!(got.pattern_id, "CONTEXT_BLOAT");
+        assert_eq!(got.evidence.len(), 1);
+        assert_eq!(got.evidence[0].session_id, "c1");
+
+        // The session referenced by the finding's evidence resolves to its harness.
+        assert_eq!(
+            store.session_harness("c1").unwrap().as_deref(),
+            Some("claude_code")
+        );
+        assert_eq!(store.session_harness("missing").unwrap(), None);
+        assert!(store.finding_by_id("missing").unwrap().is_none());
+    }
 }
