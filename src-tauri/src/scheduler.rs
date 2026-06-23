@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use crate::ingest::claude_code::ClaudeCodeAdapter;
     use crate::ingest::codex::CodexAdapter;
-    use crate::ingest::{Adapter, AdapterRegistry};
+    use crate::ingest::AdapterRegistry;
     use crate::ir::*;
     use tempfile::tempdir;
 
