@@ -8,6 +8,7 @@
 // → diagnosis_ready (reveal) → reset → loop. Every event shape matches the
 // locked Task-6 contract exactly, so what you see here is what the app renders.
 
+import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createBridge } from './bridge';
 import { WarRoom } from './WarRoom';
@@ -89,26 +90,50 @@ function buildScript(): Step[] {
 }
 
 const script = buildScript();
-const CYCLE = script[script.length - 1].at + 3000; // dwell on reveal, then loop
+const CYCLE = script[script.length - 1].at + 4500; // dwell on reveal, then loop
+
+// `DevApp` owns a tiny bit of state so the QA harness can replay the branded
+// intro each cycle (via WarRoom's `forceIntro`) and drive the scripted bridge
+// events. The reveal's findings are NOT fed in directly — they derive from the
+// scripted CONFIRMED verdicts (honest path, identical to the app), so the loop
+// is: branded intro → war-room → verdicts → slam-in reveal (real holes) → loop.
+function DevApp() {
+  // `introPulse` flips true for one tick at each cycle start, then false. WarRoom
+  // shows the one-shot intro overlay on the rising edge and clears it on the
+  // clip's own 'ended' event.
+  const [introPulse, setIntroPulse] = useState(true);
+
+  useEffect(() => {
+    let cycleStart = performance.now();
+    let idx = 0;
+    let raf = 0;
+    const pulseIntro = () => {
+      setIntroPulse(true);
+      setTimeout(() => setIntroPulse(false), 120);
+    };
+
+    const loop = () => {
+      const now = performance.now();
+      const elapsed = now - cycleStart;
+      while (idx < script.length && elapsed >= script[idx].at) {
+        const step = script[idx++];
+        bridge.ingest(step.name, step.payload);
+      }
+      if (elapsed >= CYCLE) {
+        bridge.reset();
+        cycleStart = now;
+        idx = 0;
+        pulseIntro(); // replay the branded boot next cycle
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    setTimeout(() => setIntroPulse(false), 120); // clear the initial pulse
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return <WarRoom bridge={bridge} forceIntro={introPulse} />;
+}
 
 const root = createRoot(document.getElementById('dev-root')!);
-root.render(<WarRoom bridge={bridge} />);
-
-let cycleStart = performance.now();
-let idx = 0;
-
-function loop() {
-  const now = performance.now();
-  const elapsed = now - cycleStart;
-  while (idx < script.length && elapsed >= script[idx].at) {
-    const step = script[idx++];
-    bridge.ingest(step.name, step.payload);
-  }
-  if (elapsed >= CYCLE) {
-    bridge.reset();
-    cycleStart = now;
-    idx = 0;
-  }
-  requestAnimationFrame(loop);
-}
-requestAnimationFrame(loop);
+root.render(<DevApp />);

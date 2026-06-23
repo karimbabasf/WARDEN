@@ -35,6 +35,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      remotion:
+        specifier: 4.0.482
+        version: 4.0.482(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       three:
         specifier: ^0.181.2
         version: 0.181.2

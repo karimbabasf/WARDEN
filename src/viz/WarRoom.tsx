@@ -14,13 +14,20 @@
 // once (never inside useFrame), frame-rate-independent damping, RAF paused when
 // the overlay window is hidden, and full GPU disposal on unmount.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette, Noise } from '@react-three/postprocessing';
 import { BlendFunction } from 'postprocessing';
 import * as THREE from 'three';
 import type { Bridge, SceneState, Verdict } from './bridge';
 import { harnessTheme } from './harnessTheme';
+import type { RevealFinding } from './compositions/Reveal';
+
+// LAZY Remotion boundary: the <Player> host (and the whole Remotion graph it
+// pulls) is a deferred chunk so it never loads on the summon hot path and never
+// bloats the main bundle (risk R-Bundle / R-Rem). Only mounted on first summon
+// (intro) and on the reveal phase.
+const PlayerHost = lazy(() => import('./PlayerHost'));
 
 // ── palette (mirrors style.css phosphor tokens) ──────────────────────────────
 const CORE_IDLE = new THREE.Color('#76ff9d'); // emerald phosphor
@@ -330,6 +337,30 @@ function verdictFor(scene: SceneState, findingKey: string): Verdict | undefined 
   return refuted;
 }
 
+// Humanise a snake_case pattern id into a readable hole title
+// ("unbounded_context" → "Unbounded Context"). The reveal shows real findings;
+// when the backend later carries a human title this is the deterministic
+// fallback so the slam-in always reads cleanly.
+function humanisePattern(patternId: string): string {
+  return patternId
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ') || 'Unknown Pattern';
+}
+
+// Derive the reveal's ranked findings from the REAL confirmed verdicts in scene
+// state (severity-desc). This is the honest bridge from the war-room signal to
+// the Remotion reveal: nothing is fabricated — only confirmed holes appear, each
+// with its real severity + harness. `est_cost` is left undefined (SceneState
+// does not carry it), so the reveal simply omits the cost line.
+export function deriveFindings(scene: SceneState): RevealFinding[] {
+  return Object.values(scene.verdicts)
+    .filter(v => v.verdict === 'confirmed')
+    .sort((a, b) => b.severity - a.severity)
+    .map(v => ({ title: humanisePattern(v.patternId), severity: v.severity, harness: v.harness }));
+}
+
 // Real token weight for a stage, normalised 0..1. Orchestration tokens (Fugu)
 // preferred; degrade to plain tokens off-Fugu — honest, never fabricated.
 function stageWeight(scene: SceneState, stage: string): number {
@@ -425,7 +456,7 @@ function Legend({ scene }: { scene: SceneState }) {
  * the R3F constellation, and pauses the render loop when the overlay window is
  * hidden (summon-cost / battery hygiene).
  */
-export function WarRoom({ bridge }: { bridge: Bridge }) {
+export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: boolean }) {
   const [scene, setScene] = useState<SceneState>(() => ({
     phase: 'idle',
     candidates: [],
@@ -435,15 +466,38 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
     clustered: 0,
   }));
   const [active, setActive] = useState(() => !document.hidden);
+  // Branded intro plays exactly ONCE, on first summon (hidden→visible). Tracked
+  // in a ref so re-summons never replay it; `showIntro` drives the overlay.
+  const introPlayed = useRef(!document.hidden); // already-visible dev mount = skip
+  const [showIntro, setShowIntro] = useState(false);
 
   useEffect(() => bridge.subscribe(setScene), [bridge]);
 
-  // Pause RAF when the overlay is hidden; resume on show.
+  // Dev-preview hook: the QA harness (dev.tsx) toggles `forceIntro` to replay the
+  // branded boot each loop without faking a window visibility change. No effect
+  // in the app (the prop is never passed there).
   useEffect(() => {
-    const onVis = () => setActive(!document.hidden);
+    if (forceIntro) setShowIntro(true);
+  }, [forceIntro]);
+
+  // Pause RAF when the overlay is hidden; resume on show. First time the overlay
+  // becomes visible, fire the one-shot branded intro.
+  useEffect(() => {
+    const onVis = () => {
+      const visible = !document.hidden;
+      setActive(visible);
+      if (visible && !introPlayed.current) {
+        introPlayed.current = true;
+        setShowIntro(true);
+      }
+    };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, []);
+
+  // Real confirmed holes → reveal findings (honest; empty until verdicts land).
+  const findings = useMemo(() => deriveFindings(scene), [scene.verdicts]);
+  const diagnosisId = scene.diagnosisId ?? 'diagnosis';
 
   return (
     <div className={`viz-root viz-phase-${scene.phase}`}>
@@ -456,6 +510,19 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
         <Scene scene={scene} />
       </Canvas>
       <Legend scene={scene} />
+
+      {/* Remotion overlays — lazy chunk, mounted ABOVE the canvas only when
+          needed. Suspense fallback is null so nothing blocks the warm scene. */}
+      {showIntro && (
+        <Suspense fallback={null}>
+          <PlayerHost kind="intro" findings={[]} diagnosisId={diagnosisId} onEnded={() => setShowIntro(false)} />
+        </Suspense>
+      )}
+      {scene.phase === 'reveal' && (
+        <Suspense fallback={null}>
+          <PlayerHost kind="reveal" findings={findings} diagnosisId={diagnosisId} />
+        </Suspense>
+      )}
     </div>
   );
 }

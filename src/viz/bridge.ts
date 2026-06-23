@@ -53,6 +53,8 @@ export type SceneState = {
   usage: Record<string, StageUsage>;
   /** Nodes beyond NODE_CAP that were folded into the cluster glyph. */
   clustered: number;
+  /** Real diagnosis id from `diagnosis_ready` (drives the reveal caption). */
+  diagnosisId?: string;
 };
 
 /** Hard ceiling on rendered candidate nodes; overflow becomes `clustered`. */
@@ -146,8 +148,12 @@ export function reduce(state: SceneState, name: string, payload: any): SceneStat
       return { ...state, usage: { ...state.usage, [stage]: usage }, pulses };
     }
 
-    case 'diagnosis_ready':
-      return { ...state, phase: 'reveal' };
+    case 'diagnosis_ready': {
+      // Capture the REAL diagnosis id (used as the reveal caption); the reveal's
+      // findings derive from confirmed verdicts already in state.
+      const id = typeof payload?.id === 'string' && payload.id.length > 0 ? payload.id : state.diagnosisId;
+      return { ...state, phase: 'reveal', diagnosisId: id };
+    }
 
     default:
       // ingest_progress, diagnosis_status, warden_hotkey, schema drift, … —
