@@ -276,7 +276,9 @@ listen('warden_hotkey', () => {
 document.addEventListener('keydown', ev => {
   if (ev.key === 'Escape') {
     ev.preventDefault();
-    appWindow.hide().catch(() => input.blur());
+    // Dismiss via the daemon so it also restores click-through (idle state),
+    // matching the tray + blur dismissal path. Fall back to a direct hide.
+    invoke('hide_overlay').catch(() => appWindow.hide().catch(() => input.blur()));
   }
 });
 

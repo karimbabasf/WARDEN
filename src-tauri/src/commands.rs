@@ -114,6 +114,20 @@ pub async fn ask(
     )
     .await
 }
+/// Dismiss the overlay (frontend Esc handler). Hides the pre-warmed `overlay`
+/// window and restores click-through so the desktop is interactive while idle —
+/// the same end state as the `tauri://blur` handler. Best-effort: a missing
+/// window or a platform that rejects ignore-cursor-events must not error the
+/// frontend, so failures are swallowed.
+#[tauri::command]
+pub async fn hide_overlay(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.hide();
+        let _ = w.set_ignore_cursor_events(true);
+    }
+    Ok(())
+}
 #[tauri::command]
 pub async fn apply_artifact(_id: String) -> Result<(), String> {
     Err(not_in_slice("Forge artifact apply"))

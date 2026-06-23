@@ -13,14 +13,18 @@
     "macOSPrivateApi": true,
     "windows": [{
       "title": "WARDEN",
-      "label": "main",
-      "width": 1120,
-      "height": 780,
+      "label": "overlay",
+      "width": 960,
+      "height": 640,
       "transparent": true,
       "decorations": false,
       "alwaysOnTop": true,
-      "visible": true,
       "skipTaskbar": true,
+      "visibleOnAllWorkspaces": true,
+      "focus": false,
+      "visible": false,
+      "resizable": false,
+      "shadow": false,
       "center": true
     }],
     "security": { "csp": null }
@@ -30,6 +34,9 @@
     "targets": "app",
     "category": "DeveloperTool",
     "shortDescription": "The agent that watches your agents",
-    "longDescription": "WARDEN ingests local agent transcripts and diagnoses agentic workflow leaks using Sakana Fugu."
+    "longDescription": "WARDEN ingests local agent transcripts and diagnoses agentic workflow leaks using Sakana Fugu.",
+    "macOS": {
+      "infoPlist": "Info.plist"
+    }
   }
 }
