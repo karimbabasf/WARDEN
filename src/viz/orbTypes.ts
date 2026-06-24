@@ -70,6 +70,14 @@ export type LayoutNode = {
   agent?: OrbAgent;
   /** Hubs only: outer extent of the agent's cluster (drives the territory ring). */
   territoryRadius?: number;
+  /**
+   * RADAR constellation only: the live agent this node represents. Set by
+   * `layoutRadarScene`; the Habits layout never populates it. Additive so both
+   * constellations can share `OrbLayout`/`LayoutNode` without forking the type.
+   */
+  radarAgent?: import('./radarTypes').RadarAgent;
+  /** RADAR only: the agent's depth in the forest (0 = root planet). */
+  depth?: number;
 };
 
 export type OrbLayout = {
