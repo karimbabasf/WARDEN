@@ -1,0 +1,33 @@
+{
+  "harness": "codex",
+  "external_id": "019ee0ba-8295-7ba0-9971-c5af95e77191",
+  "model_ids": ["openai"],
+  "event_kinds": [
+    "mode_change",
+    "user_prompt",
+    "thinking",
+    "assistant_text",
+    "tool_call",
+    "tool_result",
+    "token_usage",
+    "file_snapshot",
+    "system_notice",
+    "error"
+  ],
+  "token_usage": {
+    "input": 32583,
+    "output": 334,
+    "cache_read": 2432,
+    "cache_creation": 0
+  },
+  "tool_call": {
+    "tool": "mcp__search__find",
+    "call_id": "call_abc",
+    "kind": "mcp"
+  },
+  "tool_result": {
+    "call_id": "call_abc",
+    "status": "ok"
+  },
+  "system_notice_subtype": "event_msg/some_future_event"
+}

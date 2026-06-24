@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WARDEN · war-room (static QA)</title>
+    <style>
+      /* Static QA stage: the real war-room, held still on a representative scene
+         (no scripted loop, no reveal) so the node style can be eyeballed. */
+      html, body { height: 100%; margin: 0; background: #020403; overflow: hidden; }
+      #dev-root { position: fixed; inset: 0; }
+      #dev-banner {
+        position: fixed; top: 10px; left: 14px; z-index: 9;
+        font-family: "SF Mono", Menlo, monospace; font-size: 11px;
+        letter-spacing: 0.16em; text-transform: uppercase; color: #76ff9d;
+        opacity: 0.7; pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="dev-banner">WARDEN war-room · static QA</div>
+    <div id="dev-root"></div>
+    <script type="module" src="/src/viz/devWarRoom.tsx"></script>
+  </body>
+</html>

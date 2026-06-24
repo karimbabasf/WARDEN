@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WARDEN",
+  "version": "0.1.0",
+  "identifier": "ai.sakana.warden",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [{
+      "title": "WARDEN",
+      "label": "overlay",
+      "width": 960,
+      "height": 640,
+      "transparent": true,
+      "decorations": false,
+      "alwaysOnTop": true,
+      "skipTaskbar": true,
+      "visibleOnAllWorkspaces": true,
+      "focus": false,
+      "visible": false,
+      "resizable": false,
+      "shadow": false,
+      "center": true
+    }],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "app",
+    "category": "DeveloperTool",
+    "shortDescription": "The agent that watches your agents",
+    "longDescription": "WARDEN ingests local agent transcripts and diagnoses agentic workflow leaks using Sakana Fugu.",
+    "macOS": {
+      "infoPlist": "Info.plist"
+    }
+  }
+}
