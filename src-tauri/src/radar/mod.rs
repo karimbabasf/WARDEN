@@ -371,7 +371,7 @@ fn build_agent(
         ),
     };
 
-    let estimated = estimate_for_session(&events, size.context_tokens);
+    let estimated = estimate_for_session(store, s, &events, size.context_tokens);
 
     let recent_activity = recent_activity(&events);
     let est_cost_usd = est_cost_usd(&model, &exact);
@@ -406,12 +406,14 @@ fn build_agent(
     }
 }
 
-/// Derive the estimated (semantic) composition for a session, calibrated to its
-/// current exact total. `None` when there is no turn-1 `TokenUsage` baseline.
-fn estimate_for_session(
+/// Compute the raw, pre-calibration token sums for a session's estimated
+/// composition (the EXPENSIVE part — it tokenizes the transcript). `None` when there
+/// is no turn-1 `TokenUsage` baseline (checked FIRST, so a baseline-less session does
+/// zero tokenization). These sums depend only on transcript content, so they are
+/// safely cacheable by content hash (Fix #3).
+fn compute_token_counts(
     events: &[(crate::ir::Turn, crate::ir::EventRecord)],
-    exact_total: u64,
-) -> Option<RadarEstimated> {
+) -> Option<crate::store::RadarTokenCounts> {
     // turn-1 total = first TokenUsage's resident size (input+cache_read+cache_creation).
     let turn1_total = events.iter().find_map(|(_, e)| match &e.event {
         Event::TokenUsage {
@@ -446,12 +448,51 @@ fn estimate_for_session(
         }
     }
 
-    let est = estimate_composition(
+    Some(crate::store::RadarTokenCounts {
         turn1_total,
         first_user_tokens,
         conversation,
         tool_output,
         thinking,
+    })
+}
+
+/// Derive the estimated (semantic) composition for a session, calibrated to its
+/// current exact total. `None` when there is no turn-1 `TokenUsage` baseline.
+///
+/// Fix #3 (incremental): the expensive raw token sums are cached by
+/// `(session id, content hash)`. A cache HIT skips re-tokenizing entirely; a MISS
+/// (new or changed transcript) tokenizes once and upserts. The cheap, deterministic
+/// `estimate_composition` calibration to the LIVE `exact_total` is always applied
+/// fresh — so the output is byte-identical to tokenizing every time, only the
+/// redundant tokenization is removed. Best-effort: a cache read/write failure simply
+/// falls back to tokenizing (the value is never wrong, only recomputed).
+fn estimate_for_session(
+    store: &Store,
+    session: &Session,
+    events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+    exact_total: u64,
+) -> Option<RadarEstimated> {
+    // The content hash is the change-key: it advances whenever the transcript is
+    // re-ingested with new bytes, invalidating the cache for exactly that session.
+    let change_key = session.raw_hash;
+
+    let counts = match store.radar_token_cache_get(&session.id, change_key) {
+        Ok(Some(hit)) => hit, // unchanged transcript → reuse, no tokenization
+        _ => {
+            // Miss (or read error): tokenize once, then persist under the change-key.
+            let fresh = compute_token_counts(events)?;
+            let _ = store.radar_token_cache_put(&session.id, change_key, &fresh);
+            fresh
+        }
+    };
+
+    let est = estimate_composition(
+        counts.turn1_total,
+        counts.first_user_tokens,
+        counts.conversation,
+        counts.tool_output,
+        counts.thinking,
         exact_total,
     );
     Some(RadarEstimated {
@@ -781,6 +822,61 @@ mod tests {
         );
         assert_eq!(state.agents[0].depth, 0);
         assert_eq!(state.agents[0].child_count, 0);
+    }
+
+    /// Fix #3 — INCREMENTAL token cache: re-assembling an UNCHANGED store must NOT
+    /// re-tokenize. The first assemble tokenizes (cache miss) and persists the raw
+    /// sums keyed by the session's content hash; the second assemble hits the cache
+    /// and performs ZERO additional `tokenize_len` calls, while producing a
+    /// byte-identical estimated composition. This is what drops a steady-state
+    /// recompute (only the one written session changes) to ~ms.
+    #[test]
+    fn assemble_uses_token_cache_on_unchanged_session() {
+        let store = Store::memory().unwrap();
+        seed(
+            &store,
+            "live-sid",
+            "live-ext",
+            Harness::ClaudeCode,
+            Some("/Users/k/Developer/MyRepo"),
+            Some((2, 13761, 331244, 2620, "claude-opus-4-8")),
+        );
+        let reg = claude_registry(&[(100, "live-ext")]);
+
+        // First assemble: a cache miss → it tokenizes the transcript.
+        let before1 = composition::tokenize_call_count();
+        let state1 = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let tokenized_run1 = composition::tokenize_call_count() - before1;
+        assert!(
+            tokenized_run1 > 0,
+            "the first assemble must tokenize (cache miss), did {tokenized_run1} calls"
+        );
+        let est1 = state1
+            .agents
+            .iter()
+            .find(|a| a.id == "live-sid")
+            .and_then(|a| a.composition.estimated.clone())
+            .expect("estimated composition present");
+
+        // Second assemble: the store is unchanged → cache hit → ZERO tokenization.
+        let before2 = composition::tokenize_call_count();
+        let state2 = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let tokenized_run2 = composition::tokenize_call_count() - before2;
+        assert_eq!(
+            tokenized_run2, 0,
+            "an unchanged session must NOT re-tokenize on the second assemble, did {tokenized_run2}"
+        );
+        let est2 = state2
+            .agents
+            .iter()
+            .find(|a| a.id == "live-sid")
+            .and_then(|a| a.composition.estimated.clone())
+            .expect("estimated composition present");
+
+        assert_eq!(
+            est1, est2,
+            "the cached estimated composition must be byte-identical to the freshly-tokenized one"
+        );
     }
 
     /// `assemble` builds a forest: the root (depth 0, parentId null, childCount 1,

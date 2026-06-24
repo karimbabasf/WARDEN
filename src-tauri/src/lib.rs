@@ -17,10 +17,17 @@ pub mod util;
 use commands::*;
 use tauri::menu::MenuBuilder;
 
-/// Holds the RADAR liveness watchers so they outlive `setup()`. A distinct type
-/// from `scheduler::WatcherGuard` because Tauri's managed state is keyed by type —
-/// the ingest watchers and the radar watchers must each get their own slot.
-struct RadarWatcherGuard(#[allow(dead_code)] std::sync::Mutex<Vec<notify::RecommendedWatcher>>);
+/// Holds the RADAR liveness watchers AND the single recompute worker so they
+/// outlive `setup()`. A distinct type from `scheduler::WatcherGuard` because Tauri's
+/// managed state is keyed by type — the ingest watchers and the radar watchers must
+/// each get their own slot. The worker `JoinHandle` is parked here so the coalescing
+/// recompute task lives for the app's lifetime (Fix #1).
+struct RadarWatcherGuard {
+    #[allow(dead_code)]
+    watchers: std::sync::Mutex<Vec<notify::RecommendedWatcher>>,
+    #[allow(dead_code)]
+    worker: tauri::async_runtime::JoinHandle<()>,
+}
 use tauri::tray::TrayIconBuilder;
 use tauri::{ActivationPolicy, Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -96,8 +103,11 @@ pub fn run() {
                 radar_roots,
                 app.handle().clone(),
             ) {
-                Ok(watchers) => {
-                    app.manage(RadarWatcherGuard(std::sync::Mutex::new(watchers)));
+                Ok((watchers, worker)) => {
+                    app.manage(RadarWatcherGuard {
+                        watchers: std::sync::Mutex::new(watchers),
+                        worker,
+                    });
                 }
                 Err(e) => {
                     tracing::warn!(error=%format!("{e:#}"), "radar watchers failed to start")

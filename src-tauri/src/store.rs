@@ -13,6 +13,21 @@ pub struct Store {
     pub path: PathBuf,
 }
 
+/// RADAR (Fix #3): the cached, pre-calibration raw token sums for one session's
+/// estimated composition. These depend ONLY on the session's transcript content
+/// (not on the live exact total, which is applied as a deterministic calibration
+/// step afterward), so they are safely cacheable by `(session_id, change_key)`.
+/// Caching them lets a recompute skip re-tokenizing every unchanged transcript —
+/// during an FS storm only the one session being written misses the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RadarTokenCounts {
+    pub turn1_total: u64,
+    pub first_user_tokens: u64,
+    pub conversation: u64,
+    pub tool_output: u64,
+    pub thinking: u64,
+}
+
 /// Per-harness rollup of ingested volume. `harness` is the snake_case
 /// `Harness::as_str()` value so the war-room can theme it directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +93,7 @@ impl Store {
         CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY,finding_id TEXT,kind TEXT NOT NULL,target_path TEXT NOT NULL,diff TEXT NOT NULL,status TEXT NOT NULL,applied_at TEXT,backup_path TEXT);
         CREATE TABLE IF NOT EXISTS fugu_runs(id TEXT PRIMARY KEY,stage TEXT NOT NULL,model TEXT NOT NULL,effort TEXT NOT NULL,req_hash TEXT NOT NULL,input_tokens INTEGER NOT NULL,output_tokens INTEGER NOT NULL,orchestration_input_tokens INTEGER NOT NULL,orchestration_output_tokens INTEGER NOT NULL,latency_ms INTEGER NOT NULL,cost_usd REAL NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS interjections(id TEXT PRIMARY KEY,ts TEXT NOT NULL,pattern_id TEXT NOT NULL,session_id TEXT,shown INTEGER NOT NULL,dismissed INTEGER NOT NULL,muted INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS radar_token_cache(session_id TEXT PRIMARY KEY,change_key INTEGER NOT NULL,turn1_total INTEGER NOT NULL,first_user_tokens INTEGER NOT NULL,conversation INTEGER NOT NULL,tool_output INTEGER NOT NULL,thinking INTEGER NOT NULL,updated_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_events_session_kind ON events(session_id, kind);
         CREATE INDEX IF NOT EXISTS idx_turns_session_idx ON turns(session_id, idx);
         INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','1');
@@ -221,6 +237,60 @@ impl Store {
             )
             .optional()
             .map_err(Into::into)
+    }
+    /// RADAR (Fix #3): fetch a session's cached estimated-composition token sums,
+    /// but ONLY when the stored `change_key` matches `change_key` (the session's
+    /// current content hash). A mismatch (transcript changed) or absent row returns
+    /// `None`, signalling the caller to re-tokenize. `u64` round-trips through
+    /// SQLite's `i64` by bit reinterpretation (same as `raw_hash`/watermark offset).
+    pub fn radar_token_cache_get(
+        &self,
+        session_id: &str,
+        change_key: u64,
+    ) -> Result<Option<RadarTokenCounts>> {
+        self.conn()
+            .query_row(
+                "SELECT turn1_total,first_user_tokens,conversation,tool_output,thinking \
+                 FROM radar_token_cache WHERE session_id=? AND change_key=?",
+                params![session_id, change_key as i64],
+                |r| {
+                    Ok(RadarTokenCounts {
+                        turn1_total: r.get::<_, i64>(0)? as u64,
+                        first_user_tokens: r.get::<_, i64>(1)? as u64,
+                        conversation: r.get::<_, i64>(2)? as u64,
+                        tool_output: r.get::<_, i64>(3)? as u64,
+                        thinking: r.get::<_, i64>(4)? as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+    /// RADAR (Fix #3): upsert a session's estimated-composition token sums under its
+    /// current `change_key`. One row per session (PK `session_id`), so a re-tokenize
+    /// after a content change replaces the stale row in place.
+    pub fn radar_token_cache_put(
+        &self,
+        session_id: &str,
+        change_key: u64,
+        counts: &RadarTokenCounts,
+    ) -> Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO radar_token_cache\
+             (session_id,change_key,turn1_total,first_user_tokens,conversation,tool_output,thinking,updated_at) \
+             VALUES(?,?,?,?,?,?,?,?)",
+            params![
+                session_id,
+                change_key as i64,
+                counts.turn1_total as i64,
+                counts.first_user_tokens as i64,
+                counts.conversation as i64,
+                counts.tool_output as i64,
+                counts.thinking as i64,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
     }
     pub fn sessions(&self) -> Result<Vec<Session>> {
         let c = self.conn();
@@ -561,6 +631,62 @@ mod tests {
         store
             .upsert_session_batch(&session, &[turn], &events, 0)
             .unwrap();
+    }
+
+    /// Fix #3 — INCREMENTAL token cache: the radar token-count cache is keyed by
+    /// `(session_id, change_key)`. A `put` then a `get` with the SAME change-key
+    /// returns the stored counts; a `get` with a DIFFERENT change-key (the
+    /// transcript changed) returns `None` so the caller re-tokenizes. A second `put`
+    /// upserts in place (one row per session).
+    #[test]
+    fn radar_token_cache_round_trips_by_change_key() {
+        let store = Store::memory().unwrap();
+        seed_session(&store, "s1", Harness::Codex, 1);
+
+        // Miss before anything is cached.
+        assert_eq!(store.radar_token_cache_get("s1", 0xAABB).unwrap(), None);
+
+        let counts = RadarTokenCounts {
+            turn1_total: 8000,
+            first_user_tokens: 500,
+            conversation: 3000,
+            tool_output: 1500,
+            thinking: 200,
+        };
+        store.radar_token_cache_put("s1", 0xAABB, &counts).unwrap();
+
+        // Hit with the matching change-key.
+        assert_eq!(
+            store.radar_token_cache_get("s1", 0xAABB).unwrap(),
+            Some(counts.clone()),
+            "matching change-key returns the cached counts"
+        );
+        // Miss with a different change-key (content changed → must re-tokenize).
+        assert_eq!(
+            store.radar_token_cache_get("s1", 0x9999).unwrap(),
+            None,
+            "a changed change-key is a cache miss"
+        );
+
+        // Upsert in place: new key + new counts overwrite the single row.
+        let counts2 = RadarTokenCounts {
+            turn1_total: 9000,
+            first_user_tokens: 600,
+            conversation: 4000,
+            tool_output: 1000,
+            thinking: 0,
+        };
+        store.radar_token_cache_put("s1", 0x9999, &counts2).unwrap();
+        assert_eq!(
+            store.radar_token_cache_get("s1", 0x9999).unwrap(),
+            Some(counts2),
+            "the new change-key now hits with the updated counts"
+        );
+        assert_eq!(
+            store.radar_token_cache_get("s1", 0xAABB).unwrap(),
+            None,
+            "the old change-key no longer hits (row was replaced, not duplicated)"
+        );
     }
 
     #[test]

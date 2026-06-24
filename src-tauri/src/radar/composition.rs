@@ -184,16 +184,72 @@ pub fn estimate_composition(
     }
 }
 
+/// Process-wide cache of the `o200k_base` BPE encoder.
+///
+/// Building this encoder reconstructs the full ~50k-pair merge table from scratch
+/// (~73% of a radar recompute's CPU when done per call), so it MUST be built once
+/// and reused. `CoreBPE` is `Send + Sync` (plain hash maps + thread-local regex,
+/// see `tiktoken_rs`'s own `o200k_base_singleton`), so a `&'static` is shared
+/// across the recompute worker and any other caller. `None` caches a vocabulary
+/// load failure so it is not retried on every call (the fallback heuristic is used).
+static O200K_ENCODER: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> =
+    std::sync::OnceLock::new();
+/// How many times the encoder has actually been constructed — must stay 1 for the
+/// life of the process. Incremented exactly once, inside the `OnceLock` initializer.
+static O200K_ENCODER_INITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Per-thread count of `tokenize_len` invocations. THREAD-LOCAL (not a global
+/// atomic) so the radar incremental-cache tests can measure tokenization caused by
+/// their own synchronous `assemble` call without pollution from other test threads
+/// running in parallel in the same process. `assemble` tokenizes on the calling
+/// thread, so the thread-local delta is exactly that assemble's tokenizations.
+#[cfg(test)]
+thread_local! {
+    static TOKENIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test probe: `tokenize_len` invocations on THIS thread so far (compare deltas).
+#[cfg(test)]
+pub(crate) fn tokenize_call_count() -> usize {
+    TOKENIZE_CALLS.with(|c| c.get())
+}
+
+/// The cached `o200k_base` encoder (`None` if the vocabulary failed to load once).
+/// Builds it on first call and reuses the same instance thereafter.
+fn encoder() -> Option<&'static tiktoken_rs::CoreBPE> {
+    O200K_ENCODER
+        .get_or_init(|| {
+            // Count the single real construction so a test can assert "built once".
+            O200K_ENCODER_INITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tiktoken_rs::o200k_base().ok()
+        })
+        .as_ref()
+}
+
+/// Test/diagnostic probe: how many times the cached encoder has been constructed.
+/// Stays 1 once warmed — proves the per-call reconstruction is gone.
+#[cfg(test)]
+fn encoder_init_count() -> usize {
+    O200K_ENCODER_INITS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Approximate token count of `text` via a local BPE tokenizer (`o200k_base`, the
 /// GPT-4o/o-series vocabulary — the closest offline approximation to modern model
 /// tokenization). Used to derive the turn-1 preamble baseline and to size large
 /// `tool_result` blocks for the estimated composition; calibrated against the
 /// exact API totals upstream so tokenizer drift is bounded.
+///
+/// Uses the process-wide cached [`encoder`] (built once) with the SAME
+/// `encode_with_special_tokens` method as before — token counts are byte-identical;
+/// only the redundant per-call encoder reconstruction is removed.
 pub fn tokenize_len(text: &str) -> u64 {
-    match tiktoken_rs::o200k_base() {
-        Ok(bpe) => bpe.encode_with_special_tokens(text).len() as u64,
+    #[cfg(test)]
+    TOKENIZE_CALLS.with(|c| c.set(c.get() + 1));
+    match encoder() {
+        Some(bpe) => bpe.encode_with_special_tokens(text).len() as u64,
         // Fallback to a coarse chars/4 heuristic if the vocabulary fails to load.
-        Err(_) => (text.chars().count() as u64).div_ceil(4),
+        None => (text.chars().count() as u64).div_ceil(4),
     }
 }
 
@@ -352,6 +408,55 @@ mod tests {
     fn tokenize_len_is_positive_for_text() {
         assert!(tokenize_len("the quick brown fox jumps over the lazy dog") > 0);
         assert_eq!(tokenize_len(""), 0);
+    }
+
+    /// CORRECTNESS GUARD for the encoder-cache refactor: `tokenize_len` must remain
+    /// byte-identical to a freshly-built `o200k_base()` encoder's
+    /// `encode_with_special_tokens(text).len()` — the EXACT method the pre-cache code
+    /// used. This includes text containing a special-token literal (`<|endoftext|>`),
+    /// where `encode_with_special_tokens` (collapses it to ONE token) and
+    /// `encode_ordinary` (splits it into several) DIVERGE — proving the cache keeps
+    /// the same method and so the same counts.
+    #[test]
+    fn tokenize_len_matches_encode_with_special_tokens_exactly() {
+        let bpe = tiktoken_rs::o200k_base().expect("o200k_base loads");
+        for s in [
+            "",
+            "hello world",
+            "the quick brown fox jumps over the lazy dog",
+            "fn main() { println!(\"{}\", 42); }",
+            "emoji 🦀 and unicode café — naïve",
+            // Special-token literal: collapses to 1 token under special-token
+            // encoding, but would be several tokens under encode_ordinary.
+            "a prompt that ends with <|endoftext|> inside it",
+        ] {
+            let expected = bpe.encode_with_special_tokens(s).len() as u64;
+            assert_eq!(
+                tokenize_len(s),
+                expected,
+                "tokenize_len must equal encode_with_special_tokens len for {s:?}"
+            );
+        }
+    }
+
+    /// The expensive `o200k_base` encoder is constructed EXACTLY ONCE across many
+    /// `tokenize_len` calls (this is the ~70% CPU win): the cache builds it on first
+    /// use and reuses the same instance thereafter. Instrumented via the cache's
+    /// `encoder_init_count()` probe.
+    #[test]
+    fn encoder_is_constructed_once_across_calls() {
+        // Touch the encoder so it is initialized regardless of test ordering.
+        let _ = tokenize_len("warm up the cache");
+        let before = encoder_init_count();
+        assert_eq!(before, 1, "encoder is built on first use");
+        for _ in 0..500 {
+            let _ = tokenize_len("the quick brown fox jumps over the lazy dog");
+        }
+        assert_eq!(
+            encoder_init_count(),
+            1,
+            "the encoder must not be rebuilt on subsequent calls"
+        );
     }
 
     /// A non-TokenUsage event yields a zeroed size and composition (defensive).

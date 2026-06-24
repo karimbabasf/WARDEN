@@ -244,18 +244,132 @@ pub fn recompute_and_emit_radar(
     let _ = app.emit("radar_state", &state);
 }
 
+/// A cheap, thread-safe "the live forest changed" signal shared between the FS
+/// watchers (producers) and the single recompute worker (consumer).
+///
+/// `mark_dirty` is non-blocking and safe to call from a `notify` callback thread:
+/// it sets a flag and wakes the worker. Many rapid calls collapse onto the one flag
+/// — the burst is coalesced for free, so a storm of FS events can never fan out to a
+/// storm of recomputes.
+#[derive(Clone)]
+pub struct RadarDirtySignal {
+    inner: Arc<RadarDirtyInner>,
+}
+
+struct RadarDirtyInner {
+    dirty: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl RadarDirtySignal {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RadarDirtyInner {
+                dirty: std::sync::atomic::AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    /// Mark the forest dirty and wake the worker. Cheap + non-blocking; callable
+    /// from any thread (including a `notify` watcher callback).
+    pub fn mark_dirty(&self) {
+        self.inner
+            .dirty
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.notify.notify_one();
+    }
+}
+
+impl Default for RadarDirtySignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Spawn THE single, long-lived radar recompute worker (Fix #1 — the 800%→≤1-core
+/// cap). It is the ONLY place a recompute is dispatched, and it runs recomputes
+/// strictly one-at-a-time:
+///
+/// 1. wait until the forest is dirty (sleep on the `Notify` otherwise);
+/// 2. claim the work (clear the dirty flag) and coalesce a `debounce` window so a
+///    rapid burst becomes ONE recompute;
+/// 3. run `recompute` EXACTLY ONCE, on a blocking thread so it cannot starve the
+///    async runtime, and `await` it so the next iteration cannot start until this
+///    recompute has finished — **never two concurrent**;
+/// 4. loop. A signal raised during the run left the flag set, so the latest state is
+///    always eventually recomputed (at most one in-flight + one queued).
+///
+/// `recompute` is the (blocking) work — in production it recomputes the forest and
+/// emits `radar_state`; tests inject a counting closure. Returns the worker's
+/// `JoinHandle` (drop/abort to stop it).
+///
+/// Spawned via [`tauri::async_runtime::spawn`] so it does NOT require an ambient
+/// Tokio runtime at the call site (Tauri's `setup()` runs without one) — Tauri's
+/// global runtime is a full Tokio runtime, so the worker's internal
+/// `tokio::time::sleep` / `spawn_blocking` resolve against it once the future runs.
+pub fn spawn_radar_recompute_worker<F>(
+    signal: RadarDirtySignal,
+    debounce: Duration,
+    recompute: F,
+) -> tauri::async_runtime::JoinHandle<()>
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    use std::sync::atomic::Ordering;
+    let recompute = Arc::new(recompute);
+    tauri::async_runtime::spawn(async move {
+        loop {
+            // The dirty flag is the SINGLE source of truth; `Notify` is only a wakeup
+            // hint. Claim work by clearing the flag — if it was not set, sleep until a
+            // signal and loop back to re-check (a stale/leftover `Notify` permit then
+            // just causes a harmless re-check, never an extra recompute).
+            if !signal.inner.dirty.swap(false, Ordering::SeqCst) {
+                signal.inner.notify.notified().await;
+                continue;
+            }
+
+            // Coalesce the burst: further signals during this window just re-set the
+            // flag (claimed by the next iteration) — they do not stack recomputes.
+            if !debounce.is_zero() {
+                tokio::time::sleep(debounce).await;
+                // Re-claim anything that arrived during the debounce window so it is
+                // folded into THIS recompute rather than triggering another.
+                signal.inner.dirty.store(false, Ordering::SeqCst);
+            }
+
+            // Run exactly one recompute, serialized: a blocking task we await, so the
+            // loop cannot launch a second recompute until this one returns. A signal
+            // raised during the run sets the flag again → exactly one follow-up.
+            let job = recompute.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || job()).await {
+                tracing::warn!(error=?e, "radar recompute task failed");
+            }
+        }
+    })
+}
+
 /// Spawn the RADAR liveness watchers: the Claude `~/.claude/sessions` registry
 /// (create/delete ⇒ globe bloom/implode) plus the Codex live + archived roots
 /// (archive-move ⇒ done). On any change we recompute the whole forest from files
 /// and emit `radar_state` — the forest is ephemeral, so a full recompute is the
-/// honest, race-free path (FSEvents coalesces; see CLAUDE.md). Best-effort: a
-/// missing root is skipped; the returned watchers must outlive `setup()`.
+/// honest, race-free path (FSEvents coalesces; see CLAUDE.md).
+///
+/// Fix #1: the watchers no longer recompute inline. Each FS event only calls
+/// `signal.mark_dirty()` (cheap, non-blocking); a SINGLE [`spawn_radar_recompute_worker`]
+/// drains the signal and runs `recompute_and_emit_radar` strictly one-at-a-time. This
+/// caps a multi-root FSEvents storm at ~one core instead of N overlapping recomputes.
+/// Best-effort: a missing root is skipped; the returned watchers + worker handle must
+/// outlive `setup()`.
 pub fn spawn_radar_watcher(
     store: Store,
     sessions_dir: PathBuf,
     extra_roots: Vec<PathBuf>,
     app: tauri::AppHandle,
-) -> Result<Vec<notify::RecommendedWatcher>> {
+) -> Result<(
+    Vec<notify::RecommendedWatcher>,
+    tauri::async_runtime::JoinHandle<()>,
+)> {
     use notify::{EventKind, RecursiveMode, Watcher};
 
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -265,19 +379,26 @@ pub fn spawn_radar_watcher(
         }
     }
 
+    // The single dirty signal shared by every watcher, drained by one worker that
+    // recomputes + emits at most once per debounce window.
+    let signal = RadarDirtySignal::new();
+    let worker = {
+        let store = store.clone();
+        let app = app.clone();
+        let sessions_dir = sessions_dir.clone();
+        let signal = signal.clone();
+        spawn_radar_recompute_worker(signal, debounce(), move || {
+            recompute_and_emit_radar(&store, &sessions_dir, &app);
+        })
+    };
+
     let mut watchers = Vec::new();
     for root in roots {
         if !root.exists() {
             tracing::info!(root=%root.display(), "radar watch root absent; skipping");
             continue;
         }
-        let store = store.clone();
-        let app = app.clone();
-        let sessions_dir = sessions_dir.clone();
-        let debounce = debounce();
-        let mut last = Instant::now()
-            .checked_sub(debounce)
-            .unwrap_or_else(Instant::now);
+        let signal = signal.clone();
 
         let mut watcher = notify::recommended_watcher(
             move |res: notify::Result<notify::Event>| {
@@ -295,14 +416,10 @@ pub fn spawn_radar_watcher(
                 ) {
                     return;
                 }
-                // Debounce coalesced bursts across the whole root (the recompute is
-                // forest-wide, so per-path debouncing is unnecessary).
-                let now = Instant::now();
-                if now.duration_since(last) < debounce {
-                    return;
-                }
-                last = now;
-                recompute_and_emit_radar(&store, &sessions_dir, &app);
+                // Do NOT recompute on the watcher thread — just signal the worker. The
+                // burst is coalesced + serialized there, so overlapping events across
+                // roots cannot spawn overlapping recomputes.
+                signal.mark_dirty();
             },
         )
         .context("create radar watcher")?;
@@ -313,7 +430,7 @@ pub fn spawn_radar_watcher(
         tracing::info!(root=%root.display(), "watching for live agents (radar)");
         watchers.push(watcher);
     }
-    Ok(watchers)
+    Ok((watchers, worker))
 }
 
 #[cfg(test)]
@@ -323,7 +440,106 @@ mod tests {
     use crate::ingest::codex::CodexAdapter;
     use crate::ingest::AdapterRegistry;
     use crate::ir::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
+
+    /// Fix #1 — COALESCING: a burst of N `mark_dirty()` signals must collapse to a
+    /// SINGLE recompute per debounce window, and recomputes must NEVER overlap. This
+    /// is what caps CPU at ~1 core: 800 FS events no longer fan out to 800 (or even
+    /// N-concurrent) recomputes — at most one runs, at most one is queued behind it.
+    #[tokio::test]
+    async fn radar_recompute_worker_coalesces_burst_and_never_overlaps() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+
+        let signal = RadarDirtySignal::new();
+        // Short debounce so the test is fast; the callback simulates a recompute that
+        // takes real time, so an overlapping dispatch would be observable.
+        let worker = {
+            let runs = runs.clone();
+            let in_flight = in_flight.clone();
+            let max_in_flight = max_in_flight.clone();
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(40), move || {
+                let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                max_in_flight.fetch_max(cur, Ordering::SeqCst);
+                // Simulate a non-trivial recompute body.
+                std::thread::sleep(Duration::from_millis(30));
+                runs.fetch_add(1, Ordering::SeqCst);
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+            })
+        };
+
+        // Burst 1: 50 rapid signals (mimics an FSEvents storm across roots).
+        for _ in 0..50 {
+            signal.mark_dirty();
+        }
+        // Wait past the debounce + the simulated recompute body.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let after_burst1 = runs.load(Ordering::SeqCst);
+        assert!(
+            (1..=2).contains(&after_burst1),
+            "a 50-signal burst must collapse to 1 recompute (≤2 with a trailing edge), got {after_burst1}"
+        );
+
+        // Burst 2: the worker is long-lived and serves the next burst too.
+        for _ in 0..50 {
+            signal.mark_dirty();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let after_burst2 = runs.load(Ordering::SeqCst);
+        assert!(
+            after_burst2 > after_burst1,
+            "the worker must keep serving subsequent bursts ({after_burst1} -> {after_burst2})"
+        );
+        assert!(
+            after_burst2 <= after_burst1 + 2,
+            "the second burst must also coalesce, got {after_burst2} total"
+        );
+
+        // THE CAP: no two recomputes were ever in flight at once.
+        assert_eq!(
+            max_in_flight.load(Ordering::SeqCst),
+            1,
+            "recomputes must be strictly serialized — never two concurrent"
+        );
+
+        worker.abort();
+    }
+
+    /// A signal raised WHILE a recompute is running is not lost: the worker observes
+    /// the dirty bit set during the run and performs exactly one follow-up recompute
+    /// (the "+1 queued" guarantee — the latest state is always eventually emitted).
+    #[tokio::test]
+    async fn radar_recompute_worker_runs_once_more_for_signal_during_run() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let signal = RadarDirtySignal::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+
+        let worker = {
+            let runs = runs.clone();
+            let started = started.clone();
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(10), move || {
+                started.notify_one();
+                std::thread::sleep(Duration::from_millis(60));
+                runs.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+
+        // Kick the first recompute and wait until it has actually started running.
+        signal.mark_dirty();
+        started.notified().await;
+        // Raise a new signal mid-run — it must trigger exactly one more recompute.
+        signal.mark_dirty();
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let total = runs.load(Ordering::SeqCst);
+        assert_eq!(
+            total, 2,
+            "a signal during a run yields exactly one follow-up recompute, got {total}"
+        );
+        worker.abort();
+    }
 
     /// Build a registry over a single Codex adapter rooted at `root` (its archived
     /// root points at the same dir, harmless for these tests).
