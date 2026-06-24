@@ -18,3 +18,5 @@ status.sh
 # playwright-mcp + viz verification artifacts
 .playwright-mcp/
 /warden-*.png
+/*stars*.png
+/star-check-*.png
