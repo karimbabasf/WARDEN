@@ -13,7 +13,7 @@
 // palette, so Radar uses its OWN heat-coloured globe + link mesh here rather than
 // mutating those — but mirrors their lattice look so the two constellations match.
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, type MutableRefObject } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import { Sparkles, Stars, Environment, Lightformer, Wireframe } from '@react-three/drei';
@@ -24,11 +24,7 @@ import { layoutRadarScene } from './radarLayout';
 import { radarHarness, heatColor } from './radarTheme';
 import { CameraRig } from './CameraRig';
 import { frameloopFor } from './WarRoom';
-
-// Structural shape of the lifecycle reconciler's output (Task 16 owns the full
-// module + reducer). Declared locally so this render compiles independently and
-// only consumes the `scale` it needs; the reconciler's richer entry is assignable.
-export type LifecycleMap = Record<string, { scale: number }>;
+import { reconcileLifecycle, isVisible, type LifecycleMap, type LiveId } from './radarLifecycle';
 
 const BG = '#020403';
 const WHITE = new THREE.Color('#ffffff');
@@ -75,7 +71,7 @@ function RadarGlobe({
   selected,
   hovered,
   dimmed,
-  lifecycleScale,
+  lifecycleRef,
   onHover,
   onLeave,
   onSelect,
@@ -84,7 +80,8 @@ function RadarGlobe({
   selected: boolean;
   hovered: boolean;
   dimmed: boolean;
-  lifecycleScale: number;
+  /** Live read of the reconciler's per-id scale (no re-render on tween). */
+  lifecycleRef: MutableRefObject<LifecycleMap>;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -150,7 +147,9 @@ function RadarGlobe({
     const breathe = 1 + Math.sin(t * breatheRate + seed * 6.28) * breatheAmp;
     const boost = selected ? 0.22 : hovered ? 0.07 : 0;
 
-    // lifecycleScale (0..1) is the spawn-in / implode-out factor from the reconciler.
+    // lifecycle scale (0..1) is the spawn-in / implode-out factor from the pure
+    // reconciler — read live from the ref so a tween never triggers a re-render.
+    const lifecycleScale = lifecycleRef.current[node.id]?.scale ?? 1;
     const targetScale = node.radius * (1 + boost) * Math.max(0, lifecycleScale);
     const fillGlow = 0.25 + agent.fillPct * 0.65; // fuller = hotter core
     const idleDim = working ? 0 : 0.28; // idle agents read dimmer (at-a-glance who's thinking)
@@ -369,16 +368,25 @@ export type RadarConstellationProps = {
   model: RadarSceneModel;
   hoveredId: string | null;
   selectedId: string | null;
-  lifecycle?: LifecycleMap;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
   onClear: () => void;
 };
 
+// Steps the PURE lifecycle reconciler once per frame into a ref the globes read
+// live (no re-render on tween). Must live inside the Canvas to get useFrame's dt.
+function LifecycleDriver({ live, mapRef }: { live: LiveId[]; mapRef: MutableRefObject<LifecycleMap> }) {
+  useFrame((_, dtRaw) => {
+    const dt = Math.min(dtRaw, 0.05);
+    mapRef.current = reconcileLifecycle(mapRef.current, live, dt);
+  });
+  return null;
+}
+
 // The scene body (lights + space + nodes). Pulled out so it can sit inside the
 // shared <Canvas> in WarRoom OR a standalone <Canvas> in the dev harness.
-export function RadarSceneBody({ model, hoveredId, selectedId, lifecycle, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
+export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
   const { gl } = useThree();
   useEffect(() => {
     gl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -387,8 +395,34 @@ export function RadarSceneBody({ model, hoveredId, selectedId, lifecycle, onHove
   }, [gl]);
 
   const layout = useMemo(() => layoutRadarScene(model), [model]);
+
+  // Persistent lifecycle map (frame-stepped) + a cache of the last layout node per
+  // id, so an imploding agent keeps rendering at its last position until it has
+  // fully collapsed-into-self (spec §8 — removals never just pop out).
+  const lifecycleRef = useRef<LifecycleMap>({});
+  const nodeCache = useRef<Map<string, LayoutNode>>(new Map());
+  for (const n of layout.nodes) nodeCache.current.set(n.id, n);
+
+  const live = useMemo<LiveId[]>(
+    () => model.agents.map((a) => ({ id: a.id, status: a.status })),
+    [model],
+  );
+
+  // Render the live nodes PLUS any cached node still mid-implosion (present in the
+  // lifecycle map, not yet `gone`, and no longer in the live layout).
+  const liveIds = useMemo(() => new Set(layout.nodes.map((n) => n.id)), [layout]);
+  const ghostNodes = useMemo(() => {
+    const ghosts: LayoutNode[] = [];
+    for (const [id, entry] of Object.entries(lifecycleRef.current)) {
+      if (liveIds.has(id) || !isVisible(entry)) continue;
+      const cached = nodeCache.current.get(id);
+      if (cached) ghosts.push(cached);
+    }
+    return ghosts;
+  }, [liveIds, model]);
+
+  const renderNodes = useMemo(() => [...layout.nodes, ...ghostNodes], [layout, ghostNodes]);
   const selectedNode = useMemo(() => layout.nodes.find((n) => n.id === selectedId) ?? null, [layout, selectedId]);
-  const selectedAgentId = selectedNode?.id ?? null;
 
   return (
     <>
@@ -408,18 +442,19 @@ export function RadarSceneBody({ model, hoveredId, selectedId, lifecycle, onHove
       <Stars radius={36} depth={48} count={3800} factor={5} saturation={0} fade speed={0.08} />
       <Sparkles count={40} scale={[28, 16, 26]} size={1.4} speed={0.05} opacity={0.22} color="#d8c8ff" />
 
+      <LifecycleDriver live={live} mapRef={lifecycleRef} />
       <CameraRig selected={selectedNode} />
 
       <group onPointerMissed={onClear}>
         <RadarLinks layout={layout} />
-        {layout.nodes.map((node) => (
+        {renderNodes.map((node) => (
           <RadarGlobe
             key={node.id}
             node={node}
             selected={selectedId === node.id}
             hovered={hoveredId === node.id}
-            dimmed={Boolean(selectedId && selectedId !== node.id && node.id !== selectedAgentId)}
-            lifecycleScale={lifecycle?.[node.id]?.scale ?? 1}
+            dimmed={Boolean(selectedId && selectedId !== node.id)}
+            lifecycleRef={lifecycleRef}
             onHover={onHover}
             onLeave={onLeave}
             onSelect={onSelect}

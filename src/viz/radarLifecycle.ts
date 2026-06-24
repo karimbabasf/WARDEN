@@ -1,0 +1,115 @@
+// radarLifecycle.ts — the PURE lifecycle reconciler for radar globes.
+//
+// Smoothness is a hard requirement (spec §8): nothing ever snaps. This module is
+// the single source of per-globe scale, derived frame-by-frame from a damped tween:
+//
+//   • a NEW agent → `spawning`, scale eased 0 → 1 (it blooms / a moon emerges).
+//   • an agent still present → `alive` at full scale (fill/heat tween elsewhere).
+//   • a vanished or `status:'closed'` agent → `imploding`, scale eased → 0
+//     (collapse-into-self), then `gone` and dropped from the map.
+//   • a re-appearing agent mid-implosion → back to `spawning` (grows again, no snap).
+//
+// It is a reducer over (prevMap, liveIds, dt) — zero Three.js — so the whole
+// spawn→grow→implode behaviour is unit-tested deterministically. `RadarConstellation`
+// multiplies each mesh's scale by the entry's `scale`. `crossfadeFactor` is the
+// equally-pure tab cross-fade (one overlay, two scenes).
+
+import { dampValue } from './useOrbCamera';
+
+export type LifecyclePhase = 'spawning' | 'alive' | 'imploding' | 'gone';
+
+export type LifecycleEntry = {
+  phase: LifecyclePhase;
+  /** Seconds spent in the current phase (for staging secondary effects). */
+  t: number;
+  /** 0..1 render scale — the load-bearing smoothness value. */
+  scale: number;
+};
+
+export type LifecycleMap = Record<string, LifecycleEntry>;
+
+/** The live forest's id + status, as fed each frame from the radar model. */
+export type LiveId = { id: string; status: 'working' | 'idle' | 'closed' };
+
+// Tween rates (per second, exp-damped → inherently dt-bounded, never overshoot).
+const SPAWN_LAMBDA = 7;
+const IMPLODE_LAMBDA = 9;
+const ALIVE_AT = 0.985; // spawning promotes to alive past this scale
+const GONE_AT = 0.01; // imploding finishes (→ gone, then dropped) below this scale
+const CROSSFADE_LAMBDA = 6;
+
+/**
+ * Fold one frame of the live forest into the lifecycle map, returning a NEW map.
+ * `dt` is the frame delta in seconds (clamp upstream for tab-away spikes).
+ */
+export function reconcileLifecycle(prev: LifecycleMap, live: LiveId[], dt: number): LifecycleMap {
+  const next: LifecycleMap = {};
+  const liveById = new Map(live.map((l) => [l.id, l]));
+
+  // 1) Every live (non-closed) id: spawn or stay alive.
+  for (const { id, status } of live) {
+    const was = prev[id];
+    const closed = status === 'closed';
+
+    if (closed) {
+      // Present but ended → implode (handled in the same shrink path as vanished).
+      const from = was ?? { phase: 'alive' as LifecyclePhase, t: 0, scale: 1 };
+      const scale = dampValue(from.scale, 0, IMPLODE_LAMBDA, dt);
+      if (scale <= GONE_AT) {
+        next[id] = { phase: 'gone', t: from.t + dt, scale: 0 };
+      } else {
+        next[id] = { phase: 'imploding', t: from.phase === 'imploding' ? from.t + dt : 0, scale };
+      }
+      continue;
+    }
+
+    if (!was || was.phase === 'imploding' || was.phase === 'gone') {
+      // brand new, or caught mid-implosion and reborn → (re)spawn from current scale
+      const startScale = was ? was.scale : 0;
+      const scale = dampValue(startScale, 1, SPAWN_LAMBDA, dt);
+      next[id] = { phase: 'spawning', t: 0, scale };
+      continue;
+    }
+
+    if (was.phase === 'spawning') {
+      const scale = dampValue(was.scale, 1, SPAWN_LAMBDA, dt);
+      next[id] =
+        scale >= ALIVE_AT
+          ? { phase: 'alive', t: 0, scale: 1 }
+          : { phase: 'spawning', t: was.t + dt, scale };
+      continue;
+    }
+
+    // already alive → hold full scale (heat/position tween lives in the render)
+    next[id] = { phase: 'alive', t: was.t + dt, scale: 1 };
+  }
+
+  // 2) Ids present last frame but no longer live → implode then drop.
+  for (const id in prev) {
+    if (liveById.has(id)) continue; // handled above
+    const was = prev[id];
+    if (was.phase === 'gone') continue; // already finished → let it fall out of the map
+    const scale = dampValue(was.scale, 0, IMPLODE_LAMBDA, dt);
+    if (scale <= GONE_AT) {
+      next[id] = { phase: 'gone', t: was.t + dt, scale: 0 };
+    } else {
+      next[id] = { phase: 'imploding', t: was.phase === 'imploding' ? was.t + dt : 0, scale };
+    }
+  }
+
+  return next;
+}
+
+/** A node is renderable until it has fully collapsed (`gone`). Unknown = visible. */
+export function isVisible(entry: LifecycleEntry | undefined): boolean {
+  if (!entry) return true;
+  return entry.phase !== 'gone';
+}
+
+/**
+ * Damp a cross-fade factor toward its target (1 = show this scene, 0 = hide it).
+ * Pure + dt-bounded so a tab switch fades the two constellations, never cuts.
+ */
+export function crossfadeFactor(current: number, target: 0 | 1, dt: number): number {
+  return dampValue(current, target, CROSSFADE_LAMBDA, dt);
+}
