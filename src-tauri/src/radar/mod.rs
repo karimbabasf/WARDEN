@@ -116,6 +116,7 @@ pub fn assemble(
     store: &Store,
     sessions_dir: &Path,
     is_alive: &dyn Fn(u32) -> bool,
+    is_codex_open: &dyn Fn(&Session) -> bool,
     now: DateTime<Utc>,
 ) -> RadarState {
     let sessions = store.sessions().unwrap_or_default();
@@ -130,20 +131,54 @@ pub fn assemble(
         .map(|(s, st)| (s.session_id, st))
         .collect();
 
-    // childCount per session id (how many sessions name it as parent).
-    let mut child_count: HashMap<String, u32> = HashMap::new();
+    // parent link per session id (None = root). Built for every stored session so
+    // we can resolve a subagent's root before deciding membership.
     let mut parent_of: HashMap<String, Option<String>> = HashMap::new();
     for s in &sessions {
         let parent = store.parent_of(&s.id).ok().flatten();
-        if let Some(p) = &parent {
-            *child_count.entry(p.clone()).or_insert(0) += 1;
-        }
         parent_of.insert(s.id.clone(), parent);
     }
 
-    // Depth is the parent-chain length (root = 0). Memoized over the parent map.
+    // The OPEN FOREST: include a session ONLY if it is currently open (spec §3 "the
+    // set of agent trees currently open", §5 "the live forest"). A root is directly
+    // open when — Claude: its `external_id` is in the live registry partition (a dead
+    // PID was already dropped by `partition_claude`); Codex: its rollout currently
+    // lives under `~/.codex/sessions/` and has NOT been archived (`is_codex_open`).
+    // A subagent is open iff the ROOT of its parent-chain is directly open — close
+    // the root and the whole tree implodes; this also guarantees no kept subagent
+    // ever dangles (its parent shares the same open root, so it is kept too).
+    let directly_open = |s: &Session| -> bool {
+        match s.harness {
+            Harness::Codex => is_codex_open(s),
+            _ => claude_status.contains_key(&s.external_id),
+        }
+    };
+    let by_id: HashMap<&str, &Session> = sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+    let open: HashMap<String, bool> = sessions
+        .iter()
+        .map(|s| (s.id.clone(), root_is_open(&s.id, &parent_of, &by_id, &directly_open)))
+        .collect();
+    let is_open = |id: &str| open.get(id).copied().unwrap_or(false);
+
+    // childCount per session id, counted over the OPEN set only (a closed child must
+    // not inflate an open parent's count).
+    let mut child_count: HashMap<String, u32> = HashMap::new();
+    for s in &sessions {
+        if !is_open(&s.id) {
+            continue;
+        }
+        if let Some(Some(p)) = parent_of.get(&s.id) {
+            *child_count.entry(p.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Build an agent for each OPEN session. Depth is the parent-chain length within
+    // the (open) tree (root = 0), memoized over the parent map.
     let mut agents = Vec::with_capacity(sessions.len());
     for s in &sessions {
+        if !is_open(&s.id) {
+            continue;
+        }
         let parent_id = parent_of.get(&s.id).cloned().flatten();
         let depth = depth_of(&s.id, &parent_of);
         let status = agent_status(s, &claude_status, &mtime_secs_ago);
@@ -161,6 +196,31 @@ pub fn assemble(
         generated_at: now.to_rfc3339(),
         agents,
     }
+}
+
+/// Walk a session's parent-chain to its root and report whether that root is
+/// directly open. A session is a member of the live forest iff its root agent is
+/// open (a subagent rides on its open root; an orphan under a closed root is
+/// excluded). Bounded to avoid looping on a malformed cycle; a chain whose parent
+/// id is absent from the store is treated as ending at the current node (root).
+fn root_is_open(
+    id: &str,
+    parent_of: &HashMap<String, Option<String>>,
+    by_id: &HashMap<&str, &Session>,
+    directly_open: &dyn Fn(&Session) -> bool,
+) -> bool {
+    let mut cur = id.to_string();
+    for _ in 0..64 {
+        match parent_of.get(&cur).and_then(|p| p.clone()) {
+            // A parent that is not itself a stored session can't anchor a tree —
+            // stop here and judge the current node as the effective root.
+            Some(p) if by_id.contains_key(p.as_str()) => cur = p,
+            _ => break,
+        }
+    }
+    by_id
+        .get(cur.as_str())
+        .is_some_and(|root| directly_open(root))
 }
 
 /// Status for one session: a Claude session uses the registry partition (by
@@ -489,7 +549,61 @@ fn relink_store_subagents(store: &Store) {
 /// when they form after the startup backfill.
 pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> RadarState {
     relink_store_subagents(store);
-    assemble(store, sessions_dir, &liveness::pid_alive, Utc::now())
+    // The Codex live set is the set of rollout uuids whose file currently sits under
+    // `~/.codex/sessions/` (and NOT under `~/.codex/archived_sessions/`). We scan the
+    // two roots ONCE here, then close over the resulting set so `assemble` stays a
+    // pure join (no per-session FS walk inside the tested path). `source_path` in the
+    // store can be stale after Codex moves a rollout to the archive, so membership is
+    // decided by the CURRENT on-disk location, never by the stored path.
+    let live_codex = live_codex_rollout_ids(
+        &crate::util::default_codex_sessions(),
+        &crate::util::default_codex_archived_sessions(),
+    );
+    let is_codex_open = |s: &Session| live_codex.contains(s.external_id.as_str());
+    assemble(
+        store,
+        sessions_dir,
+        &liveness::pid_alive,
+        &is_codex_open,
+        Utc::now(),
+    )
+}
+
+/// Scan the two Codex roots and return the set of rollout UUIDs that are currently
+/// OPEN — i.e. present under `sessions_dir` and absent from `archived_dir`. The
+/// archive move is Codex's "done" signal (spec §4.3), so an id in the archive is
+/// closed even if a stale `sessions/` copy lingers. Thin FS wrapper, kept OUT of the
+/// unit-tested path (`assemble` receives the resolved set as a closure). A missing
+/// dir contributes nothing (yields an empty contribution, not an error).
+fn live_codex_rollout_ids(
+    sessions_dir: &Path,
+    archived_dir: &Path,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let scan = |root: &Path| -> HashSet<String> {
+        let mut ids = HashSet::new();
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            let is_rollout = entry.file_type().is_file()
+                && p.extension().map(|x| x == "jsonl").unwrap_or(false)
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("rollout-"))
+                    .unwrap_or(false);
+            if is_rollout {
+                ids.insert(crate::ingest::codex::external_id_from_filename(p));
+            }
+        }
+        ids
+    };
+    let archived = scan(archived_dir);
+    scan(sessions_dir)
+        .into_iter()
+        .filter(|id| !archived.contains(id))
+        .collect()
 }
 
 #[cfg(test)]
@@ -580,6 +694,28 @@ mod tests {
             .unwrap();
     }
 
+    /// Build a temp Claude liveness registry dir holding a `<pid>.json` per
+    /// `(pid, external_id)`, so the named root sessions count as currently OPEN under
+    /// the membership filter. Returns the tempdir guard (drop = cleanup) — keep it
+    /// alive for the duration of the test.
+    fn claude_registry(entries: &[(u32, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (pid, sid) in entries {
+            std::fs::write(
+                dir.path().join(format!("{pid}.json")),
+                serde_json::json!({ "pid": pid, "sessionId": sid, "cwd": "/work" }).to_string(),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    /// A Codex-open predicate that treats every Codex session as open — used by
+    /// tests whose subject is composition/labels/links, not membership.
+    fn codex_all_open(_: &Session) -> bool {
+        true
+    }
+
     /// `assemble` builds a forest: the root (depth 0, parentId null, childCount 1,
     /// populated occupancy + exact composition) and a linked child (depth 1,
     /// parentId == root). JSON serializes with camelCase keys.
@@ -604,9 +740,11 @@ mod tests {
         );
         store.link_child_session("child-sid", "root-sid").unwrap();
 
-        // No registry dir → liveness falls back to mtime/idle; inject is_alive=true.
+        // The root is registered as open (its external id is in the live registry);
+        // the child rides on its open root. is_alive=true; codex predicate unused.
+        let reg = claude_registry(&[(100, "root-ext")]);
         let now = Utc::now();
-        let state = assemble(&store, Path::new("/no/registry"), &|_| true, now);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
 
         assert_eq!(state.agents.len(), 2);
         let root = state
@@ -705,13 +843,25 @@ mod tests {
             "precondition: child is unlinked before recompute"
         );
 
-        let state = recompute_radar_state(&store, Path::new("/no/registry"));
+        // Re-derive linkage as `recompute_radar_state` does, then assemble with the
+        // two Codex sessions injected as open (membership decided by the closure, so
+        // the test does not depend on real ~/.codex rollouts on disk).
+        relink_store_subagents(&store);
+        let open_ids = ["thread-parent", "thread-child"];
+        let is_codex_open = |s: &Session| open_ids.contains(&s.external_id.as_str());
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &is_codex_open,
+            Utc::now(),
+        );
 
         // Recompute re-derived the link and persisted it.
         assert_eq!(
             store.parent_of("cx-child").unwrap(),
             Some("cx-parent".to_string()),
-            "recompute must persist the newly-resolvable parent"
+            "relink must persist the newly-resolvable parent"
         );
         let child = state
             .agents
@@ -763,7 +913,8 @@ mod tests {
             .unwrap();
         store.link_child_session("c-sid", "p-sid").unwrap();
 
-        let state = assemble(&store, Path::new("/no/registry"), &|_| true, Utc::now());
+        let reg = claude_registry(&[(100, "p-ext")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
         let c = state
             .agents
             .iter()
@@ -829,11 +980,110 @@ mod tests {
     fn assemble_session_without_usage_is_zeroed_and_unestimated() {
         let store = Store::memory().unwrap();
         seed(&store, "s", "e", Harness::Codex, Some("/tmp/proj"), None);
-        let state = assemble(&store, Path::new("/no/registry"), &|_| true, Utc::now());
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &codex_all_open, Utc::now());
         let a = &state.agents[0];
         assert_eq!(a.context_tokens, 0);
         assert_eq!(a.fill_pct, 0.0);
         assert!(a.composition.estimated.is_none(), "no baseline → null estimate");
         assert_eq!(a.est_cost_usd, None, "no model → no cost");
+    }
+
+    /// THE FIX (spec §3/§5: the forest is the OPEN set). A backfilled Claude session
+    /// whose external id is NOT in the live registry is EXCLUDED — the archive of
+    /// every transcript ever ingested must not render. A Claude session that IS in the
+    /// registry is included, status from mtime (idle here, with no fresh write).
+    #[test]
+    fn claude_forest_includes_only_registry_open_sessions() {
+        let store = Store::memory().unwrap();
+        // Historical/backfill session: ingested long ago, no live registry entry.
+        seed(&store, "hist", "hist-ext", Harness::ClaudeCode, Some("/tmp/old"), None);
+        // Currently-open session: a live `<pid>.json` references its session id.
+        seed(&store, "live", "live-ext", Harness::ClaudeCode, Some("/tmp/now"), None);
+
+        let reg = claude_registry(&[(100, "live-ext")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+
+        assert_eq!(state.agents.len(), 1, "only the registry-open session is in the forest");
+        let a = &state.agents[0];
+        assert_eq!(a.id, "live", "the open session is the live one, not the backfill");
+        assert_eq!(a.status, "idle", "open but no fresh transcript write → idle");
+        assert!(
+            !state.agents.iter().any(|a| a.id == "hist"),
+            "the historical/backfill session must be excluded"
+        );
+    }
+
+    /// THE FIX (spec §4.3: the archive move is the Codex 'done' signal). A Codex
+    /// session whose rollout is archived (closed) is EXCLUDED; a non-archived rollout
+    /// is included. Membership rides on the injected `is_codex_open` closure — the
+    /// real collector resolves it from the on-disk location, never the stale
+    /// `source_path`.
+    #[test]
+    fn codex_forest_excludes_archived_sessions() {
+        let store = Store::memory().unwrap();
+        seed(&store, "open-cx", "open-uuid", Harness::Codex, Some("/tmp/p1"), None);
+        seed(&store, "done-cx", "done-uuid", Harness::Codex, Some("/tmp/p2"), None);
+
+        // Only `open-uuid` currently lives under sessions/ (done-uuid was archived).
+        let is_codex_open = |s: &Session| s.external_id == "open-uuid";
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, Utc::now());
+
+        assert_eq!(state.agents.len(), 1, "only the non-archived Codex session is open");
+        assert_eq!(state.agents[0].id, "open-cx");
+        assert!(
+            !state.agents.iter().any(|a| a.id == "done-cx"),
+            "an archived (closed) Codex session must be excluded"
+        );
+    }
+
+    /// THE FIX (subagent rule): an OPEN root with an open subagent still links
+    /// (depth/childCount intact). A root EXCLUDED for being closed takes its
+    /// now-orphaned subagent out too — assert the subagent is gone AND no surviving
+    /// agent dangles a `parentId` pointing at a non-present parent.
+    #[test]
+    fn closed_root_drops_orphaned_subagents_no_dangling_parent() {
+        let store = Store::memory().unwrap();
+        // Open tree: root `op-root` (in registry) + Claude subagent `op-sub`.
+        seed(&store, "op-root", "op-root-ext", Harness::ClaudeCode, Some("/tmp/a"), None);
+        seed(&store, "op-sub", "op-sub-ext", Harness::ClaudeCode, None, None);
+        store.link_child_session("op-sub", "op-root").unwrap();
+        // Closed tree: root `cl-root` (NOT in registry) + subagent `cl-sub`.
+        seed(&store, "cl-root", "cl-root-ext", Harness::ClaudeCode, Some("/tmp/b"), None);
+        seed(&store, "cl-sub", "cl-sub-ext", Harness::ClaudeCode, None, None);
+        store.link_child_session("cl-sub", "cl-root").unwrap();
+
+        // Only the open root is registered alive.
+        let reg = claude_registry(&[(100, "op-root-ext")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+
+        // The open tree survives, nested and counted.
+        let root = state.agents.iter().find(|a| a.id == "op-root").expect("open root present");
+        assert_eq!(root.depth, 0);
+        assert_eq!(root.parent_id, None);
+        assert_eq!(root.child_count, 1, "open root counts its one open subagent");
+        let sub = state.agents.iter().find(|a| a.id == "op-sub").expect("open subagent present");
+        assert_eq!(sub.depth, 1, "subagent rides on its open root, nested");
+        assert_eq!(sub.parent_id.as_deref(), Some("op-root"));
+
+        // The closed tree is gone entirely (root AND its orphaned subagent).
+        assert!(!state.agents.iter().any(|a| a.id == "cl-root"), "closed root excluded");
+        assert!(
+            !state.agents.iter().any(|a| a.id == "cl-sub"),
+            "a subagent under a closed root is excluded, not orphaned"
+        );
+
+        // No surviving agent points at a parent that isn't itself in the forest.
+        let present: std::collections::HashSet<&str> =
+            state.agents.iter().map(|a| a.id.as_str()).collect();
+        for a in &state.agents {
+            if let Some(p) = &a.parent_id {
+                assert!(
+                    present.contains(p.as_str()),
+                    "agent {} dangles parentId {} not in the forest",
+                    a.id,
+                    p
+                );
+            }
+        }
     }
 }

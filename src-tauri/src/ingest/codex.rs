@@ -151,7 +151,7 @@ impl Adapter for CodexAdapter {
 /// `rollout-2026-06-19T09-33-00-019ee0ba-...uuid....jsonl` → the trailing uuid.
 /// Used as a fallback when a batch lacks a `session_meta` record (a tail parse,
 /// landing in Task 4); for offset-0 full parses `session_meta.payload.id` wins.
-fn external_id_from_filename(path: &Path) -> String {
+pub fn external_id_from_filename(path: &Path) -> String {
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())

@@ -681,12 +681,23 @@ mod tests {
         let store = Store::memory().unwrap();
         seed_session(&store, "c1", Harness::ClaudeCode, 1);
 
-        // No registry dir present in tests → mtime/idle fallback; uses real clock.
-        let state = crate::radar::recompute_radar_state(
+        // Exercise the shared core (`assemble`) directly so no Tauri `State` is built.
+        // A live Claude registry entry makes the seeded root OPEN under the membership
+        // filter; is_alive=true and the codex predicate is unused for a Claude root.
+        let reg = tempfile::tempdir().unwrap();
+        std::fs::write(
+            reg.path().join("100.json"),
+            serde_json::json!({ "pid": 100, "sessionId": "c1", "cwd": "/work" }).to_string(),
+        )
+        .unwrap();
+        let state = crate::radar::assemble(
             &store,
-            std::path::Path::new("/no/such/registry"),
+            reg.path(),
+            &|_| true,
+            &|_| false,
+            chrono::Utc::now(),
         );
-        assert_eq!(state.agents.len(), 1, "one seeded session → one agent");
+        assert_eq!(state.agents.len(), 1, "one seeded OPEN session → one agent");
         let agent = &state.agents[0];
         assert_eq!(agent.id, "c1");
         assert_eq!(agent.harness, "claude_code");
