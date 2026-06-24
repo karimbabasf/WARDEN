@@ -27,6 +27,18 @@ export function cameraTargetForOverview(): CameraTarget {
   };
 }
 
+/**
+ * RADAR overview pose. The live agent forest spreads wider than a single Habits
+ * cluster (multiple root planets on a ring, each with orbiting moons), so the
+ * camera pulls back a touch further to frame the whole constellation.
+ */
+export function cameraTargetForRadarOverview(): CameraTarget {
+  return {
+    position: { x: 0, y: 1.0, z: 11.5 },
+    lookAt: { x: 0, y: 0, z: 0 },
+  };
+}
+
 export function cameraTargetForFocus(position: Vec3, radius: number): CameraTarget {
   const distance = 2.2 + Math.max(0.8, radius) * 2.1;
   return {

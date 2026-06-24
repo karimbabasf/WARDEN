@@ -25,6 +25,9 @@ import { CameraRig } from './CameraRig';
 import { Chrome, type FixPreview } from './chrome';
 import type { RevealFinding } from './compositions/Reveal';
 import { NavBar, type ConstellationTab } from './NavBar';
+import { RadarSceneBody } from './RadarConstellation';
+import { layoutRadarScene } from './radarLayout';
+import type { RadarSceneModel } from './radarTypes';
 
 const PlayerHost = lazy(() => import('./PlayerHost'));
 
@@ -376,8 +379,11 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
 
   const model = useMemo(() => scene.orbScene ?? fallbackOrbScene(scene), [scene.orbScene, scene.candidates]);
   const layout = useMemo(() => layoutOrbScene(model), [model]);
-  const selectedNode = useMemo(() => layout.nodes.find((n) => n.id === selectedId) ?? null, [layout, selectedId]);
-  const hoveredNode = useMemo(() => layout.nodes.find((n) => n.id === hoveredId) ?? null, [layout, hoveredId]);
+  // Radar forest (live agents) — empty until the backend emits `radar_state`.
+  const radarModel = useMemo<RadarSceneModel>(() => scene.radarScene ?? { agents: [], generatedAt: '' }, [scene.radarScene]);
+  const activeLayout = tab === 'radar' ? layoutRadarScene(radarModel) : layout;
+  const selectedNode = useMemo(() => activeLayout.nodes.find((n) => n.id === selectedId) ?? null, [activeLayout, selectedId]);
+  const hoveredNode = useMemo(() => activeLayout.nodes.find((n) => n.id === hoveredId) ?? null, [activeLayout, hoveredId]);
 
   const onHover = useCallback((node: LayoutNode) => setHoveredId(node.id), []);
   const onLeave = useCallback((node: LayoutNode) => setHoveredId((cur) => (cur === node.id ? null : cur)), []);
@@ -457,25 +463,41 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
         camera={{ position: [3.6, 2.4, 8.8], fov: 46, near: 0.1, far: 120 }}
       >
-        <Scene
-          layout={layout}
-          selected={selectedNode}
-          selectedId={selectedId}
-          hoveredId={hoveredId}
-          onHover={onHover}
-          onLeave={onLeave}
-          onSelect={onSelect}
-          onClear={onClear}
-        />
+        {tab === 'radar' ? (
+          <RadarSceneBody
+            model={radarModel}
+            selectedId={selectedId}
+            hoveredId={hoveredId}
+            onHover={onHover}
+            onLeave={onLeave}
+            onSelect={onSelect}
+            onClear={onClear}
+          />
+        ) : (
+          <Scene
+            layout={layout}
+            selected={selectedNode}
+            selectedId={selectedId}
+            hoveredId={hoveredId}
+            onHover={onHover}
+            onLeave={onLeave}
+            onSelect={onSelect}
+            onClear={onClear}
+          />
+        )}
       </Canvas>
 
       <NavBar tab={tab} onTab={onTab} />
 
+      {/* Chrome is the Habits inspector (keys off node.issue/agent). On the radar
+          tab the live selection flows to RadarSceneBody via selectedId; the radar
+          detail panel is Phase 3, so keep the Habits inspector closed here rather
+          than feeding it a radar node it cannot render. */}
       <Chrome
         scene={scene}
         model={model}
-        hoveredNode={hoveredNode}
-        selectedNode={selectedNode}
+        hoveredNode={tab === 'radar' ? null : hoveredNode}
+        selectedNode={tab === 'radar' ? null : selectedNode}
         running={Boolean(scene.running)}
         error={runError}
         fixPreview={fixPreview}

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { cameraTargetForFocus, cameraTargetForOverview, damp3 } from './useOrbCamera';
+import {
+  cameraTargetForFocus,
+  cameraTargetForOverview,
+  cameraTargetForRadarOverview,
+  damp3,
+} from './useOrbCamera';
 
 describe('useOrbCamera helpers', () => {
   it('returns a stable overview target', () => {
@@ -14,6 +19,14 @@ describe('useOrbCamera helpers', () => {
     expect(focus.lookAt).toEqual({ x: 2, y: 0.5, z: -1 });
     expect(focus.position.z).toBeGreaterThan(focus.lookAt.z);
     expect(focus.position.x).toBeGreaterThan(2);
+  });
+
+  it('pulls the camera back for the radar overview (further than the habits overview)', () => {
+    const radar = cameraTargetForRadarOverview();
+    expect(radar.lookAt).toEqual({ x: 0, y: 0, z: 0 });
+    expect(radar.position.z).toBeGreaterThan(0);
+    // the radar forest spreads wider than a single habits cluster → pull back more
+    expect(radar.position.z).toBeGreaterThanOrEqual(cameraTargetForOverview().position.z);
   });
 
   it('damps vector components without overshooting', () => {
