@@ -31,6 +31,19 @@
   --glow: 0 0 18px rgba(118, 255, 157, 0.45), 0 0 60px rgba(118, 255, 157, 0.14);
 
   --mono: WardenMono, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ── layout tokens ── */
+  --top-safe: 64px;           /* nav bar height + clearance margin */
+  --side-margin: 16px;
+  --panel-w: clamp(300px, 32vw, 380px);
+
+  /* ── z-index scale ── */
+  --z-canvas: 0;
+  --z-chrome: 10;
+  --z-panel: 20;
+  --z-deck: 30;
+  --z-nav: 40;
+  --z-controls: 50;
 }
 
 * { box-sizing: border-box; }
@@ -61,7 +74,7 @@ html, body {
 .wd-chrome {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--z-chrome);
   pointer-events: none;
   font-family: var(--mono);
 }
@@ -301,8 +314,9 @@ html, body {
 /* ── legend (bottom-left) ──────────────────────────────────────────────────*/
 .wd-legend {
   position: absolute;
-  left: 16px;
+  left: var(--side-margin);
   bottom: 24px;
+  z-index: var(--z-panel);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -342,12 +356,13 @@ html, body {
 /* ── inspector (right dock): hover preview + selected detail ───────────────*/
 .wd-inspector {
   position: absolute;
-  top: 20px;
-  right: 16px;
-  width: min(360px, calc(100vw - 32px));
-  max-height: calc(100vh - 200px);
+  top: var(--top-safe);
+  right: var(--side-margin);
+  width: var(--panel-w);
+  max-height: calc(100vh - var(--top-safe) - 16px);
   display: flex;
   justify-content: flex-end;
+  z-index: var(--z-panel);
   opacity: 0;
   transform: translateX(16px);
   transition: opacity 220ms ease, transform 220ms ease;
@@ -537,7 +552,15 @@ html, body {
 /* The dock sits OUTSIDE .wd-chrome, so make the container itself pass-through
    (orbit-drag must work over its empty region); the .wd-detail panel re-enables
    its own pointer events via the shared glass rule. */
-.wd-radar-dock { pointer-events: none; z-index: 5; }
+.wd-radar-dock {
+  pointer-events: none;
+  z-index: var(--z-panel);
+  position: absolute;
+  top: var(--top-safe);
+  right: var(--side-margin);
+  width: var(--panel-w);
+  max-height: calc(100vh - var(--top-safe) - 16px);
+}
 .wd-radar-detail {
   border-color: color-mix(in srgb, var(--heat, var(--harness, var(--green))) 48%, transparent);
   box-shadow: 0 0 36px color-mix(in srgb, var(--heat, var(--harness, var(--green))) 22%, transparent),
@@ -693,13 +716,59 @@ html, body {
 }
 
 /* ── responsive ────────────────────────────────────────────────────────────*/
+
+/* Medium — window narrower than 900px: tighten the panel */
+@media (max-width: 900px) {
+  :root { --panel-w: clamp(280px, 40vw, 340px); }
+}
+
+/* Small — near minimum window size (760px × 560px) */
 @media (max-width: 760px) {
+  :root {
+    --top-safe: 56px;   /* nav bar is slightly shorter at small sizes */
+    --side-margin: 10px;
+    --panel-w: calc(100vw - 20px); /* panel goes full-width at small sizes */
+  }
   .wd-hud { flex-direction: column; gap: 10px; }
   .wd-hud-metrics { width: 100%; justify-content: space-between; }
   .wd-metric { align-items: flex-start; border-left: 0; border-top: 1px solid var(--hair); padding-top: 6px; min-width: 0; }
-  .wd-inspector { top: auto; bottom: 150px; right: 12px; left: 12px; width: auto; max-height: 46vh; }
-  .wd-legend { display: none; }
+  /* inspector/radar-dock slide down below the nav; full-width */
+  .wd-inspector {
+    top: var(--top-safe);
+    right: var(--side-margin);
+    left: var(--side-margin);
+    width: auto;
+    max-height: 46vh;
+  }
+  .wd-radar-dock {
+    top: var(--top-safe);
+    right: var(--side-margin);
+    left: var(--side-margin);
+    width: auto;
+    max-height: 46vh;
+  }
+  /* legend wraps at bottom; hide if truly no room */
+  .wd-legend {
+    left: var(--side-margin);
+    right: var(--side-margin);
+    bottom: 60px; /* clear deck */
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+  .wd-legend-group { gap: 4px 8px; }
+  /* chips go smaller */
+  .wd-chip { font-size: 9px; padding: 2px 6px 2px 4px; }
   .wd-console { width: calc(100vw - 24px); bottom: 12px; }
+  /* breadcrumb compresses */
+  .wd-breadcrumb { font-size: 9px; }
+  /* window controls remain fixed size — no change needed */
+}
+
+/* Very small — if width drops below 540px, collapse legend entirely */
+@media (max-width: 540px) {
+  .wd-legend { display: none; }
+  .wd-nav-mark { display: none; } /* hide the WARDEN sigil in the nav to save space */
 }
 
 /* ── Top constellation switcher (Habits | Radar) ──────────────────────────────
@@ -710,7 +779,7 @@ html, body {
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 7;
+  z-index: var(--z-nav);
   display: flex;
   align-items: center;
   gap: 2px;
@@ -826,7 +895,7 @@ html, body {
   bottom: 16px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 6;
+  z-index: var(--z-deck);
   display: flex;
   align-items: center;
   gap: 14px;
@@ -850,15 +919,6 @@ html, body {
   width: 1px;
   height: 18px;
   background: var(--hair);
-}
-.wd-deck-harness {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
 }
 .wd-deck-glyph {
   color: var(--harness);
@@ -884,21 +944,6 @@ html, body {
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--ink-faint);
-}
-.wd-deck-ramp {
-  gap: 5px;
-}
-.wd-deck-ramp-key {
-  font-size: 9px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-  margin-right: 3px;
-}
-.wd-deck-swatch {
-  width: 16px;
-  height: 5px;
-  border-radius: 2px;
 }
 .wd-deck-live {
   gap: 7px;
@@ -930,10 +975,6 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
   .wd-deck-pulse { animation: none; opacity: 0.8; }
 }
-@media (max-width: 820px) {
-  .wd-deck-ramp { display: none; }
-}
-
 /* ── radar empty state — live, watching, nothing running yet ─────────────────── */
 .wd-radar-empty {
   position: fixed;
@@ -976,4 +1017,185 @@ html, body {
 }
 @media (prefers-reduced-motion: reduce) {
   .wd-radar-empty-pulse { animation: none; opacity: 0.85; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   LEGEND CHIPS — task 10 introduced these; task 11 styles them.
+   Pills in the green-phosphor CRT theme: swatch · glyph · label inline.
+   --chip sets the accent colour per-chip (set inline by the component).
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.wd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--hair);
+  background: rgba(118, 255, 157, 0.04);
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.72;
+  transition: background 160ms ease, border-color 160ms ease, opacity 160ms ease, box-shadow 160ms ease;
+}
+.wd-chip:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--chip, var(--green)) 10%, transparent);
+  border-color: color-mix(in srgb, var(--chip, var(--green)) 42%, transparent);
+}
+.wd-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--hair-bright);
+}
+.wd-chip.is-active {
+  opacity: 1;
+  background: color-mix(in srgb, var(--chip, var(--green)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--chip, var(--green)) 60%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--chip, var(--green)) 25%, transparent);
+  color: var(--ink);
+}
+.wd-chip.is-active:focus-visible {
+  box-shadow: 0 0 0 2px var(--hair-bright),
+              0 0 10px color-mix(in srgb, var(--chip, var(--green)) 25%, transparent);
+}
+
+/* severity-chip accent — red → amber → warn → acid → green gradient mapped via --chip */
+.wd-chip-sev { /* no extra rules needed; inherits .wd-chip with --chip set inline */ }
+.wd-chip-harness { /* likewise */ }
+
+.wd-chip-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--chip, var(--green));
+  box-shadow: 0 0 6px color-mix(in srgb, var(--chip, var(--green)) 55%, transparent);
+  flex: none;
+}
+.wd-chip-glyph {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--chip, var(--green));
+  filter: drop-shadow(0 0 5px var(--chip, var(--green)));
+  flex: none;
+}
+.wd-chip-label {
+  color: inherit;
+  letter-spacing: inherit;
+}
+
+/* ── breadcrumb nav ────────────────────────────────────────────────────────*/
+.wd-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  flex-wrap: wrap;
+}
+.wd-crumb {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  transition: background 140ms ease, color 140ms ease;
+}
+.wd-crumb:hover {
+  background: rgba(118, 255, 157, 0.07);
+  color: var(--ink);
+}
+.wd-crumb:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--hair-bright);
+}
+.wd-crumb-root {
+  color: var(--acid);
+  opacity: 0.8;
+}
+.wd-crumb-root:hover {
+  opacity: 1;
+  background: rgba(184, 255, 107, 0.07);
+  color: var(--acid);
+}
+.wd-crumb-sep {
+  color: var(--dim);
+  padding: 0 1px;
+  user-select: none;
+  pointer-events: none;
+}
+.wd-crumb.is-current {
+  color: var(--ink);
+  font-weight: 600;
+  cursor: default;
+  background: transparent;
+}
+.wd-crumb.is-current:hover { background: transparent; }
+
+/* ── window controls (in .wd-nav) ─────────────────────────────────────────*/
+/* The spacer uses data-tauri-drag-region, so we must keep cursor:default there
+   but NOT inherit it through to the buttons themselves. */
+.wd-nav-spacer {
+  flex: 1;
+  min-width: 12px;
+  /* drag region is set by Tauri via data-tauri-drag-region attribute */
+  cursor: default;
+}
+.wd-nav-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  z-index: var(--z-controls);
+  /* controls must not inherit drag-through; they capture their own pointer events */
+  cursor: default;
+}
+.wd-win-btn {
+  appearance: none;
+  border: none;
+  background: rgba(118, 255, 157, 0.06);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11px;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border: 1px solid var(--hair);
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.wd-win-btn:hover {
+  background: rgba(118, 255, 157, 0.12);
+  color: var(--ink);
+  border-color: var(--hair-bright);
+}
+.wd-win-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--hair-bright);
+}
+/* minimize — subtle yellow hint on hover (traffic-light convention, muted) */
+.wd-win-min:hover {
+  background: rgba(255, 209, 102, 0.12);
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+/* close — red/danger hint on hover */
+.wd-win-close:hover {
+  background: rgba(255, 84, 112, 0.14);
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
 }
