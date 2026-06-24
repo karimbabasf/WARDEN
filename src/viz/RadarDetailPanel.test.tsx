@@ -14,7 +14,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { RadarDetailPanel, relativeTime } from './RadarDetailPanel';
+import { RadarDetailPanel, relativeTime, uptime } from './RadarDetailPanel';
 import type { RadarActivity, RadarAgent, RadarComposition } from './radarTypes';
 
 function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
@@ -153,5 +153,79 @@ describe('relativeTime — honest, tolerant', () => {
   it('returns an empty string for an unparseable timestamp (never NaN)', () => {
     expect(relativeTime('not-a-date', now)).toBe('');
     expect(relativeTime('', now)).toBe('');
+  });
+});
+
+describe('uptime — duration since startedAt', () => {
+  const now = Date.UTC(2026, 5, 23, 22, 5, 0);
+  it('formats a running duration compactly', () => {
+    expect(uptime('2026-06-23T22:00:00Z', now)).toBe('5m');
+    expect(uptime('2026-06-23T20:05:00Z', now)).toBe('2h 0m');
+  });
+  it('returns a dash for a missing/unparseable start (never NaN)', () => {
+    expect(uptime('', now)).toBe('—');
+    expect(uptime('nope', now)).toBe('—');
+  });
+});
+
+// ── Task 21: children roster + identity / cost ────────────────────────────────
+describe('RadarDetailPanel — children roster + identity/cost', () => {
+  const child = (over: Partial<RadarAgent>): RadarAgent =>
+    agentFixture({
+      id: 'child',
+      parentId: 'claude-root',
+      depth: 1,
+      childCount: 0,
+      role: 'explorer',
+      nickname: null,
+      ...over,
+    });
+
+  it('lists each passed-in child with status + fill %, and jumps on click', () => {
+    const children = [
+      child({ id: 'kid-a', role: 'explorer', fillPct: 0.3, status: 'working' }),
+      child({ id: 'kid-b', nickname: 'Bohr', role: null, fillPct: 0.55, status: 'idle' }),
+    ];
+    const onJumpTo = vi.fn();
+    const el = render(
+      <RadarDetailPanel agent={agentFixture({ childCount: 2 })} children={children} onJumpTo={onJumpTo} />,
+    );
+    const rows = Array.from(el.querySelectorAll('[data-roster-row]')) as HTMLElement[];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain('explorer');
+    expect(rows[0].textContent).toContain('30%');
+    expect(rows[1].textContent).toContain('Bohr'); // nickname when role is null
+    expect(rows[1].textContent).toContain('55%');
+
+    act(() => {
+      (rows[1].querySelector('button') ?? rows[1]).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onJumpTo).toHaveBeenCalledWith('kid-b');
+  });
+
+  it('omits the roster for a flat agent (no fabricated children)', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ childCount: 0 })} children={[]} />);
+    expect(el.querySelectorAll('[data-roster-row]')).toHaveLength(0);
+    // no empty "Children" section rendered when there are genuinely none.
+    expect(el.querySelector('[data-section="roster"]')).toBeFalsy();
+  });
+
+  it('shows identity (model) and a formatted cost, with a dash when cost is null', () => {
+    const withCost = render(<RadarDetailPanel agent={agentFixture({ estCostUsd: 0.42 })} />);
+    const id1 = withCost.querySelector('[data-section="identity"]');
+    expect((id1?.textContent ?? '')).toContain('claude-opus-4-8');
+    expect((id1?.textContent ?? '')).toContain('$0.42');
+
+    act(() => root?.unmount());
+    container?.remove();
+    root = null;
+    container = null;
+
+    const noCost = render(<RadarDetailPanel agent={agentFixture({ estCostUsd: null })} />);
+    const id2 = noCost.querySelector('[data-section="identity"]');
+    // cost cell shows a dash, never a fabricated number.
+    const costCell = id2?.querySelector('[data-id="cost"]');
+    expect((costCell?.textContent ?? '')).toContain('—');
+    expect((costCell?.textContent ?? '')).not.toContain('$');
   });
 });

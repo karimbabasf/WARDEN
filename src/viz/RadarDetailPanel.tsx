@@ -55,6 +55,28 @@ export function relativeTime(ts: string, now: number = Date.now()): string {
   return `${Math.floor(hr / 24)}d ago`;
 }
 
+/**
+ * Uptime since `startedAt` ("5m", "2h 0m", "1d 3h"). Injectable `now` for tests.
+ * Returns "—" for a missing/unparseable start — never NaN.
+ */
+export function uptime(startedAt: string, now: number = Date.now()): string {
+  const t = Date.parse(startedAt);
+  if (!Number.isFinite(t)) return '—';
+  const sec = Math.max(0, Math.round((now - t) / 1000));
+  const min = Math.floor(sec / 60);
+  if (min < 1) return `${sec}s`;
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ${min % 60}m`;
+  return `${Math.floor(hr / 24)}d ${hr % 24}h`;
+}
+
+/** Estimated cost → "$0.42", or "—" when null (never a fabricated figure). */
+function cost(usd: number | null): string {
+  if (usd == null || !Number.isFinite(usd)) return '—';
+  return `$${usd.toFixed(2)}`;
+}
+
 /** Per-kind glyph + readable word (colour is never the only signal). */
 const ACTIVITY_KIND: Record<string, { glyph: string; label: string }> = {
   tool: { glyph: '⚙', label: 'Tool' },
@@ -214,12 +236,89 @@ function ActivitySection({ agent }: { agent: RadarAgent }) {
   );
 }
 
+/** A child's display name: role, else nickname, else label, else id. */
+function childName(c: RadarAgent): string {
+  return c.role || c.nickname || c.label || c.id;
+}
+
+// ── Section 3: children roster (Task 21) ───────────────────────────────────────
+// `children` are the real subagents (parentId === this agent's id), passed in by
+// WarRoom. A flat agent gets NO roster at all (honest-viz: never a fabricated or
+// empty-but-present children list). Clicking a row flies the camera to that globe.
+function RosterSection({ children, onJumpTo }: { children: RadarAgent[]; onJumpTo?: (id: string) => void }) {
+  if (children.length === 0) return null;
+  return (
+    <section className="wd-radar-section wd-radar-roster" data-section="roster">
+      <div className="wd-card-kicker">
+        Children<span className="wd-radar-roster-count"> · {children.length}</span>
+      </div>
+      <ul className="wd-radar-roster-list">
+        {children.map((c) => {
+          const theme = radarHarness(c.harness);
+          return (
+            <li key={c.id} className="wd-radar-roster-row" data-roster-row data-child-id={c.id}>
+              <button
+                type="button"
+                className="wd-radar-roster-btn"
+                style={{ '--harness': theme.color } as CSSProperties}
+                onClick={() => onJumpTo?.(c.id)}
+                title={`Fly to ${childName(c)}`}
+              >
+                <span className="wd-radar-roster-glyph" aria-hidden>
+                  {theme.glyph}
+                </span>
+                <span className="wd-radar-roster-name">{childName(c)}</span>
+                <span className={`wd-radar-status is-${c.status}`}>{STATUS_LABEL[c.status]}</span>
+                <span className="wd-radar-roster-fill">{pct(c.fillPct)}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+// ── Section 4: identity + cost (Task 21) ───────────────────────────────────────
+function IdentitySection({ agent }: { agent: RadarAgent }) {
+  const theme = radarHarness(agent.harness);
+  return (
+    <section className="wd-radar-section wd-radar-identity" data-section="identity">
+      <div className="wd-card-kicker">Identity</div>
+      <dl className="wd-radar-id-grid">
+        <div>
+          <dt>Harness</dt>
+          <dd>
+            <span aria-hidden>{theme.glyph}</span> {theme.label}
+          </dd>
+        </div>
+        <div>
+          <dt>Model</dt>
+          <dd>{agent.model ?? '—'}</dd>
+        </div>
+        <div>
+          <dt>Uptime</dt>
+          <dd>{uptime(agent.startedAt)}</dd>
+        </div>
+        <div data-id="cost">
+          <dt>Est. cost</dt>
+          <dd>{cost(agent.estCostUsd)}</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
 export type RadarDetailPanelProps = {
   agent: RadarAgent;
+  /** Real subagents of this agent (parentId === agent.id), supplied by WarRoom. */
+  children?: RadarAgent[];
+  /** Fly the camera to a child globe (select + focus). */
+  onJumpTo?: (id: string) => void;
   onClose?: () => void;
 };
 
-export function RadarDetailPanel({ agent, onClose }: RadarDetailPanelProps) {
+export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: RadarDetailPanelProps) {
   const theme = radarHarness(agent.harness);
   const heat = heatColor(theme.color, agent.fillPct);
   const title = agent.label || agent.nickname || agent.id;
@@ -250,6 +349,8 @@ export function RadarDetailPanel({ agent, onClose }: RadarDetailPanelProps) {
 
       <ContextSection agent={agent} />
       <ActivitySection agent={agent} />
+      <RosterSection children={children} onJumpTo={onJumpTo} />
+      <IdentitySection agent={agent} />
     </aside>
   );
 }

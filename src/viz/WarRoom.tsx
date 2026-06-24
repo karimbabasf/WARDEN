@@ -26,8 +26,9 @@ import { Chrome, type FixPreview } from './chrome';
 import type { RevealFinding } from './compositions/Reveal';
 import { NavBar, type ConstellationTab } from './NavBar';
 import { RadarSceneBody } from './RadarConstellation';
+import { RadarDetailPanel } from './RadarDetailPanel';
 import { layoutRadarScene } from './radarLayout';
-import type { RadarSceneModel } from './radarTypes';
+import type { RadarAgent, RadarSceneModel } from './radarTypes';
 
 const PlayerHost = lazy(() => import('./PlayerHost'));
 
@@ -385,6 +386,18 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const selectedNode = useMemo(() => activeLayout.nodes.find((n) => n.id === selectedId) ?? null, [activeLayout, selectedId]);
   const hoveredNode = useMemo(() => activeLayout.nodes.find((n) => n.id === hoveredId) ?? null, [activeLayout, hoveredId]);
 
+  // Radar detail-panel inputs: the selected live agent and its REAL children
+  // (agents whose parentId === the selection). A flat agent yields []; the panel
+  // then renders no roster (honest-viz — never a fabricated children list).
+  const selectedRadarAgent = useMemo<RadarAgent | null>(
+    () => (tab === 'radar' && selectedId ? radarModel.agents.find((a) => a.id === selectedId) ?? null : null),
+    [tab, selectedId, radarModel],
+  );
+  const selectedRadarChildren = useMemo<RadarAgent[]>(
+    () => (selectedRadarAgent ? radarModel.agents.filter((a) => a.parentId === selectedRadarAgent.id) : []),
+    [selectedRadarAgent, radarModel],
+  );
+
   const onHover = useCallback((node: LayoutNode) => setHoveredId(node.id), []);
   const onLeave = useCallback((node: LayoutNode) => setHoveredId((cur) => (cur === node.id ? null : cur)), []);
   const onSelect = useCallback((node: LayoutNode) => {
@@ -395,6 +408,10 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     setSelectedId(null);
     setFixPreview(undefined);
   }, []);
+
+  // Roster jump-to: select a child agent by id, which dives the shared CameraRig
+  // onto that globe (selectedId → selectedNode → focus) and re-points the panel.
+  const onRadarJump = useCallback((id: string) => setSelectedId(id), []);
 
   // Switching constellations clears the per-scene hover/selection (the two scenes
   // have disjoint node-id spaces) so the inspector never points at a stale node.
@@ -507,6 +524,20 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         onClearSelection={onClear}
         onDismiss={onDismiss}
       />
+
+      {/* Radar detail panel — its own right-dock (the Chrome inspector is Habits-
+          only). Opens when a radar globe is selected and the camera has dived in;
+          the roster's jump-to flies to a child via onRadarJump (select + focus). */}
+      <div className={`wd-inspector wd-radar-dock ${tab === 'radar' && selectedRadarAgent ? 'is-open' : ''}`}>
+        {selectedRadarAgent ? (
+          <RadarDetailPanel
+            agent={selectedRadarAgent}
+            children={selectedRadarChildren}
+            onJumpTo={onRadarJump}
+            onClose={onClear}
+          />
+        ) : null}
+      </div>
 
       {showIntro && (
         <Suspense fallback={null}>
