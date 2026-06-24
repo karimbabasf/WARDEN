@@ -531,6 +531,68 @@ html, body {
 .wd-radar-status.is-idle { color: var(--ink-faint); }
 .wd-radar-status.is-closed { color: var(--amber); }
 
+/* ── radar detail panel (right dock; reuses the wd-detail glass) ─────────────*/
+.wd-radar-detail {
+  border-color: color-mix(in srgb, var(--heat, var(--harness, var(--green))) 48%, transparent);
+  box-shadow: 0 0 36px color-mix(in srgb, var(--heat, var(--harness, var(--green))) 22%, transparent),
+    inset 0 0 42px rgba(118, 255, 157, 0.04);
+}
+.wd-radar-section { margin-top: 16px; }
+.wd-radar-section + .wd-radar-section { border-top: 1px solid var(--hair); padding-top: 14px; }
+
+/* context gauge — heat-matched to the globe (--heat) */
+.wd-radar-gauge { margin: 12px 0 4px; }
+.wd-radar-gauge-track {
+  position: relative;
+  height: 12px;
+  border: 1px solid var(--hair);
+  background: rgba(118, 255, 157, 0.05);
+  overflow: hidden;
+}
+.wd-radar-gauge-fill {
+  height: 100%;
+  background: var(--heat, var(--green));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--heat, var(--green)) 70%, transparent);
+  transition: width 320ms cubic-bezier(.2, .9, .2, 1);
+}
+.wd-radar-gauge-meta { display: flex; justify-content: space-between; align-items: baseline; margin-top: 6px; }
+.wd-radar-gauge-pct { font-size: 18px; color: var(--ink); letter-spacing: 0.04em; }
+.wd-radar-gauge-abs { font-size: 11px; color: var(--ink-faint); }
+
+/* composition lenses (exact / estimated) */
+.wd-radar-comp { margin-top: 14px; }
+.wd-radar-comp-head { display: flex; align-items: baseline; gap: 8px; }
+.wd-radar-comp-note { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); }
+.wd-radar-est {
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  padding: 1px 5px;
+}
+
+.wd-radar-bar {
+  display: flex;
+  height: 9px;
+  margin: 7px 0 0;
+  border: 1px solid var(--hair);
+  background: rgba(2, 9, 6, 0.6);
+  overflow: hidden;
+}
+.wd-radar-bar-seg {
+  height: 100%;
+  background: var(--seg, var(--green));
+  box-shadow: inset 0 0 8px color-mix(in srgb, var(--seg, var(--green)) 35%, transparent);
+  transition: width 320ms cubic-bezier(.2, .9, .2, 1);
+}
+.wd-radar-bar-seg + .wd-radar-bar-seg { border-left: 1px solid rgba(2, 9, 6, 0.8); }
+
+.wd-radar-legend { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 0 0; padding: 0; }
+.wd-radar-legend li { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-soft); }
+.wd-radar-legend-dot { width: 9px; height: 9px; border-radius: 2px; background: var(--seg, var(--green)); box-shadow: 0 0 7px var(--seg, var(--green)); flex: none; }
+.wd-radar-legend-label { color: var(--ink-faint); letter-spacing: 0.04em; }
+.wd-radar-legend-val { color: var(--ink-soft); }
+
+.wd-radar-empty { margin-top: 7px; color: var(--ink-faint); font-size: 13px; letter-spacing: 0.1em; }
+
 /* ── empty state (center invite) ───────────────────────────────────────────*/
 .wd-empty {
   position: absolute;

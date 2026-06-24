@@ -1,0 +1,108 @@
+// @vitest-environment jsdom
+//
+// RadarDetailPanel component tests (Tasks 19–21). Rendered under jsdom with
+// react-dom/client + act (house no-deps style; the 3D dive is verified live).
+//
+// The panel is the click-through readout for one live agent, in four honest
+// sections: (1) context gauge + composition, (2) live activity feed, (3) children
+// roster, (4) identity + cost. The non-negotiable correctness anchor is HONEST
+// COMPOSITION: the exact (API-anchored) bar is ALWAYS shown; the estimated semantic
+// bar is shown ONLY when `composition.estimated` is present and is ALWAYS labeled
+// "est."; when estimated is null the panel shows "—" and no semantic bar — it must
+// never present an estimate as exact, nor fabricate one.
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { RadarDetailPanel } from './RadarDetailPanel';
+import type { RadarActivity, RadarAgent, RadarComposition } from './radarTypes';
+
+function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
+  const composition: RadarComposition = {
+    exact: { cacheRead: 120_000, fresh: 40_000, output: 12_000 },
+    estimated: { preamble: 8_000, conversation: 90_000, toolOutput: 60_000, thinking: 14_000 },
+  };
+  return {
+    id: 'claude-root',
+    harness: 'claude_code',
+    origin: 'claude-desktop',
+    parentId: null,
+    depth: 0,
+    label: 'warden',
+    nickname: null,
+    role: null,
+    model: 'claude-opus-4-8',
+    status: 'working',
+    contextTokens: 172_000,
+    maxTokens: 200_000,
+    fillPct: 0.86,
+    composition,
+    recentActivity: [],
+    childCount: 0,
+    startedAt: '2026-06-23T22:00:00Z',
+    estCostUsd: 0.42,
+    ...over,
+  };
+}
+
+let container: HTMLDivElement | null = null;
+let root: Root | null = null;
+
+function render(node: React.ReactNode): HTMLElement {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => root!.render(node));
+  return container;
+}
+
+afterEach(() => {
+  act(() => root?.unmount());
+  container?.remove();
+  root = null;
+  container = null;
+});
+
+// ── Task 19: gauge + composition ──────────────────────────────────────────────
+describe('RadarDetailPanel — context gauge + composition', () => {
+  it('renders the gauge fill %, the exact bar, and the labeled estimated bar', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture()} />);
+    const text = el.textContent ?? '';
+    expect(text).toContain('86%'); // gauge fill %
+
+    // exact bar (always): the three API-anchored segments are present + named.
+    expect(el.querySelector('[data-exact-seg="cacheRead"]')).toBeTruthy();
+    expect(el.querySelector('[data-exact-seg="fresh"]')).toBeTruthy();
+    expect(el.querySelector('[data-exact-seg="output"]')).toBeTruthy();
+
+    // semantic (estimated) bar: present, explicitly labeled "est.", four segments.
+    const sem = el.querySelector('[data-composition="estimated"]');
+    expect(sem).toBeTruthy();
+    expect((sem?.textContent ?? '').toLowerCase()).toContain('est.');
+    expect(el.querySelector('[data-est-seg="preamble"]')).toBeTruthy();
+    expect(el.querySelector('[data-est-seg="conversation"]')).toBeTruthy();
+    expect(el.querySelector('[data-est-seg="toolOutput"]')).toBeTruthy();
+    expect(el.querySelector('[data-est-seg="thinking"]')).toBeTruthy();
+  });
+
+  it('omits the semantic bar (shows a dash) when estimated is null, but keeps the exact bar', () => {
+    const el = render(
+      <RadarDetailPanel
+        agent={agentFixture({ composition: { exact: { cacheRead: 1, fresh: 2, output: 3 }, estimated: null } })}
+      />,
+    );
+    // exact bar still shown.
+    expect(el.querySelector('[data-exact-seg="fresh"]')).toBeTruthy();
+    // no estimated segments fabricated; a dash placeholder stands in.
+    expect(el.querySelector('[data-est-seg="conversation"]')).toBeFalsy();
+    const sem = el.querySelector('[data-composition="estimated"]');
+    expect((sem?.textContent ?? '')).toContain('—');
+  });
+
+  it('matches the gauge fill to the agent percentage even at 0%', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ fillPct: 0, contextTokens: 0 })} />);
+    expect((el.textContent ?? '')).toContain('0%');
+    // exact bar is always present regardless of fill.
+    expect(el.querySelector('[data-exact-seg="cacheRead"]')).toBeTruthy();
+  });
+});
