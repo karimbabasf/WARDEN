@@ -30,6 +30,7 @@ import { frameloopFor } from './WarRoom';
 import { reconcileLifecycle, pruneGone, isVisible, type LifecycleMap, type LiveId } from './radarLifecycle';
 import { RadarHoverCard } from './RadarHoverCard';
 import { radarCanvasCamera } from './useOrbCamera';
+import { targetDim, type EmphasisFilter } from './emphasis';
 
 const BG = '#020403';
 const WHITE = new THREE.Color('#ffffff');
@@ -485,6 +486,10 @@ export type RadarConstellationProps = {
   model: RadarSceneModel;
   hoveredId: string | null;
   selectedId: string | null;
+  /** Active legend filter; each globe's colour-only `dimTarget` is derived from it.
+   *  Harness filters apply on the radar tab; null (the default) leaves every globe at
+   *  full colour. Optional so the standalone dev harness need not thread it. */
+  emphasisFilter?: EmphasisFilter;
   /** Live fold scale for the constellation swap (1 = at rest). Omitted in the dev harness. */
   scaleRef?: { current: number };
   onHover: (node: LayoutNode) => void;
@@ -573,10 +578,14 @@ function RadarHoverLayer({ node, suppressed }: { node: LayoutNode | null; suppre
 // the persistent scene shell (WarRoom's SceneShell), so a Habits↔Radar swap only ever
 // remounts this forest (already folded to nothing) and the void never flickers. The
 // standalone dev harness wraps this in `RadarSceneBody`, which adds its own shell.
-export function RadarForest({ model, hoveredId, selectedId, scaleRef, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
+export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
   // The dev harness mounts the radar without a fold; default to a stable scale-1 ref.
   const fallbackScale = useRef(1);
   const sref = scaleRef ?? fallbackScale;
+  // Severity buckets are a Habits-only concept (radar globes carry no issue severity),
+  // so only a HARNESS filter dims radar globes; a severity filter is a no-op here. The
+  // colour-only dim itself is computed by the shared pure `emphasis.targetDim`.
+  const radarFilter: EmphasisFilter = emphasisFilter?.kind === 'harness' ? emphasisFilter : null;
 
   const layout = useMemo(() => layoutRadarScene(model), [model]);
 
@@ -653,6 +662,9 @@ export function RadarForest({ model, hoveredId, selectedId, scaleRef, onHover, o
               selected={selectedId === node.id}
               hovered={hoveredId === node.id}
               dimmed={Boolean(selectedId && selectedId !== node.id)}
+              // Harness legend filter → colour-only dim (severity is Habits-only, so
+              // `radarFilter` is null for a severity chip → every dimTarget 0).
+              dimTarget={targetDim({ harness: node.harness }, radarFilter)}
               lifecycleRef={lifecycleRef}
               onHover={onHover}
               onLeave={onLeave}

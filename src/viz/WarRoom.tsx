@@ -32,6 +32,8 @@ import { RadarDetailPanel } from './RadarDetailPanel';
 import { layoutRadarScene, isFlatAgent } from './radarLayout';
 import { TransitionDriver, FoldGroup, makeTransition, beginTransition } from './Transition';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
+import { targetDim, type EmphasisFilter } from './emphasis';
+import { subtreeBounds, type Bounds } from './cameraFraming';
 
 const PlayerHost = lazy(() => import('./PlayerHost'));
 
@@ -145,6 +147,7 @@ function HabitsForest({
   layout,
   selectedId,
   hoveredId,
+  emphasisFilter,
   scaleRef,
   onHover,
   onLeave,
@@ -154,6 +157,8 @@ function HabitsForest({
   layout: OrbLayout;
   selectedId: string | null;
   hoveredId: string | null;
+  /** Active legend filter; each globe's colour-only `dimTarget` is derived from it. */
+  emphasisFilter: EmphasisFilter;
   /** Live fold scale for the constellation swap (1 = at rest). */
   scaleRef: { current: number };
   onHover: (node: LayoutNode) => void;
@@ -178,6 +183,11 @@ function HabitsForest({
             selected={selectedId === node.id}
             hovered={hoveredId === node.id}
             dimmed={Boolean(selectedId && selectedId !== node.id && node.agentId !== selectedAgent)}
+            // Legend filter → colour-only dim. Severity buckets read the issue's
+            // severity; harness filters read the node's harness (both tabs). With a
+            // null filter `targetDim` is 0, so the look is unchanged until Task 10
+            // lights a chip. Reuses the pure `emphasis` module (no logic forked here).
+            dimTarget={targetDim({ harness: node.harness, severity: node.issue?.severity }, emphasisFilter)}
             appearDelay={Math.min(i * 0.045, 0.6)}
             onHover={onHover}
             onLeave={onLeave}
@@ -204,6 +214,8 @@ function SceneShell({
   selected,
   selectedId,
   hoveredId,
+  emphasisFilter,
+  focusBounds,
   scaleRef,
   onHover,
   onLeave,
@@ -216,6 +228,10 @@ function SceneShell({
   selected: LayoutNode | null;
   selectedId: string | null;
   hoveredId: string | null;
+  /** Active legend filter, forwarded to whichever forest is on screen. */
+  emphasisFilter: EmphasisFilter;
+  /** Cinematic fly-to bounds for the shared CameraRig (null = overview/home). */
+  focusBounds: Bounds | null;
   scaleRef: { current: number };
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
@@ -253,7 +269,7 @@ function SceneShell({
           deliberately subordinate so the data reads first (see StarCatalog.tsx). */}
       <StarCatalog />
 
-      <CameraRig selected={selected} />
+      <CameraRig selected={selected} focusBounds={focusBounds} />
 
       {/* The ONLY thing that swaps on a tab change — folded to nothing at the swap
           midpoint, then bloomed back. The shell around it never remounts. */}
@@ -262,6 +278,7 @@ function SceneShell({
           model={radarModel}
           selectedId={selectedId}
           hoveredId={hoveredId}
+          emphasisFilter={emphasisFilter}
           scaleRef={scaleRef}
           onHover={onHover}
           onLeave={onLeave}
@@ -273,6 +290,7 @@ function SceneShell({
           layout={habitsLayout}
           selectedId={selectedId}
           hoveredId={hoveredId}
+          emphasisFilter={emphasisFilter}
           scaleRef={scaleRef}
           onHover={onHover}
           onLeave={onLeave}
@@ -315,6 +333,15 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const [displayTab, setDisplayTab] = useState<ConstellationTab>('habits');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  // Interactive-legend filter (Task 10 lights the chips). null = no filter, so every
+  // globe's colour-only `dimTarget` is 0 and the constellation looks exactly as it
+  // does today. Severity buckets apply to Habits issue orbs; harness filters apply
+  // to both tabs. Lifted here so one source of truth drives both forests.
+  const [emphasisFilter, setEmphasisFilter] = useState<EmphasisFilter>(null);
+  // Radar focus breadcrumb (root→deep agent ids). Selecting a radar agent pushes its
+  // id; the deepest id drives the CameraRig fly-to (`focusBounds`). Task 10 builds the
+  // breadcrumb UI; here we only own the stack + expose pop/clear.
+  const [focusStack, setFocusStack] = useState<string[]>([]);
   const [fixPreview, setFixPreview] = useState<FixPreview | undefined>();
   const [loadingFix, setLoadingFix] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -364,7 +391,18 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const layout = useMemo(() => layoutOrbScene(model), [model]);
   // Radar forest (live agents) — empty until the backend emits `radar_state`.
   const radarModel = useMemo<RadarSceneModel>(() => scene.radarScene ?? { agents: [], generatedAt: '' }, [scene.radarScene]);
-  const activeLayout = displayTab === 'radar' ? layoutRadarScene(radarModel) : layout;
+  // Memoised radar layout — also the source of the `id → {pos, radius}` map that
+  // `subtreeBounds` frames against. Computed from the same deterministic layout the
+  // forest renders, so the camera frames exactly what's on screen.
+  const radarLayout = useMemo(() => layoutRadarScene(radarModel), [radarModel]);
+  const radarPositions = useMemo(() => {
+    const m = new Map<string, { pos: [number, number, number]; radius: number }>();
+    for (const n of radarLayout.nodes) {
+      m.set(n.id, { pos: [n.position.x, n.position.y, n.position.z], radius: n.radius });
+    }
+    return m;
+  }, [radarLayout]);
+  const activeLayout = displayTab === 'radar' ? radarLayout : layout;
   const selectedNode = useMemo(() => activeLayout.nodes.find((n) => n.id === selectedId) ?? null, [activeLayout, selectedId]);
   const hoveredNode = useMemo(() => activeLayout.nodes.find((n) => n.id === hoveredId) ?? null, [activeLayout, hoveredId]);
 
@@ -398,6 +436,62 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     setSelectedId(null);
     setFixPreview(undefined);
   }, []);
+
+  // ── interactive legend ───────────────────────────────────────────────────────
+  // Lift-only: set the active filter. Task 10's legend chips call this; passing the
+  // same filter again (a chip toggled off) is the caller's job — we just store it.
+  const onFilter = useCallback((next: EmphasisFilter) => setEmphasisFilter(next), []);
+
+  // ── radar focus breadcrumb ───────────────────────────────────────────────────
+  // The stack is DERIVED from the radar selection so `selectedId` stays the single
+  // source of selection truth (hover/cross-fade untouched). Selecting an agent pushes
+  // it: a child of the current tip extends the path, an ancestor truncates to it, and
+  // anything else restarts the path at that agent. Leaving the radar tab or clearing
+  // the selection empties the stack (camera backs out). Deterministic — built purely
+  // from the previous stack + the new selection + the live parent links.
+  useEffect(() => {
+    if (displayTab !== 'radar') {
+      setFocusStack((cur) => (cur.length ? [] : cur));
+      return;
+    }
+    if (!selectedId || !radarModel.agents.some((a) => a.id === selectedId)) {
+      setFocusStack((cur) => (cur.length ? [] : cur));
+      return;
+    }
+    const id = selectedId;
+    const parentId = radarModel.agents.find((a) => a.id === id)?.parentId ?? null;
+    setFocusStack((cur) => {
+      if (cur[cur.length - 1] === id) return cur; // already the tip
+      const at = cur.indexOf(id);
+      if (at !== -1) return cur.slice(0, at + 1); // re-selecting an ancestor → truncate
+      if (parentId !== null && cur[cur.length - 1] === parentId) return [...cur, id]; // dive
+      return [id]; // jump elsewhere → restart the path
+    });
+  }, [displayTab, selectedId, radarModel]);
+
+  // The deepest crumb frames the camera: its subtree bounding sphere (the agent + all
+  // live descendants) drives the CameraRig fly-to. Empty stack → null → overview pose.
+  const focusBounds = useMemo<Bounds | null>(() => {
+    const tip = focusStack[focusStack.length - 1];
+    if (!tip || !radarPositions.has(tip)) return null;
+    return subtreeBounds(radarPositions, radarModel.agents, tip);
+  }, [focusStack, radarPositions, radarModel]);
+
+  // Breadcrumb controls for Task 10 (lift-only; no UI built here). Both work by
+  // re-pointing the SELECTION (the single source of truth); the derivation effect
+  // above then reconciles the stack — selecting an ancestor truncates it, clearing
+  // empties it — so the camera + detail panel follow with no nested state writes.
+  const onClearFocus = useCallback(() => {
+    setSelectedId(null);
+    setFixPreview(undefined);
+  }, []);
+  const onPopFocus = useCallback(
+    (index: number) => {
+      setSelectedId(index < 0 ? null : focusStack[index] ?? null);
+      setFixPreview(undefined);
+    },
+    [focusStack],
+  );
 
   // Esc backs out one level: while an orb is focused the first Esc deselects, and
   // is swallowed (capture phase) before main.ts's global handler so the overlay
@@ -542,6 +636,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           selected={selectedNode}
           selectedId={selectedId}
           hoveredId={hoveredId}
+          emphasisFilter={emphasisFilter}
+          focusBounds={focusBounds}
           scaleRef={foldScale}
           onHover={onHover}
           onLeave={onLeave}
