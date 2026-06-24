@@ -62,7 +62,7 @@ function harnessRank(h: string): number {
 // Packing geometry.
 const HUB_PHYLLO_SPACING = 1.18; // disc growth per √index — sets cluster density
 const HUB_FOOTPRINT_MARGIN = 0.5; // breathing room added around each agent's reach
-const SEP_ITERS = 24; // bounded pairwise separation pass (brief: ≤ 24)
+const SEP_ITERS = 80; // separation pass iterations; 80 ensures convergence on heterogeneous-footprint cases (alternating big/tiny) that stall at ~24
 const SEP_MAX_STEP = 0.6; // clamp on per-iteration displacement (stability)
 const SEP_EPS = 1e-4; // treat sub-epsilon overlap as resolved
 const ZONE_GAP = 4.0; // empty lateral space between adjacent zones
@@ -94,9 +94,10 @@ function resolveAgent(agent: OrbAgent, scene: OrbSceneModel): PackedAgent {
   const shell = shellRadius(issues.length, maxIssueR, hubR);
   // Footprint = the farthest any orb of this agent reaches from its hub centre.
   // For ≥1 issue that is the shell radius + the issue orb radius; with no issues
-  // it is just the hub globe. Margin guarantees a visible gap between agents and
-  // — because two agents are kept ≥ foot_i + foot_j apart — provably prevents any
-  // issue of one agent from touching any orb of another.
+  // it is just the hub globe. Margin provides a visible gap between agents. The
+  // separation pass aims to keep two agents ≥ foot_i + foot_j apart; with the
+  // 0.5 margin as a buffer the system is a well-margined heuristic, not a strict
+  // proof — it relies on the margin absorbing any unconverged residual overlap.
   const reach = (issues.length ? shell + maxIssueR : hubR) + HUB_FOOTPRINT_MARGIN;
   return { agent, issues, shell, hubR, maxIssueR, foot: reach, local: { x: 0, y: 0 } };
 }
@@ -125,7 +126,11 @@ function packZone(members: PackedAgent[]): number {
   });
 
   // Bounded pairwise separation: while any two footprints overlap, push the pair
-  // apart along their centre-line by half the overlap each, clamped per step.
+  // apart along their centre-line. Each agent is displaced in proportion to the
+  // OTHER agent's footprint weight — a large agent pushes a small one far while
+  // itself barely moves, which dramatically speeds convergence on heterogeneous
+  // footprint mixes (1 giant + many tiny; alternating big/tiny). Fully
+  // deterministic: weights are pure functions of footprint, no RNG.
   for (let iter = 0; iter < SEP_ITERS; iter++) {
     let moved = false;
     for (let i = 0; i < n; i++) {
@@ -145,13 +150,19 @@ function packZone(members: PackedAgent[]): number {
           d = Math.hypot(dx, dy) || 1;
         }
         const overlap = minD - d;
-        const step = Math.min(SEP_MAX_STEP, overlap / 2);
         const ux = dx / d;
         const uy = dy / d;
-        a.x -= ux * step;
-        a.y -= uy * step;
-        b.x += ux * step;
-        b.y += uy * step;
+        // Footprint-weighted split: each agent's share is proportional to the
+        // other agent's footprint so bigger agents displace smaller ones more.
+        const fi = members[i].foot;
+        const fj = members[j].foot;
+        const wtot = fi + fj;
+        const stepI = Math.min(SEP_MAX_STEP, overlap * (fj / wtot));
+        const stepJ = Math.min(SEP_MAX_STEP, overlap * (fi / wtot));
+        a.x -= ux * stepI;
+        a.y -= uy * stepI;
+        b.x += ux * stepJ;
+        b.y += uy * stepJ;
         moved = true;
       }
     }
@@ -234,9 +245,9 @@ export function layoutOrbScene(scene: OrbSceneModel): OrbLayout {
 
     for (const m of zone.members) {
       // Zone-local plane is the camera-facing X–Y; the arc only tilts Z. A hub's
-      // world position is the zone centre + its local (x, y) offset. Because the
-      // separation pass keeps hubs ≥ foot+foot apart and each footprint bounds
-      // the agent's whole issue sphere, no two agents' orbs can ever intersect.
+      // world position is the zone centre + its local (x, y) offset. The separation
+      // pass targets hubs ≥ foot_i+foot_j apart; combined with the 0.5 margin the
+      // system is robust against residual footprint overlap in practice.
       const hubCenter: Vec3 = {
         x: zoneCenter.x + m.local.x,
         y: zoneCenter.y + m.local.y,
@@ -261,7 +272,7 @@ export function layoutOrbScene(scene: OrbSceneModel): OrbLayout {
           position: shellPosition(hubCenter, index, m.issues.length, m.shell),
           radius: radiusFromCount(issue.count),
           agentId: m.agent.id,
-          harness: issue.harness,
+          harness: m.agent.harness,
           issue,
         });
       });

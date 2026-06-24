@@ -357,5 +357,112 @@ describe('layoutOrbScene', () => {
       }
     }
   });
+
+  // ─── worst-case packing guard (T4 review I-1 / I-2) ───────────────────────
+  // These scenarios push the separation pass hardest: all agents at maximum
+  // footprint in a single zone, and an alternating big/tiny footprint mix.
+  // Both must satisfy the scene-wide no-overlap invariant: ∀ pairs dist ≥ r1+r2.
+
+  it('stays collision-free with 30 maximum-footprint agents in one zone', () => {
+    // All agents same harness → single zone, maximum density packing stress-test.
+    const agents: OrbSceneModel['agents'] = [];
+    const issues: OrbSceneModel['issues'] = [];
+    const links: OrbSceneModel['links'] = [];
+    for (let a = 0; a < 30; a++) {
+      const id = `claude_code:agent${a}`;
+      agents.push({
+        id,
+        harness: 'claude_code',
+        label: id,
+        glyph: '◆',
+        color: '#3dffa0',
+        sessions: 1,
+        eventCount: 10,
+        totalLoad: 5,
+      });
+      // 12 issues each — maximum footprint for every agent
+      for (let k = 0; k < 12; k++) {
+        const issueId = `${id}:P${k}`;
+        issues.push({
+          id: issueId,
+          agentId: id,
+          harness: 'claude_code',
+          patternId: `P${k}`,
+          title: `Issue ${k}`,
+          count: 10,
+          severity: 5,
+          rationale: 'r',
+          estCostTokens: 1,
+          estCostMinutes: 1,
+          frequency: 0.1,
+          confidence: 0.5,
+          sessionIds: ['s'],
+          evidence: [],
+        });
+        links.push({ source: id, target: issueId, kind: 'agent_issue' as const });
+      }
+    }
+    const scene: OrbSceneModel = { agents, issues, links, guidance: { doItems: [], stopItems: [] } };
+    const layout = layoutOrbScene(scene);
+    const ns = layout.nodes;
+    for (let i = 0; i < ns.length; i++) {
+      for (let j = i + 1; j < ns.length; j++) {
+        const gap = dist(ns[i].position, ns[j].position) - (ns[i].radius + ns[j].radius);
+        expect(gap).toBeGreaterThanOrEqual(-1e-6);
+      }
+    }
+  });
+
+  it('stays collision-free with alternating max/min footprint agents (heterogeneous mix)', () => {
+    // Alternating big (12 issues, high load) and tiny (1 issue, low load) agents
+    // in a single zone — the hardest convergence case for a naive equal-push pass.
+    const agents: OrbSceneModel['agents'] = [];
+    const issues: OrbSceneModel['issues'] = [];
+    const links: OrbSceneModel['links'] = [];
+    for (let a = 0; a < 30; a++) {
+      const id = `claude_code:agent${a}`;
+      const isBig = a % 2 === 0;
+      agents.push({
+        id,
+        harness: 'claude_code',
+        label: id,
+        glyph: '◆',
+        color: '#3dffa0',
+        sessions: 1,
+        eventCount: 10,
+        totalLoad: isBig ? 5 : 1,
+      });
+      const nIssues = isBig ? 12 : 1;
+      for (let k = 0; k < nIssues; k++) {
+        const issueId = `${id}:P${k}`;
+        issues.push({
+          id: issueId,
+          agentId: id,
+          harness: 'claude_code',
+          patternId: `P${k}`,
+          title: `Issue ${k}`,
+          count: isBig ? 10 : 1,
+          severity: isBig ? 5 : 1,
+          rationale: 'r',
+          estCostTokens: 1,
+          estCostMinutes: 1,
+          frequency: 0.1,
+          confidence: 0.5,
+          sessionIds: ['s'],
+          evidence: [],
+        });
+        links.push({ source: id, target: issueId, kind: 'agent_issue' as const });
+      }
+    }
+    const scene: OrbSceneModel = { agents, issues, links, guidance: { doItems: [], stopItems: [] } };
+    const layout = layoutOrbScene(scene);
+    const ns = layout.nodes;
+    for (let i = 0; i < ns.length; i++) {
+      for (let j = i + 1; j < ns.length; j++) {
+        const gap = dist(ns[i].position, ns[j].position) - (ns[i].radius + ns[j].radius);
+        expect(gap).toBeGreaterThanOrEqual(-1e-6);
+      }
+    }
+  });
 });
 
