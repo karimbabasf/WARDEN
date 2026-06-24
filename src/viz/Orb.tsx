@@ -21,8 +21,35 @@ import { AgentCore } from './AgentCore';
 
 const WHITE = new THREE.Color('#ffffff');
 
+// ~300 ms time-constant for the legend colour-dim crossfade. `damp(.., DIM_LAMBDA, dt)`
+// is identical to the brief's `cur += (target-cur)*(1 - exp(-dt/0.3))` (lambda = 1/0.3).
+const DIM_LAMBDA = 1 / 0.3;
+
 function damp(current: number, target: number, lambda: number, dt: number): number {
   return THREE.MathUtils.lerp(current, target, 1 - Math.exp(-lambda * dt));
+}
+
+// One eased dim float -> a multiplicative colour scale. At dim=0 the colour is
+// untouched (1.0); at dim=1 it darkens to `floor` (matching the old boolean
+// `multiplyScalar` endpoints). Colour-only: callers copy base -> scaled, never
+// touching opacity, scale, geometry, or position.
+function dimScale(dim: number, floor: number): number {
+  return 1 - dim * (1 - floor);
+}
+
+// Reach drei's <Wireframe geometry=..> stroke/fill colour uniforms so the eased
+// dim can tint them per frame. With a `geometry` prop drei renders a private
+// <mesh><meshWireframeMaterial/></mesh>; it forwards no material ref, so we cache
+// the MeshWireframeMaterial (a ShaderMaterial) by traversing a wrapper group once.
+function findWireframeMaterial(root: THREE.Object3D | null): THREE.ShaderMaterial | null {
+  if (!root) return null;
+  let found: THREE.ShaderMaterial | null = null;
+  root.traverse((o) => {
+    if (found) return;
+    const mat = (o as THREE.Mesh).material as THREE.ShaderMaterial | undefined;
+    if (mat?.uniforms?.stroke?.value instanceof THREE.Color) found = mat;
+  });
+  return found;
 }
 
 function seedOf(id: string): number {
@@ -54,6 +81,7 @@ export function Orb({
   selected,
   hovered,
   dimmed,
+  dimTarget = 0,
   appearDelay,
   onHover,
   onLeave,
@@ -63,6 +91,10 @@ export function Orb({
   selected: boolean;
   hovered: boolean;
   dimmed: boolean;
+  /** Legend colour-only filter, 0 = full colour .. 1 = fully dimmed. Eased per
+   *  frame and applied to COLOUR ONLY (never scale/opacity/geometry). Defaults to
+   *  0 so the project type-checks before Task 9 wires it. */
+  dimTarget?: number;
   appearDelay: number;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
@@ -74,6 +106,13 @@ export function Orb({
   const gemMat = useRef<THREE.MeshPhysicalMaterial>(null!);
   const haloMat = useRef<THREE.SpriteMaterial>(null!);
   const nodeMat = useRef<THREE.PointsMaterial>(null!);
+  // Wrapper groups whose only child is a drei <Wireframe>; we traverse them once
+  // to cache the underlying MeshWireframeMaterial so the eased dim can tint the
+  // stroke/fill colour uniforms per frame (drei forwards no material ref).
+  const shellGroup = useRef<THREE.Group>(null!);
+  const innerGroup = useRef<THREE.Group>(null!);
+  const shellMat = useRef<THREE.ShaderMaterial | null>(null);
+  const cageMat = useRef<THREE.ShaderMaterial | null>(null);
 
   const isHub = node.kind === 'hub';
   const severity = node.issue?.severity ?? 1;
@@ -84,15 +123,19 @@ export function Orb({
   const innerColor = useMemo(() => color.clone().lerp(WHITE, 0.24), [color]);
   const nodeColor = useMemo(() => color.clone().lerp(WHITE, 0.14), [color]);
 
-  // Shell stroke responds to hover/select/dim — these change on user action, not
-  // per frame, so deriving them as props (re-render on change) stays cheap.
-  const shellStroke = useMemo(() => {
+  // Shell/inner BASE colour responds to hover/select + the boolean `dimmed`
+  // (other-node-selected) — these change on user action, not per frame, so they
+  // stay memoised. The eased legend dim multiplies ON TOP of these bases every
+  // frame (colour only) in useFrame.
+  const shellBase = useMemo(() => {
     const c = color.clone();
     if (dimmed) c.multiplyScalar(0.42);
     else if (selected || hovered) c.lerp(WHITE, 0.18);
-    return `#${c.getHexString()}`;
+    return c;
   }, [color, dimmed, selected, hovered]);
-  const innerStroke = useMemo(() => `#${innerColor.clone().multiplyScalar(dimmed ? 0.45 : 1).getHexString()}`, [innerColor, dimmed]);
+  const innerBase = useMemo(() => innerColor.clone().multiplyScalar(dimmed ? 0.45 : 1), [innerColor, dimmed]);
+  const shellStroke = useMemo(() => `#${shellBase.getHexString()}`, [shellBase]);
+  const innerStroke = useMemo(() => `#${innerBase.getHexString()}`, [innerBase]);
 
   const outerGeo = useMemo(() => new THREE.IcosahedronGeometry(1, isHub ? 2 : 1), [isHub]);
   const innerGeo = useMemo(() => new THREE.IcosahedronGeometry(0.6, 1), []);
@@ -115,7 +158,7 @@ export function Orb({
     [outerGeo, innerGeo, gemGeo, nodeGeo],
   );
 
-  const sim = useRef({ scale: 0.0001, glow: 0.6, dim: 0, born: -1 });
+  const sim = useRef({ scale: 0.0001, glow: 0.6, dim: 0, colorDim: 0, born: -1 });
 
   useFrame((state, dtRaw) => {
     const dt = Math.min(dtRaw, 0.05);
@@ -130,10 +173,14 @@ export function Orb({
     const targetScale = alive ? node.radius * (1 + boost) : 0.0001;
     const targetGlow = (isHub ? 0.85 : 0.5) + severityGlow + (selected ? 0.9 : hovered ? 0.35 : 0);
     const targetDim = dimmed ? 1 : 0;
+    // Legend colour-dim: dims for the legend filter OR the boolean other-selected
+    // state, whichever is stronger — one eased float, colour only.
+    const targetColorDim = Math.max(targetDim, Math.min(1, Math.max(0, dimTarget)));
 
     s.scale = damp(s.scale, targetScale, alive ? 6 : 14, dt);
     s.glow = damp(s.glow, targetGlow, 5, dt);
     s.dim = damp(s.dim, targetDim, 6, dt);
+    s.colorDim = damp(s.colorDim, targetColorDim, DIM_LAMBDA, dt);
 
     group.current.scale.setScalar(s.scale * breathe);
     group.current.rotation.y += dt * (isHub ? 0.08 : 0.14);
@@ -144,10 +191,35 @@ export function Orb({
     gem.current.rotation.y += dt * 0.28;
     gem.current.rotation.x += dt * 0.12;
 
+    // dimK (opacity/intensity) stays bound to the boolean-dim track only — the
+    // legend colour-dim must NOT change opacity, so it is deliberately excluded.
     const dimK = 1 - s.dim * 0.6;
     gemMat.current.emissiveIntensity = (0.55 + s.glow * 0.6) * dimK;
     haloMat.current.opacity = (0.2 + s.glow * 0.28) * dimK;
     nodeMat.current.opacity = (0.45 + s.glow * 0.32) * dimK;
+
+    // ── eased legend dim, COLOUR ONLY ───────────────────────────────────────
+    // Copy each material's base colour, scale by the eased dim, write it back.
+    // Copy-then-scale (never multiply in place) so the dim never compounds.
+    const shellScale = dimScale(s.colorDim, 0.42);
+    const innerScale = dimScale(s.colorDim, 0.45);
+    if (!shellMat.current) shellMat.current = findWireframeMaterial(shellGroup.current);
+    if (!cageMat.current) cageMat.current = findWireframeMaterial(innerGroup.current);
+    if (shellMat.current) {
+      const u = shellMat.current.uniforms;
+      u.stroke.value.copy(shellBase).multiplyScalar(shellScale);
+      // inner cage's fill reuses the shell colour (see <Wireframe fill=shellStroke>).
+    }
+    if (cageMat.current) {
+      const u = cageMat.current.uniforms;
+      u.stroke.value.copy(innerBase).multiplyScalar(innerScale);
+      u.fill.value.copy(shellBase).multiplyScalar(shellScale);
+    }
+    // node points, halo sprite + gem heart share the orb's colour — tint their
+    // COLOUR (not opacity/intensity) so the whole globe reads dimmer in lockstep.
+    nodeMat.current.color.copy(nodeColor).multiplyScalar(shellScale);
+    haloMat.current.color.copy(color).multiplyScalar(shellScale);
+    gemMat.current.emissive.copy(color).multiplyScalar(shellScale);
   });
 
   return (
@@ -177,20 +249,24 @@ export function Orb({
       </mesh>
 
       {/* outer glowing network shell — the orb's body */}
-      <Wireframe
-        geometry={outerGeo}
-        simplify
-        stroke={shellStroke}
-        thickness={isHub ? 0.02 : 0.016}
-        dash={!isHub}
-        dashRepeats={isHub ? 1 : 4}
-        fillOpacity={0}
-        backfaceStroke="#06150d"
-      />
+      <group ref={shellGroup}>
+        <Wireframe
+          geometry={outerGeo}
+          simplify
+          stroke={shellStroke}
+          thickness={isHub ? 0.02 : 0.016}
+          dash={!isHub}
+          dashRepeats={isHub ? 1 : 4}
+          fillOpacity={0}
+          backfaceStroke="#06150d"
+        />
+      </group>
 
       {/* counter-rotating inner cage for parallax depth */}
       <group ref={innerCage}>
-        <Wireframe geometry={innerGeo} simplify stroke={innerStroke} thickness={0.022} fill={shellStroke} fillOpacity={0.035} />
+        <group ref={innerGroup}>
+          <Wireframe geometry={innerGeo} simplify stroke={innerStroke} thickness={0.022} fill={shellStroke} fillOpacity={0.035} />
+        </group>
       </group>
 
       {/* glowing graph node at every outer vertex */}

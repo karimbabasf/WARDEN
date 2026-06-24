@@ -46,6 +46,33 @@ function damp(current: number, target: number, lambda: number, dt: number): numb
   return THREE.MathUtils.lerp(current, target, 1 - Math.exp(-lambda * dt));
 }
 
+// ~300 ms time-constant for the legend colour-dim crossfade. `damp(.., DIM_LAMBDA, dt)`
+// equals the brief's `cur += (target-cur)*(1 - exp(-dt/0.3))` (lambda = 1/0.3).
+const DIM_LAMBDA = 1 / 0.3;
+
+// Eased dim float -> a multiplicative colour scale: 1.0 at dim=0 (untouched),
+// `floor` at dim=1 (matching the old boolean `multiplyScalar` endpoints). Colour
+// only — callers copy a base colour, scale it, write it back; opacity/scale/
+// geometry/position are never touched.
+function dimScale(dim: number, floor: number): number {
+  return 1 - dim * (1 - floor);
+}
+
+// drei's <Wireframe geometry=..> renders a private <mesh><meshWireframeMaterial/>
+// and forwards no material ref, so cache the MeshWireframeMaterial (a ShaderMaterial
+// whose `stroke`/`fill` colour uniforms we tint per frame) by traversing a wrapper
+// group once.
+function findWireframeMaterial(root: THREE.Object3D | null): THREE.ShaderMaterial | null {
+  if (!root) return null;
+  let found: THREE.ShaderMaterial | null = null;
+  root.traverse((o) => {
+    if (found) return;
+    const mat = (o as THREE.Mesh).material as THREE.ShaderMaterial | undefined;
+    if (mat?.uniforms?.stroke?.value instanceof THREE.Color) found = mat;
+  });
+  return found;
+}
+
 function seedOf(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 1000;
@@ -76,6 +103,7 @@ function RadarGlobe({
   selected,
   hovered,
   dimmed,
+  dimTarget = 0,
   lifecycleRef,
   onHover,
   onLeave,
@@ -85,6 +113,10 @@ function RadarGlobe({
   selected: boolean;
   hovered: boolean;
   dimmed: boolean;
+  /** Legend colour-only filter, 0 = full colour .. 1 = fully dimmed. Eased per
+   *  frame and applied to COLOUR ONLY (never scale/opacity/geometry). Defaults to
+   *  0 so the project type-checks before Task 9 wires it. */
+  dimTarget?: number;
   /** Live read of the reconciler's per-id scale (no re-render on tween). */
   lifecycleRef: MutableRefObject<LifecycleMap>;
   onHover: (node: LayoutNode) => void;
@@ -97,6 +129,12 @@ function RadarGlobe({
   const gemMat = useRef<THREE.MeshPhysicalMaterial>(null!);
   const haloMat = useRef<THREE.SpriteMaterial>(null!);
   const nodeMat = useRef<THREE.PointsMaterial>(null!);
+  // Wrapper groups around the drei <Wireframe>s, traversed once to cache the
+  // MeshWireframeMaterial so the eased dim can tint its colour uniforms per frame.
+  const shellGroup = useRef<THREE.Group>(null!);
+  const innerGroup = useRef<THREE.Group>(null!);
+  const shellMat = useRef<THREE.ShaderMaterial | null>(null);
+  const cageMat = useRef<THREE.ShaderMaterial | null>(null);
 
   const agent = node.radarAgent!;
   const isRoot = node.depth === 0;
@@ -110,16 +148,17 @@ function RadarGlobe({
   const innerColor = useMemo(() => color.clone().lerp(WHITE, 0.24), [color]);
   const nodeColor = useMemo(() => color.clone().lerp(WHITE, 0.16), [color]);
 
-  const shellStroke = useMemo(() => {
+  // Shell/inner BASE colour (hover/select + the boolean `dimmed`). The eased
+  // legend dim multiplies ON TOP of these every frame in useFrame — colour only.
+  const shellBase = useMemo(() => {
     const c = color.clone();
     if (dimmed) c.multiplyScalar(0.42);
     else if (selected || hovered) c.lerp(WHITE, 0.18);
-    return `#${c.getHexString()}`;
+    return c;
   }, [color, dimmed, selected, hovered]);
-  const innerStroke = useMemo(
-    () => `#${innerColor.clone().multiplyScalar(dimmed ? 0.45 : 1).getHexString()}`,
-    [innerColor, dimmed],
-  );
+  const innerBase = useMemo(() => innerColor.clone().multiplyScalar(dimmed ? 0.45 : 1), [innerColor, dimmed]);
+  const shellStroke = useMemo(() => `#${shellBase.getHexString()}`, [shellBase]);
+  const innerStroke = useMemo(() => `#${innerBase.getHexString()}`, [innerBase]);
 
   const outerGeo = useMemo(() => new THREE.IcosahedronGeometry(1, isRoot ? 2 : 1), [isRoot]);
   const innerGeo = useMemo(() => new THREE.IcosahedronGeometry(0.6, 1), []);
@@ -142,7 +181,7 @@ function RadarGlobe({
     [outerGeo, innerGeo, gemGeo, nodeGeo],
   );
 
-  const sim = useRef({ scale: 0.0001, glow: 0.5, dim: 0, pos: { ...node.position } });
+  const sim = useRef({ scale: 0.0001, glow: 0.5, dim: 0, colorDim: 0, pos: { ...node.position } });
 
   useFrame((state, dtRaw) => {
     const dt = Math.min(dtRaw, 0.05);
@@ -166,12 +205,16 @@ function RadarGlobe({
     const idleDim = working ? 0 : 0.28; // idle agents read dimmer (at-a-glance who's thinking)
     const targetGlow = (isRoot ? 0.8 : 0.55) + fillGlow - idleDim + (selected ? 0.9 : hovered ? 0.35 : 0);
     const targetDim = dimmed ? 1 : 0;
+    // Legend colour-dim: dims for the legend filter OR the boolean other-selected
+    // state, whichever is stronger — one eased float, colour only.
+    const targetColorDim = Math.max(targetDim, Math.min(1, Math.max(0, dimTarget)));
 
     // spawn eases in fast; implode collapses fast — both damped (never snap).
     const scaleLambda = lifecycleScale < 0.999 ? 10 : 6;
     s.scale = damp(s.scale, targetScale, scaleLambda, dt);
     s.glow = damp(s.glow, targetGlow, 5, dt);
     s.dim = damp(s.dim, targetDim, 6, dt);
+    s.colorDim = damp(s.colorDim, targetColorDim, DIM_LAMBDA, dt);
     // damp the node toward its layout position so re-layouts glide, not jump.
     s.pos.x = damp(s.pos.x, node.position.x, 4, dt);
     s.pos.y = damp(s.pos.y, node.position.y, 4, dt);
@@ -186,10 +229,31 @@ function RadarGlobe({
     gem.current.rotation.y += dt * 0.28;
     gem.current.rotation.x += dt * 0.12;
 
+    // dimK (opacity/intensity) stays bound to the boolean-dim track only — the
+    // legend colour-dim must NOT change opacity, so it is deliberately excluded.
     const dimK = 1 - s.dim * 0.6;
     gemMat.current.emissiveIntensity = (0.55 + s.glow * 0.6) * dimK;
     haloMat.current.opacity = (0.2 + s.glow * 0.28) * dimK;
     nodeMat.current.opacity = (0.45 + s.glow * 0.32) * dimK;
+
+    // ── eased legend dim, COLOUR ONLY ───────────────────────────────────────
+    // Copy each material's base colour, scale by the eased dim, write it back
+    // (copy-then-scale so the dim never compounds frame to frame).
+    const shellScaleC = dimScale(s.colorDim, 0.42);
+    const innerScaleC = dimScale(s.colorDim, 0.45);
+    if (!shellMat.current) shellMat.current = findWireframeMaterial(shellGroup.current);
+    if (!cageMat.current) cageMat.current = findWireframeMaterial(innerGroup.current);
+    if (shellMat.current) {
+      shellMat.current.uniforms.stroke.value.copy(shellBase).multiplyScalar(shellScaleC);
+    }
+    if (cageMat.current) {
+      const u = cageMat.current.uniforms;
+      u.stroke.value.copy(innerBase).multiplyScalar(innerScaleC);
+      u.fill.value.copy(shellBase).multiplyScalar(shellScaleC); // fill reuses shell colour
+    }
+    nodeMat.current.color.copy(nodeColor).multiplyScalar(shellScaleC);
+    haloMat.current.color.copy(color).multiplyScalar(shellScaleC);
+    gemMat.current.emissive.copy(color).multiplyScalar(shellScaleC);
   });
 
   return (
@@ -218,19 +282,23 @@ function RadarGlobe({
       </mesh>
 
       {/* outer glowing network shell — root = solid lattice, sub = dashed */}
-      <Wireframe
-        geometry={outerGeo}
-        simplify
-        stroke={shellStroke}
-        thickness={isRoot ? 0.02 : 0.016}
-        dash={!isRoot}
-        dashRepeats={isRoot ? 1 : 4}
-        fillOpacity={0}
-        backfaceStroke="#06150d"
-      />
+      <group ref={shellGroup}>
+        <Wireframe
+          geometry={outerGeo}
+          simplify
+          stroke={shellStroke}
+          thickness={isRoot ? 0.02 : 0.016}
+          dash={!isRoot}
+          dashRepeats={isRoot ? 1 : 4}
+          fillOpacity={0}
+          backfaceStroke="#06150d"
+        />
+      </group>
 
       <group ref={innerCage}>
-        <Wireframe geometry={innerGeo} simplify stroke={innerStroke} thickness={0.022} fill={shellStroke} fillOpacity={0.035} />
+        <group ref={innerGroup}>
+          <Wireframe geometry={innerGeo} simplify stroke={innerStroke} thickness={0.022} fill={shellStroke} fillOpacity={0.035} />
+        </group>
       </group>
 
       <points geometry={nodeGeo}>
