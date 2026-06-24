@@ -4,7 +4,7 @@
 //! session, then drives the REAL detector-only diagnosis path (no API key) all
 //! the way to a persisted, ranked `Diagnosis`. This is the offline production
 //! path: `Brain::run_pipeline` computes features, nominates deterministic
-//! candidates, and — finding no `SAKANA_API_KEY` — assembles + saves the
+//! candidates, and — finding no brain API credentials — assembles + saves the
 //! detector-only diagnosis without any network call.
 //!
 //! Assertions (the spec's "evidence-cited, harness-aware diagnosis" guarantees):
@@ -141,7 +141,11 @@ fn ingest_codex_fixture(store: &Store) -> String {
 /// quote OR its `(session_id, event_id)` recovers ground-truth text from the
 /// store (the exact contract the Task 9 drill-down relies on).
 fn evidence_resolves(store: &Store, e: &EvidenceRef) -> bool {
-    if e.quote.as_deref().map(|q| !q.trim().is_empty()).unwrap_or(false) {
+    if e.quote
+        .as_deref()
+        .map(|q| !q.trim().is_empty())
+        .unwrap_or(false)
+    {
         return true;
     }
     if let Some(eid) = &e.event_id {
@@ -154,16 +158,32 @@ fn evidence_resolves(store: &Store, e: &EvidenceRef) -> bool {
 
 #[tokio::test]
 async fn detector_only_diagnosis_is_ranked_evidence_cited_and_harness_aware() {
-    // Guarantee the offline detector-only path: Brain snapshots the key at
-    // construction, so removing both vars BEFORE `Brain::new` forces api_key=None.
-    std::env::remove_var("WARDEN_BRAIN_API_KEY");
-    std::env::remove_var("SAKANA_API_KEY");
+    // Guarantee the offline detector-only path: Brain snapshots credentials at
+    // construction, so removing every supported fallback BEFORE `Brain::new`
+    // forces api_key/api_url to stay absent even on developer machines with
+    // OpenAI-compatible env vars exported.
+    for key in [
+        "WARDEN_BRAIN_API_KEY",
+        "WARDEN_BRAIN_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+        "SAKANA_API_KEY",
+    ] {
+        std::env::remove_var(key);
+    }
 
     let store = Store::memory().unwrap();
 
     // Two search-heavy/unverified sessions — one per harness — so a finding's
     // evidence spans BOTH harnesses, plus a real Codex session from the fixture.
-    seed_search_heavy(&store, "claude-1", Harness::ClaudeCode, "/logs/claude-1.jsonl", 12);
+    seed_search_heavy(
+        &store,
+        "claude-1",
+        Harness::ClaudeCode,
+        "/logs/claude-1.jsonl",
+        12,
+    );
     seed_search_heavy(&store, "codex-1", Harness::Codex, "/logs/codex-1.jsonl", 12);
     let fixture_codex_id = ingest_codex_fixture(&store);
 
@@ -317,6 +337,9 @@ fn seeded_events_are_resolvable_ground_truth() {
         .event_text("s", "s-read1")
         .unwrap()
         .expect("seeded ToolCall event is stored");
-    assert!(text.contains("Read"), "tool-call text is searchable: {text}");
+    assert!(
+        text.contains("Read"),
+        "tool-call text is searchable: {text}"
+    );
     assert_eq!(source.as_deref(), Some(Path::new("/logs/s.jsonl")));
 }

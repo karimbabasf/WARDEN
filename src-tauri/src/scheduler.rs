@@ -231,6 +231,91 @@ pub fn spawn_watchers(
     Ok(watchers)
 }
 
+/// RADAR (Task 9): recompute the live forest and emit it as `radar_state`. Thin
+/// wrapper over [`crate::radar::recompute_radar_state`] + the Tauri emit, so the
+/// watcher closure stays small.
+pub fn recompute_and_emit_radar(
+    store: &Store,
+    sessions_dir: &std::path::Path,
+    app: &tauri::AppHandle,
+) {
+    use tauri::Emitter;
+    let state = crate::radar::recompute_radar_state(store, sessions_dir);
+    let _ = app.emit("radar_state", &state);
+}
+
+/// Spawn the RADAR liveness watchers: the Claude `~/.claude/sessions` registry
+/// (create/delete ⇒ globe bloom/implode) plus the Codex live + archived roots
+/// (archive-move ⇒ done). On any change we recompute the whole forest from files
+/// and emit `radar_state` — the forest is ephemeral, so a full recompute is the
+/// honest, race-free path (FSEvents coalesces; see CLAUDE.md). Best-effort: a
+/// missing root is skipped; the returned watchers must outlive `setup()`.
+pub fn spawn_radar_watcher(
+    store: Store,
+    sessions_dir: PathBuf,
+    extra_roots: Vec<PathBuf>,
+    app: tauri::AppHandle,
+) -> Result<Vec<notify::RecommendedWatcher>> {
+    use notify::{EventKind, RecursiveMode, Watcher};
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for r in std::iter::once(sessions_dir.clone()).chain(extra_roots) {
+        if !roots.contains(&r) {
+            roots.push(r);
+        }
+    }
+
+    let mut watchers = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            tracing::info!(root=%root.display(), "radar watch root absent; skipping");
+            continue;
+        }
+        let store = store.clone();
+        let app = app.clone();
+        let sessions_dir = sessions_dir.clone();
+        let debounce = debounce();
+        let mut last = Instant::now()
+            .checked_sub(debounce)
+            .unwrap_or_else(Instant::now);
+
+        let mut watcher = notify::recommended_watcher(
+            move |res: notify::Result<notify::Event>| {
+                let event = match res {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(error=?e, "radar watch error");
+                        return;
+                    }
+                };
+                // Any create/modify/remove changes liveness; ignore access events.
+                if !matches!(
+                    event.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                ) {
+                    return;
+                }
+                // Debounce coalesced bursts across the whole root (the recompute is
+                // forest-wide, so per-path debouncing is unnecessary).
+                let now = Instant::now();
+                if now.duration_since(last) < debounce {
+                    return;
+                }
+                last = now;
+                recompute_and_emit_radar(&store, &sessions_dir, &app);
+            },
+        )
+        .context("create radar watcher")?;
+
+        watcher
+            .watch(&root, RecursiveMode::Recursive)
+            .with_context(|| format!("radar watch {}", root.display()))?;
+        tracing::info!(root=%root.display(), "watching for live agents (radar)");
+        watchers.push(watcher);
+    }
+    Ok(watchers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

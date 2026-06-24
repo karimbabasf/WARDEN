@@ -7,6 +7,7 @@ pub mod forge;
 pub mod harness_theme;
 pub mod ingest;
 pub mod ir;
+pub mod radar;
 pub mod redaction;
 pub mod scaffold;
 pub mod scheduler;
@@ -15,6 +16,11 @@ pub mod util;
 
 use commands::*;
 use tauri::menu::MenuBuilder;
+
+/// Holds the RADAR liveness watchers so they outlive `setup()`. A distinct type
+/// from `scheduler::WatcherGuard` because Tauri's managed state is keyed by type —
+/// the ingest watchers and the radar watchers must each get their own slot.
+struct RadarWatcherGuard(#[allow(dead_code)] std::sync::Mutex<Vec<notify::RecommendedWatcher>>);
 use tauri::tray::TrayIconBuilder;
 use tauri::{ActivationPolicy, Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -26,7 +32,10 @@ fn summon_overlay(app: &tauri::AppHandle) {
         let _ = w.set_ignore_cursor_events(false);
         let _ = w.show();
         let _ = w.set_focus();
-        let _ = app.emit("warden_hotkey", serde_json::json!({"hotkey":"cmd+shift+space"}));
+        let _ = app.emit(
+            "warden_hotkey",
+            serde_json::json!({"hotkey":"cmd+shift+space"}),
+        );
     }
 }
 
@@ -40,6 +49,7 @@ fn dismiss_overlay(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -71,15 +81,40 @@ pub fn run() {
                 Err(e) => tracing::warn!(error=%format!("{e:#}"), "live watchers failed to start"),
             }
 
+            // 2b) RADAR liveness watchers: the Claude `~/.claude/sessions` registry
+            //     (bloom/implode) + the Codex live/archived roots (archive-move =
+            //     done). On any change the whole forest is recomputed and pushed as
+            //     `radar_state`. Best-effort, same isolation as the ingest watchers.
+            let radar_roots = vec![
+                util::default_codex_sessions(),
+                util::default_codex_archived_sessions(),
+                util::default_claude_projects(),
+            ];
+            match scheduler::spawn_radar_watcher(
+                state.store.clone(),
+                util::default_claude_sessions_dir(),
+                radar_roots,
+                app.handle().clone(),
+            ) {
+                Ok(watchers) => {
+                    app.manage(RadarWatcherGuard(std::sync::Mutex::new(watchers)));
+                }
+                Err(e) => {
+                    tracing::warn!(error=%format!("{e:#}"), "radar watchers failed to start")
+                }
+            }
+
             // 3) One-shot startup backfill so the HUD has data immediately. Runs off
             //    the UI thread; a failing adapter is isolated inside backfill_all and
             //    only logs — it never stalls the others or aborts startup.
             {
                 let store = state.store.clone();
+                let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let registry = ingest::AdapterRegistry::new(store.clone());
+                    let backfill_store = store.clone();
                     let summary = tokio::task::spawn_blocking(move || {
-                        registry.backfill_all(&store)
+                        let registry = ingest::AdapterRegistry::new(backfill_store.clone());
+                        registry.backfill_all(&backfill_store)
                     })
                     .await;
                     match summary {
@@ -95,6 +130,42 @@ pub fn run() {
                                     "startup backfill complete"
                                 );
                             }
+                            let ingested_sessions: usize = summary
+                                .by_harness
+                                .iter()
+                                .map(|(_, sessions, _)| *sessions)
+                                .sum();
+                            let ingested_events: usize = summary
+                                .by_harness
+                                .iter()
+                                .map(|(_, _, events)| *events)
+                                .sum();
+                            let by_harness = summary
+                                .by_harness
+                                .iter()
+                                .map(|(harness, sessions, events)| {
+                                    serde_json::json!({
+                                        "harness": harness.as_str(),
+                                        "sessions": sessions,
+                                        "events": events,
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            let (total_sessions, total_events, finding_count) =
+                                store.counts().unwrap_or((0, 0, 0));
+                            let _ = app_handle.emit(
+                                "ingest_progress",
+                                serde_json::json!({
+                                    "phase": "startup_backfill",
+                                    "status": "complete",
+                                    "ingested_sessions": ingested_sessions,
+                                    "ingested_events": ingested_events,
+                                    "total_sessions": total_sessions,
+                                    "total_events": total_events,
+                                    "finding_count": finding_count,
+                                    "by_harness": by_harness,
+                                }),
+                            );
                         }
                         Err(e) => tracing::warn!(error = %e, "startup backfill task panicked"),
                     }
@@ -164,13 +235,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            diag,
             query_profile,
+            get_orb_scene,
             get_findings,
             get_diagnosis,
             run_diagnosis,
             ask,
             hide_overlay,
             get_fix_preview,
+            get_orb_fix_preview,
             resolve_evidence,
             apply_artifact,
             revert_artifact,
@@ -179,6 +253,7 @@ pub fn run() {
             capture_screen,
             set_config,
             mute_pattern,
+            get_radar_state,
             list_fleet,
             locate_agent,
             warp_to_agent

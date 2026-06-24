@@ -5,56 +5,38 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub fn nominate(store: &Store, profile: &CompetenceProfile) -> Result<Vec<Finding>> {
-    let features = store.all_features()?;
-    let sessions_by_id = store
-        .sessions()?
-        .into_iter()
-        .map(|s| (s.id.clone(), s))
-        .collect::<HashMap<_, _>>();
-    let total = features.len().max(1) as f64;
-    let mut findings = Vec::new();
-    let mut add = |pattern: &str,
-                   title: &str,
+#[derive(Debug, Clone)]
+pub struct DetectorHit {
+    pub pattern_id: &'static str,
+    pub title: &'static str,
+    pub severity: u8,
+    pub affected: Vec<FeatureVector>,
+    pub rationale: String,
+}
+
+pub fn detect(profile: &CompetenceProfile, features: &[FeatureVector]) -> Vec<DetectorHit> {
+    let mut hits = Vec::new();
+    let mut add = |pattern_id: &'static str,
+                   title: &'static str,
                    severity: u8,
-                   affected: Vec<&FeatureVector>,
+                   affected: Vec<FeatureVector>,
                    rationale: String| {
         if affected.is_empty() {
             return;
         }
-        let evidence = affected
-            .iter()
-            .take(12)
-            .map(|f| evidence_for(store, sessions_by_id.get(&f.session_id), pattern, f))
-            .collect::<Vec<_>>();
-        let token_cost = affected.iter().map(|f| estimate_tokens(pattern, f)).sum();
-        let min_cost = affected.iter().map(|f| estimate_minutes(pattern, f)).sum();
-        findings.push(Finding {
-            id: stable_id(&[
-                pattern,
-                &affected
-                    .iter()
-                    .map(|f| f.session_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(""),
-            ]),
-            pattern_id: pattern.into(),
-            title: title.into(),
+        hits.push(DetectorHit {
+            pattern_id,
+            title,
             severity,
-            frequency: affected.len() as f64 / total,
-            est_cost_tokens: token_cost,
-            est_cost_minutes: min_cost,
-            confidence: detector_confidence(severity, affected.len(), total as usize),
+            affected,
             rationale,
-            evidence,
-            status: "candidate".into(),
-            verifier_verdict: None,
         });
     };
-    add("CONTEXT_BLOAT","Context bloat",4,features.iter().filter(|f|f.search_in_main_context>=8 || (f.search_in_main_context>=4 && f.context_saturation_peak>0.35)).collect(),"Search and file-reading tools are repeatedly used in the main Claude context, increasing token burn before useful edits.".into());
-    add("NO_DELEGATION","No delegation",4,features.iter().filter(|f|f.tool_call_count>=12 && f.subagent_spawn_count==0 && f.search_in_main_context>=3).collect(),"Search-heavy sessions rarely use Claude Code Task subagents, so discovery work competes with implementation context.".into());
-    add("UNVERIFIED_COMPLETION","Unverified completion",5,features.iter().filter(|f|f.tool_call_count>=4 && !f.verification_present).collect(),"Sessions reach substantial tool use without an observed build/test/verification command before completion.".into());
-    add("IGNORED_TOOL_ERROR","Ignored tool errors",4,features.iter().filter(|f|f.ignored_error_count>0 || f.tool_error_rate>0.25).collect(),"Tool errors appear at a high rate and are not consistently followed by clear verification/correction signals.".into());
+
+    add("CONTEXT_BLOAT","Context bloat",4,features.iter().filter(|f|f.search_in_main_context>=8 || (f.search_in_main_context>=4 && f.context_saturation_peak>0.35)).cloned().collect(),"Search and file-reading tools are repeatedly used in the main Claude context, increasing token burn before useful edits.".into());
+    add("NO_DELEGATION","No delegation",4,features.iter().filter(|f|f.tool_call_count>=12 && f.subagent_spawn_count==0 && f.search_in_main_context>=3).cloned().collect(),"Search-heavy sessions rarely use Claude Code Task subagents, so discovery work competes with implementation context.".into());
+    add("UNVERIFIED_COMPLETION","Unverified completion",5,features.iter().filter(|f|f.tool_call_count>=4 && !f.verification_present).cloned().collect(),"Sessions reach substantial tool use without an observed build/test/verification command before completion.".into());
+    add("IGNORED_TOOL_ERROR","Ignored tool errors",4,features.iter().filter(|f|f.ignored_error_count>0 || f.tool_error_rate>0.25).cloned().collect(),"Tool errors appear at a high rate and are not consistently followed by clear verification/correction signals.".into());
     add(
         "VAGUE_PROMPT",
         "Vague prompts",
@@ -64,20 +46,79 @@ pub fn nominate(store: &Store, profile: &CompetenceProfile) -> Result<Vec<Findin
             .filter(|f| {
                 f.prompt_specificity > 0.0 && f.prompt_specificity < 0.28 && f.reprompt_count > 0
             })
+            .cloned()
             .collect(),
         "Some sessions start from underspecified prompts and need corrective follow-up turns."
             .into(),
     );
-    add("WHACK_A_MOLE","Whack-a-mole loops",4,features.iter().filter(|f|f.thrash_index>=2.0 || f.file_churn>=4.0).collect(),"Repeated edits or repeated failing commands suggest symptom-patching loops instead of a reset to root cause.".into());
-    add("CACHE_COLD_RESTARTS","Cache-cold restarts",3,features.iter().filter(|f|f.token_burn_total>20_000 && f.cache_read_ratio<0.08).collect(),"High-token sessions show low cache-read ratios, suggesting expensive cold context restarts.".into());
+    add("WHACK_A_MOLE","Whack-a-mole loops",4,features.iter().filter(|f|f.thrash_index>=2.0 || f.file_churn>=4.0).cloned().collect(),"Repeated edits or repeated failing commands suggest symptom-patching loops instead of a reset to root cause.".into());
+    add("CACHE_COLD_RESTARTS","Cache-cold restarts",3,features.iter().filter(|f|f.token_burn_total>20_000 && f.cache_read_ratio<0.08).cloned().collect(),"High-token sessions show low cache-read ratios, suggesting expensive cold context restarts.".into());
     if profile
         .repeated_explanation_clusters
         .iter()
         .any(|c| c.count >= 3)
     {
-        let affected = features.iter().take(20).collect();
-        add("REPEATED_EXPLANATION","Repeated explanation",3,affected,"Multiple sessions cluster around the same project context; durable project memory may reduce re-explanation.".into());
+        add("REPEATED_EXPLANATION","Repeated explanation",3,features.iter().take(20).cloned().collect(),"Multiple sessions cluster around the same project context; durable project memory may reduce re-explanation.".into());
     }
+
+    hits
+}
+
+pub fn finding_from_hit(
+    store: &Store,
+    sessions_by_id: &HashMap<String, Session>,
+    hit: &DetectorHit,
+    affected: &[FeatureVector],
+    total: usize,
+) -> Finding {
+    let evidence = affected
+        .iter()
+        .take(12)
+        .map(|f| evidence_for(store, sessions_by_id.get(&f.session_id), hit.pattern_id, f))
+        .collect::<Vec<_>>();
+    let token_cost = affected
+        .iter()
+        .map(|f| estimate_tokens(hit.pattern_id, f))
+        .sum();
+    let min_cost = affected
+        .iter()
+        .map(|f| estimate_minutes(hit.pattern_id, f))
+        .sum();
+    Finding {
+        id: stable_id(&[
+            hit.pattern_id,
+            &affected
+                .iter()
+                .map(|f| f.session_id.as_str())
+                .collect::<Vec<_>>()
+                .join(""),
+        ]),
+        pattern_id: hit.pattern_id.into(),
+        title: hit.title.into(),
+        severity: hit.severity,
+        frequency: affected.len() as f64 / total.max(1) as f64,
+        est_cost_tokens: token_cost,
+        est_cost_minutes: min_cost,
+        confidence: detector_confidence(hit.severity, affected.len(), total.max(1)),
+        rationale: hit.rationale.clone(),
+        evidence,
+        status: "candidate".into(),
+        verifier_verdict: None,
+    }
+}
+
+pub fn nominate(store: &Store, profile: &CompetenceProfile) -> Result<Vec<Finding>> {
+    let features = store.all_features()?;
+    let sessions_by_id = store
+        .sessions()?
+        .into_iter()
+        .map(|s| (s.id.clone(), s))
+        .collect::<HashMap<_, _>>();
+    let total = features.len().max(1);
+    let mut findings = detect(profile, &features)
+        .into_iter()
+        .map(|hit| finding_from_hit(store, &sessions_by_id, &hit, &hit.affected, total))
+        .collect::<Vec<_>>();
     findings.sort_by(|a, b| {
         b.severity.cmp(&a.severity).then_with(|| {
             b.frequency

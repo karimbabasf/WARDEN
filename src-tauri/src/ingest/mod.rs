@@ -89,6 +89,14 @@ impl AdapterRegistry {
             }
         }
 
+        // RADAR (Task 5): once every adapter's batches are persisted, resolve Codex
+        // Desktop parent→child links over the store (both parent and child rows now
+        // exist). Best-effort: a linkage failure is surfaced as an error but never
+        // discards the ingested data.
+        if let Err(e) = codex::link_codex_subagents_in_store(store) {
+            errors.push(format!("codex linkage: {e:#}"));
+        }
+
         IngestSummary { by_harness, errors }
     }
 }

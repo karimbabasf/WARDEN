@@ -3,8 +3,10 @@ use crate::featurizer;
 use crate::ir::*;
 use crate::redaction::excerpt;
 use crate::store::Store;
-use crate::util::{brain_api_key, brain_diagnose_model, brain_effort, brain_responses_url,
-                  brain_verify_model, hash64, stable_id};
+use crate::util::{
+    brain_api_key, brain_chat_completions_url, brain_diagnose_model, brain_structured_output,
+    brain_verify_model, hash64, stable_id,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -20,12 +22,13 @@ pub struct Brain {
     store: Store,
     client: Client,
     api_key: Option<String>,
+    api_url: Option<String>,
     app: Option<AppHandle>,
 }
 
 impl Brain {
     pub fn new(store: Store) -> Self {
-        let timeout_secs = std::env::var("WARDEN_FUGU_TIMEOUT_SECS")
+        let timeout_secs = std::env::var("WARDEN_BRAIN_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(75);
@@ -38,6 +41,7 @@ impl Brain {
             store,
             client,
             api_key: brain_api_key(),
+            api_url: brain_chat_completions_url(),
             app: None,
         }
     }
@@ -49,6 +53,7 @@ impl Brain {
 
     pub fn available(&self) -> bool {
         self.api_key.as_ref().is_some_and(|s| !s.trim().is_empty())
+            && self.api_url.as_ref().is_some_and(|s| !s.trim().is_empty())
     }
 }
 
@@ -118,10 +123,10 @@ impl Brain {
         // nodes can spawn from real nominated holes. No-op when headless.
         self.emit_candidates(&candidates);
 
-        let Some(_) = self.api_key else {
+        if !self.available() {
             let d = detector_only_diagnosis(
                 candidates,
-                "SAKANA_API_KEY is not set; showing deterministic detector-only diagnosis.",
+                "WARDEN_BRAIN_API_KEY or WARDEN_BRAIN_BASE_URL is not set; showing deterministic detector-only diagnosis.",
             );
             self.store.save_findings(&d.ranked_findings)?;
             self.store.save_diagnosis(&d)?;
@@ -260,7 +265,6 @@ impl Brain {
             .call_json(
                 "diagnostician",
                 &brain_diagnose_model(),
-                &brain_effort(true),
                 serde_json::to_value(schema_for!(DiagnosticianOutput))?,
                 &input,
             )
@@ -309,7 +313,6 @@ impl Brain {
             .call_json(
                 "diagnostician_compact",
                 &brain_diagnose_model(),
-                &brain_effort(false),
                 serde_json::to_value(schema_for!(DiagnosticianOutput))?,
                 &input,
             )
@@ -357,7 +360,6 @@ impl Brain {
         self.call_json(
             "coach",
             &brain_diagnose_model(),
-            &brain_effort(true),
             serde_json::to_value(schema_for!(CoachOutput))?,
             &input,
         )
@@ -372,7 +374,6 @@ impl Brain {
         self.call_json(
             "verifier",
             &brain_verify_model(),
-            &brain_effort(false),
             serde_json::to_value(schema_for!(VerifyOutput))?,
             &input,
         )
@@ -383,22 +384,41 @@ impl Brain {
         &self,
         stage: &str,
         model: &str,
-        effort: &str,
         schema: Value,
         input: &Value,
     ) -> Result<T> {
         let prompt = serde_json::to_string(input)?;
         let req_hash = hex::encode(hash64(prompt.as_bytes()).to_be_bytes());
+        let structured_output = BrainStructuredOutput::from_env();
+        let stream_enabled = std::env::var("WARDEN_BRAIN_STREAM")
+            .map(|s| s.trim() != "0")
+            .unwrap_or(true);
 
         let started = Instant::now();
         let (out, usage) = if self.app.is_none()
-            || std::env::var("WARDEN_FUGU_TRANSPORT").as_deref() == Ok("curl")
+            || std::env::var("WARDEN_BRAIN_TRANSPORT").as_deref() == Ok("curl")
         {
-            self.call_json_with_curl(stage, model, effort, schema, &prompt)
+            self.call_json_with_curl(stage, model, schema, &prompt, structured_output)
                 .await?
+        } else if !stream_enabled {
+            match self
+                .call_json_blocking(stage, model, schema.clone(), &prompt, structured_output)
+                .await
+            {
+                Ok(ok) => ok,
+                Err(blocking_error) => {
+                    tracing::warn!(
+                        stage,
+                        error = %blocking_error,
+                        "blocking brain response failed; retrying with curl transport"
+                    );
+                    self.call_json_with_curl(stage, model, schema, &prompt, structured_output)
+                        .await?
+                }
+            }
         } else {
             match self
-                .call_json_streaming(stage, model, effort, schema.clone(), &prompt)
+                .call_json_streaming(stage, model, schema.clone(), &prompt, structured_output)
                 .await
             {
                 Ok(ok) => ok,
@@ -406,10 +426,16 @@ impl Brain {
                     tracing::warn!(
                         stage,
                         error = %stream_error,
-                        "streaming Fugu response failed; retrying non-streaming"
+                        "streaming brain response failed; retrying non-streaming"
                     );
                     match self
-                        .call_json_blocking(stage, model, effort, schema.clone(), &prompt)
+                        .call_json_blocking(
+                            stage,
+                            model,
+                            schema.clone(),
+                            &prompt,
+                            structured_output,
+                        )
                         .await
                     {
                         Ok(ok) => ok,
@@ -417,16 +443,22 @@ impl Brain {
                             tracing::warn!(
                                 stage,
                                 error = %blocking_error,
-                                "reqwest non-streaming Fugu response failed; retrying with curl transport"
+                                "reqwest non-streaming brain response failed; retrying with curl transport"
                             );
                             match self
-                                .call_json_with_curl(stage, model, effort, schema, &prompt)
+                                .call_json_with_curl(
+                                    stage,
+                                    model,
+                                    schema,
+                                    &prompt,
+                                    structured_output,
+                                )
                                 .await
                             {
                                 Ok(ok) => ok,
                                 Err(curl_error) => {
                                     return Err(anyhow!(
-                                        "streaming Fugu {stage} failed ({stream_error}); reqwest non-streaming retry failed ({blocking_error}); curl retry failed ({curl_error})"
+                                        "streaming brain {stage} failed ({stream_error}); reqwest non-streaming retry failed ({blocking_error}); curl retry failed ({curl_error})"
                                     ));
                                 }
                             }
@@ -437,18 +469,18 @@ impl Brain {
         };
 
         if out.trim().is_empty() {
-            return Err(anyhow!("Fugu {stage} returned empty output"));
+            return Err(anyhow!("brain {stage} returned empty output"));
         }
 
         let parsed_text = repair_json_text(&out);
         let val: Value = serde_json::from_str(&parsed_text)
-            .with_context(|| format!("parse Fugu {stage} JSON: {parsed_text}"))?;
+            .with_context(|| format!("parse brain {stage} JSON: {parsed_text}"))?;
         let u = usage_tokens(&usage);
         self.emit_usage(stage, &u);
         self.store.save_fugu_run(
             stage,
             model,
-            effort,
+            "chat_completions",
             &req_hash,
             u.0,
             u.1,
@@ -463,17 +495,17 @@ impl Brain {
         &self,
         stage: &str,
         model: &str,
-        effort: &str,
         schema: Value,
         prompt: &str,
+        structured_output: BrainStructuredOutput,
     ) -> Result<(String, Value)> {
-        let body = fugu_body(stage, model, effort, schema, prompt, true);
-        let resp = self.send_fugu(&body).send().await?;
+        let body = chat_completions_body(stage, model, schema, prompt, true, structured_output);
+        let resp = self.send_chat_completions(&body).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(anyhow!(
-                "Fugu {stage} HTTP {status}: {}",
+                "brain {stage} HTTP {status}: {}",
                 text.chars().take(800).collect::<String>()
             ));
         }
@@ -482,6 +514,7 @@ impl Brain {
         let mut buf = String::new();
         let mut out = String::new();
         let mut usage = json!({});
+        let mut done = false;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -492,39 +525,23 @@ impl Brain {
                     let Some(data) = line.strip_prefix("data: ") else {
                         continue;
                     };
-                    if data.trim() == "[DONE]" {
-                        continue;
+                    let before = out.len();
+                    if apply_chat_completions_sse_data(data, &mut out, &mut usage) {
+                        done = true;
                     }
-                    let Ok(v) = serde_json::from_str::<Value>(data) else {
-                        continue;
-                    };
-                    match v.get("type").and_then(Value::as_str).unwrap_or("") {
-                        "response.output_text.delta" => {
-                            if let Some(delta) = v.get("delta").and_then(Value::as_str) {
-                                out.push_str(delta);
-                                self.emit_delta(stage, delta);
-                            }
-                        }
-                        "response.output_text.done" => {
-                            if out.trim().is_empty() {
-                                if let Some(text) = v.get("text").and_then(Value::as_str) {
-                                    out.push_str(text);
-                                }
-                            }
-                        }
-                        "response.completed" => {
-                            if let Some(u) = v.get("response").and_then(|r| r.get("usage")) {
-                                usage = u.clone();
-                            }
-                            if out.trim().is_empty() {
-                                out =
-                                    extract_output_text(v.get("response").unwrap_or(&Value::Null));
-                            }
-                        }
-                        _ => {}
+                    if out.len() > before {
+                        self.emit_delta(stage, &out[before..]);
                     }
                 }
             }
+            if done {
+                break;
+            }
+        }
+        if out.trim().is_empty() {
+            return Err(anyhow!(
+                "brain {stage} stream ended without choices[].delta.content"
+            ));
         }
         Ok((out, usage))
     }
@@ -533,41 +550,48 @@ impl Brain {
         &self,
         stage: &str,
         model: &str,
-        effort: &str,
         schema: Value,
         prompt: &str,
+        structured_output: BrainStructuredOutput,
     ) -> Result<(String, Value)> {
-        let body = fugu_body(stage, model, effort, schema, prompt, false);
-        let resp = self.send_fugu(&body).send().await?;
+        let body = chat_completions_body(stage, model, schema, prompt, false, structured_output);
+        let resp = self.send_chat_completions(&body).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(anyhow!(
-                "Fugu {stage} HTTP {status}: {}",
+                "brain {stage} HTTP {status}: {}",
                 text.chars().take(800).collect::<String>()
             ));
         }
         let response: Value = resp.json().await?;
         let usage = response.get("usage").cloned().unwrap_or_else(|| json!({}));
-        Ok((extract_output_text(&response), usage))
+        Ok((extract_chat_message_content(&response), usage))
     }
 
     async fn call_json_with_curl(
         &self,
         stage: &str,
         model: &str,
-        effort: &str,
         schema: Value,
         prompt: &str,
+        structured_output: BrainStructuredOutput,
     ) -> Result<(String, Value)> {
-        let key = self.api_key.as_ref().context("SAKANA_API_KEY missing")?;
-        let body = fugu_body(stage, model, effort, schema, prompt, false);
+        let key = self
+            .api_key
+            .as_ref()
+            .context("WARDEN_BRAIN_API_KEY missing")?;
+        let url = self
+            .api_url
+            .as_ref()
+            .context("WARDEN_BRAIN_BASE_URL missing")?;
+        let body = chat_completions_body(stage, model, schema, prompt, false, structured_output);
         let mut child = tokio::process::Command::new("curl")
             .arg("--silent")
             .arg("--show-error")
             .arg("--fail-with-body")
             .arg("--max-time")
-            .arg(fugu_curl_timeout_secs().to_string())
+            .arg(brain_curl_timeout_secs().to_string())
             .arg("--connect-timeout")
             .arg("10")
             .arg("--header")
@@ -580,12 +604,12 @@ impl Brain {
             .arg("Accept-Encoding: identity")
             .arg("--data-binary")
             .arg("@-")
-            .arg(brain_responses_url())
+            .arg(url)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .context("spawn curl for Fugu retry")?;
+            .context("spawn curl for brain retry")?;
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
@@ -596,7 +620,7 @@ impl Brain {
         let output = child.wait_with_output().await?;
         if !output.status.success() {
             return Err(anyhow!(
-                "curl Fugu {stage} exited {}: {}{}",
+                "curl brain {stage} exited {}: {}{}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr),
                 String::from_utf8_lossy(&output.stdout)
@@ -607,18 +631,16 @@ impl Brain {
         }
         let response: Value = serde_json::from_slice(&output.stdout)?;
         let usage = response.get("usage").cloned().unwrap_or_else(|| json!({}));
-        Ok((extract_output_text(&response), usage))
+        Ok((extract_chat_message_content(&response), usage))
     }
 
-    fn send_fugu(&self, body: &Value) -> reqwest::RequestBuilder {
+    fn send_chat_completions(&self, body: &Value) -> reqwest::RequestBuilder {
         self.client
-            .post(brain_responses_url())
-            .bearer_auth(self.api_key.as_ref().expect("checked before Fugu call"))
+            .post(self.api_url.as_ref().expect("checked before brain call"))
+            .bearer_auth(self.api_key.as_ref().expect("checked before brain call"))
             .header(header::ACCEPT, "application/json")
-            // The Responses SSE endpoint has intermittently returned compressed chunks that
-            // reqwest surfaced as `error decoding response body` in the app. Identity encoding
-            // keeps the war-room stream simple and deterministic, and the non-stream retry below
-            // makes the diagnosis path resilient if SSE is unavailable.
+            // Identity encoding keeps SSE chunk handling deterministic, and the
+            // non-stream retry below keeps diagnosis resilient if SSE is unavailable.
             .header(header::ACCEPT_ENCODING, "identity")
             .json(body)
     }
@@ -645,49 +667,88 @@ impl Brain {
     }
 }
 
-fn fugu_body(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrainStructuredOutput {
+    JsonSchema,
+    JsonObject,
+    Prompt,
+}
+
+impl BrainStructuredOutput {
+    fn from_env() -> Self {
+        match brain_structured_output().as_str() {
+            "json_schema" => Self::JsonSchema,
+            "prompt" => Self::Prompt,
+            _ => Self::JsonObject,
+        }
+    }
+}
+
+fn chat_completions_body(
     stage: &str,
     model: &str,
-    effort: &str,
     schema: Value,
     prompt: &str,
     stream: bool,
+    structured_output: BrainStructuredOutput,
 ) -> Value {
+    let user_prompt = chat_stage_prompt(stage, &schema, prompt);
     let mut body = json!({
         "model":model,
-        "input":[
-            {"role":"system","content":[{"type":"input_text","text":"You are WARDEN's analysis brain. Return only valid JSON matching the schema. Cite only supplied evidence."}]},
-            {"role":"user","content":[{"type":"input_text","text":prompt}]}
+        "messages":[
+            {"role":"system","content":"You are WARDEN's analysis brain. Return only valid JSON matching the schema. Cite only supplied evidence."},
+            {"role":"user","content":user_prompt}
         ],
-        "text":{"format":{"type":"json_schema","name":stage,"schema":schema,"strict":false}},
-        "reasoning":{"effort":effort},
         "stream":stream,
-        "max_output_tokens":fugu_max_output_tokens(stage)
+        "max_tokens":brain_max_tokens(stage)
     });
+    match structured_output {
+        BrainStructuredOutput::JsonSchema => {
+            body["response_format"] = json!({
+                "type":"json_schema",
+                "json_schema":{
+                    "name":stage,
+                    "schema":schema,
+                    "strict":true
+                }
+            });
+        }
+        BrainStructuredOutput::JsonObject => {
+            body["response_format"] = json!({"type":"json_object"});
+        }
+        BrainStructuredOutput::Prompt => {}
+    }
     if stream {
         body["stream_options"] = json!({"include_usage":true});
     }
     body
 }
 
-fn fugu_curl_timeout_secs() -> u64 {
+fn chat_stage_prompt(stage: &str, schema: &Value, input: &str) -> String {
+    let schema_text = serde_json::to_string(schema).unwrap_or_else(|_| schema.to_string());
+    format!(
+        "Stage: {stage}\nReturn only valid JSON matching this JSON Schema:\n{schema_text}\n\nInput JSON:\n{input}"
+    )
+}
+
+fn brain_curl_timeout_secs() -> u64 {
     // Keep the app-facing reqwest timeout short so the UI never hangs on a bad network call,
-    // but give the final curl fallback enough room for high-effort Fugu war-room runs.
-    std::env::var("WARDEN_FUGU_CURL_TIMEOUT_SECS")
+    // but give the final curl fallback enough room for multi-stage brain runs.
+    std::env::var("WARDEN_BRAIN_CURL_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .or_else(|| {
-            std::env::var("WARDEN_FUGU_TIMEOUT_SECS")
+            std::env::var("WARDEN_BRAIN_TIMEOUT_SECS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(|s| (s * 3).clamp(60, 240))
         })
-        .unwrap_or(150)
+        .unwrap_or_else(|| (75 * 3).clamp(60, 240))
 }
 
-fn fugu_max_output_tokens(stage: &str) -> u64 {
+fn brain_max_tokens(stage: &str) -> u64 {
     match stage {
-        "diagnostician" => 3_000,
+        s if s.starts_with("diagnostician") => 3_000,
         "coach" => 1_500,
         "verifier" => 900,
         _ => 2_000,
@@ -822,26 +883,45 @@ fn is_detector_backfill(f: &Finding) -> bool {
     f.status == "detector_backfill"
 }
 
-fn extract_output_text(response: &Value) -> String {
-    if let Some(t) = response.get("output_text").and_then(Value::as_str) {
-        return t.to_string();
+fn extract_chat_message_content(response: &Value) -> String {
+    response
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            response
+                .pointer("/choices/0/message/reasoning_content")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn apply_chat_completions_sse_data(data: &str, out: &mut String, usage: &mut Value) -> bool {
+    if data.trim() == "[DONE]" {
+        return true;
     }
 
-    let mut s = String::new();
-    if let Some(arr) = response.get("output").and_then(Value::as_array) {
-        for item in arr {
-            if let Some(ca) = item.get("content").and_then(Value::as_array) {
-                for c in ca {
-                    if c.get("type").and_then(Value::as_str) == Some("output_text") {
-                        if let Some(t) = c.get("text").and_then(Value::as_str) {
-                            s.push_str(t);
-                        }
-                    }
-                }
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return false;
+    };
+
+    if let Some(u) = v.get("usage") {
+        *usage = u.clone();
+    }
+
+    if let Some(choices) = v.get("choices").and_then(Value::as_array) {
+        for choice in choices {
+            if let Some(delta) = choice
+                .get("delta")
+                .and_then(|d| d.get("content"))
+                .and_then(Value::as_str)
+            {
+                out.push_str(delta);
             }
         }
     }
-    s
+
+    false
 }
 
 fn repair_json_text(s: &str) -> String {
@@ -922,7 +1002,10 @@ impl Brain {
     /// before any Fugu call. No-op when headless (`app` is None, e.g. tests).
     fn emit_candidates(&self, candidates: &[Finding]) {
         if let Some(app) = &self.app {
-            let _ = app.emit("candidates_nominated", candidates_payload(candidates, &self.store));
+            let _ = app.emit(
+                "candidates_nominated",
+                candidates_payload(candidates, &self.store),
+            );
         }
     }
 
@@ -931,21 +1014,22 @@ impl Brain {
     /// No-op when headless.
     fn emit_verdict(&self, finding: &Finding, verdict: &str) {
         if let Some(app) = &self.app {
-            let _ = app.emit("finding_verdict", verdict_payload(finding, verdict, &self.store));
+            let _ = app.emit(
+                "finding_verdict",
+                verdict_payload(finding, verdict, &self.store),
+            );
         }
     }
 }
 
 fn usage_tokens(u: &Value) -> (u64, u64, u64, u64) {
     (
-        u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
-        u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
-        u.pointer("/input_tokens_details/orchestration_input_tokens")
+        u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+        u.get("completion_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
-        u.pointer("/output_tokens_details/orchestration_output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
+        0,
+        0,
     )
 }
 
@@ -954,15 +1038,148 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_split_output() {
-        let v = json!({"output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":"}]},{"type":"message","content":[{"type":"output_text","text":"true}"}]}]});
-        assert_eq!(extract_output_text(&v), "{\"ok\":true}");
+    fn builds_chat_completions_request_shape() {
+        let body = chat_completions_body(
+            "diagnostician",
+            "glm-4.6",
+            json!({"type":"object","properties":{"ok":{"type":"boolean"}}}),
+            "{\"task\":\"diagnose\"}",
+            true,
+            BrainStructuredOutput::JsonObject,
+        );
+
+        assert_eq!(body["model"], "glm-4.6");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["max_tokens"], 3_000);
+        assert_eq!(body["stream_options"], json!({"include_usage":true}));
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(
+            body["messages"][0]["content"],
+            "You are WARDEN's analysis brain. Return only valid JSON matching the schema. Cite only supplied evidence."
+        );
+        assert_eq!(body["messages"][1]["role"], "user");
+        let user_prompt = body["messages"][1]["content"].as_str().unwrap();
+        assert!(user_prompt.contains("\"task\":\"diagnose\""));
+        assert!(user_prompt.contains("\"properties\""));
+        assert_eq!(body["response_format"], json!({"type":"json_object"}));
+        assert!(body.get("input").is_none());
+        assert!(body.get("text").is_none());
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("max_output_tokens").is_none());
     }
 
     #[test]
-    fn extracts_top_level_output_text() {
-        let v = json!({"output_text":"{\"ok\":true}","usage":{"input_tokens":1}});
-        assert_eq!(extract_output_text(&v), "{\"ok\":true}");
+    fn builds_chat_completions_response_format_matrix() {
+        let schema = json!({"type":"object","properties":{"ok":{"type":"boolean"}}});
+        let strict = chat_completions_body(
+            "verifier",
+            "glm-4.5",
+            schema.clone(),
+            "{}",
+            false,
+            BrainStructuredOutput::JsonSchema,
+        );
+        assert_eq!(
+            strict["response_format"],
+            json!({
+                "type":"json_schema",
+                "json_schema":{
+                    "name":"verifier",
+                    "schema":schema,
+                    "strict":true
+                }
+            })
+        );
+        assert!(strict.get("stream_options").is_none());
+
+        let json_object = chat_completions_body(
+            "coach",
+            "glm-4.6",
+            json!({"type":"object"}),
+            "{}",
+            false,
+            BrainStructuredOutput::JsonObject,
+        );
+        assert_eq!(
+            json_object["response_format"],
+            json!({"type":"json_object"})
+        );
+
+        let prompt = chat_completions_body(
+            "coach",
+            "glm-4.6",
+            json!({"type":"object"}),
+            "{}",
+            false,
+            BrainStructuredOutput::Prompt,
+        );
+        assert!(prompt.get("response_format").is_none());
+        let prompt_content = prompt["messages"][1]["content"].as_str().unwrap();
+        assert!(prompt_content.contains("JSON Schema"));
+        assert!(prompt_content.contains("\"type\":\"object\""));
+    }
+
+    #[test]
+    fn parses_chat_completions_streaming_delta_and_usage() {
+        let mut out = String::new();
+        let mut usage = json!({});
+        let frames = [
+            r#"data: {"choices":[{"delta":{"content":"{\"ok\":"}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"true}"}}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}"#,
+            "data: [DONE]",
+        ];
+
+        for frame in frames {
+            apply_chat_completions_sse_data(
+                frame.strip_prefix("data: ").unwrap(),
+                &mut out,
+                &mut usage,
+            );
+        }
+
+        assert_eq!(out, "{\"ok\":true}");
+        assert_eq!(usage["prompt_tokens"], 11);
+        assert_eq!(usage["completion_tokens"], 7);
+    }
+
+    #[test]
+    fn ignores_streaming_reasoning_content_so_empty_stream_can_fallback() {
+        let mut out = String::new();
+        let mut usage = json!({});
+
+        apply_chat_completions_sse_data(
+            r#"{"choices":[{"delta":{"reasoning_content":"{\"ok\":true}"}}],"usage":null}"#,
+            &mut out,
+            &mut usage,
+        );
+
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn extracts_chat_completions_blocking_message_content() {
+        let v = json!({"choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{"prompt_tokens":1}});
+        assert_eq!(extract_chat_message_content(&v), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn extracts_reasoning_content_when_near_direct_content_is_null() {
+        let v = json!({"choices":[{"message":{"content":null,"reasoning_content":"{\"ok\":true}"}}]});
+        assert_eq!(extract_chat_message_content(&v), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn maps_chat_completions_usage_tokens_to_honest_tuple() {
+        let usage = json!({"prompt_tokens":123,"completion_tokens":45,"total_tokens":168});
+        assert_eq!(usage_tokens(&usage), (123, 45, 0, 0));
+    }
+
+    #[test]
+    fn brain_curl_timeout_defaults_to_three_times_primary_timeout() {
+        std::env::remove_var("WARDEN_BRAIN_TIMEOUT_SECS");
+        std::env::remove_var("WARDEN_BRAIN_CURL_TIMEOUT_SECS");
+        assert_eq!(brain_curl_timeout_secs(), 225);
     }
 
     #[test]
@@ -1058,7 +1275,9 @@ mod tests {
             duration_ms: None,
             is_sidechain: false,
         };
-        store.upsert_session_batch(&session, &[turn], &[], 0).unwrap();
+        store
+            .upsert_session_batch(&session, &[turn], &[], 0)
+            .unwrap();
     }
 
     #[test]

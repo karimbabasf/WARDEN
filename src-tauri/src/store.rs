@@ -82,7 +82,77 @@ impl Store {
         CREATE INDEX IF NOT EXISTS idx_turns_session_idx ON turns(session_id, idx);
         INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','1');
         "#)?;
+        // RADAR: parent→child session linkage. SQLite has no
+        // `ADD COLUMN IF NOT EXISTS`, so guard via table_info to stay idempotent
+        // when migrate() re-runs against a DB created before this column existed.
+        let has_parent_col: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='parent_session_id'")?
+            .query_row([], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !has_parent_col {
+            c.execute_batch("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;")?;
+        }
         Ok(())
+    }
+    /// RADAR: record that `child_id`'s session was spawned by `parent_id`. Sets
+    /// the child row's `parent_session_id`; a no-op if the child id is unknown.
+    pub fn link_child_session(&self, child_id: &str, parent_id: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET parent_session_id=? WHERE id=?",
+            params![parent_id, child_id],
+        )?;
+        Ok(())
+    }
+    /// RADAR: merge `patch`'s top-level keys into a session's `meta_json` (incoming
+    /// values win), persisting the result. Used to thread a Claude subagent's
+    /// sidecar `description`/`agentType` onto its child row when the parent link is
+    /// recorded, so `radar` can surface them as label/role. A no-op if the id is
+    /// unknown or `patch` is not a JSON object. Idempotent (re-applying the same
+    /// patch is a stable write).
+    pub fn merge_session_meta(&self, id: &str, patch: &serde_json::Value) -> Result<()> {
+        let Some(patch_obj) = patch.as_object() else {
+            return Ok(());
+        };
+        let c = self.conn();
+        let existing: Option<String> = c
+            .query_row("SELECT meta_json FROM sessions WHERE id=?", [id], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?;
+        let Some(existing) = existing else {
+            return Ok(()); // unknown id → no-op
+        };
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&existing).unwrap_or_else(|_| serde_json::json!({}));
+        let map = match meta.as_object_mut() {
+            Some(m) => m,
+            None => {
+                meta = serde_json::json!({});
+                meta.as_object_mut().unwrap()
+            }
+        };
+        for (k, v) in patch_obj {
+            map.insert(k.clone(), v.clone());
+        }
+        c.execute(
+            "UPDATE sessions SET meta_json=? WHERE id=?",
+            params![serde_json::to_string(&meta)?, id],
+        )?;
+        Ok(())
+    }
+    /// The session that spawned `child_id`, or `None` when unset/NULL or the
+    /// child id is unknown.
+    pub fn parent_of(&self, child_id: &str) -> Result<Option<String>> {
+        self.conn()
+            .query_row(
+                "SELECT parent_session_id FROM sessions WHERE id=?",
+                [child_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|o| o.flatten())
+            .map_err(Into::into)
     }
     pub fn upsert_session_batch(
         &self,
@@ -336,6 +406,32 @@ impl Store {
             .optional()
             .map_err(Into::into)
     }
+
+    pub fn all_findings(&self) -> Result<Vec<Finding>> {
+        let c = self.conn();
+        let mut st = c.prepare(
+            "SELECT id,pattern_id,title,severity,frequency,est_cost_tokens,est_cost_minutes,confidence,rationale,evidence_json,status,verifier_verdict FROM findings ORDER BY created_at DESC",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(Finding {
+                id: r.get(0)?,
+                pattern_id: r.get(1)?,
+                title: r.get(2)?,
+                severity: r.get::<_, i64>(3)? as u8,
+                frequency: r.get(4)?,
+                est_cost_tokens: r.get::<_, i64>(5)? as u64,
+                est_cost_minutes: r.get::<_, i64>(6)? as u64,
+                confidence: r.get(7)?,
+                rationale: r.get(8)?,
+                evidence: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
+                status: r.get(10)?,
+                verifier_verdict: r.get(11)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn save_findings(&self, findings: &[Finding]) -> Result<()> {
         let c = self.conn();
         for f in findings {
@@ -565,5 +661,18 @@ mod tests {
         assert!(store.event_text("c1", "c1-e99").unwrap().is_none());
         // Right event id under the wrong session must not leak across sessions.
         assert!(store.event_text("other", "c1-e1").unwrap().is_none());
+    }
+
+    #[test]
+    fn link_child_session_sets_and_reads_parent() {
+        let store = Store::memory().unwrap();
+        store.migrate().unwrap();
+        // Two minimal sessions persisted via the real upsert path (seed_session
+        // builds a valid Session with the given id and zero events).
+        seed_session(&store, "parent", Harness::ClaudeCode, 0);
+        seed_session(&store, "child", Harness::ClaudeCode, 0);
+        store.link_child_session("child", "parent").unwrap();
+        assert_eq!(store.parent_of("child").unwrap(), Some("parent".to_string()));
+        assert_eq!(store.parent_of("parent").unwrap(), None);
     }
 }

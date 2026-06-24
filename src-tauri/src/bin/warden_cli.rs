@@ -6,6 +6,7 @@ use warden_lib::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     let args: Vec<String> = std::env::args().collect();
     let store = Store::open(default_db_path())?;
     match args.get(1).map(|s| s.as_str()).unwrap_or("diagnose") {

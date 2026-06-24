@@ -183,6 +183,43 @@ fn parse_file(path: &Path, bytes: &[u8], raw_hash: u64) -> Result<SessionBatch> 
     parse_slice(path, bytes, 0, raw_hash, None)
 }
 
+/// RADAR (Task 5): resolve Codex Desktop `parent_thread_id` links over every
+/// persisted Codex session and record them via `Store::link_child_session`.
+///
+/// The pure resolver ([`crate::radar::hierarchy::link_codex_subagents`]) returns
+/// `(child_external_id, parent_external_id)` pairs; this maps both back to their
+/// stored session ids before persisting. Idempotent (re-recording the same parent
+/// is a plain UPDATE) and cheap, so it is safe to call after every backfill and on
+/// each radar recompute. Returns the number of links recorded. VS Code Codex
+/// sessions yield no pairs (they are never `thread_source == "subagent"`).
+pub fn link_codex_subagents_in_store(store: &Store) -> Result<usize> {
+    let sessions = store.sessions()?;
+    // external_id → session id, restricted to Codex rows (Claude shares the table).
+    let mut ext_to_sid = std::collections::HashMap::<&str, &str>::new();
+    for s in &sessions {
+        if matches!(s.harness, Harness::Codex) {
+            ext_to_sid.insert(s.external_id.as_str(), s.id.as_str());
+        }
+    }
+    let codex_sessions: Vec<Session> = sessions
+        .iter()
+        .filter(|s| matches!(s.harness, Harness::Codex))
+        .cloned()
+        .collect();
+    let pairs = crate::radar::hierarchy::link_codex_subagents(&codex_sessions);
+    let mut recorded = 0;
+    for (child_ext, parent_ext) in pairs {
+        if let (Some(child_sid), Some(parent_sid)) = (
+            ext_to_sid.get(child_ext.as_str()),
+            ext_to_sid.get(parent_ext.as_str()),
+        ) {
+            store.link_child_session(child_sid, parent_sid)?;
+            recorded += 1;
+        }
+    }
+    Ok(recorded)
+}
+
 /// Core parser shared by the full parse and the incremental tail.
 ///
 /// * `base_offset` is added to every line's local byte position so `RawRef.offset`
@@ -307,6 +344,26 @@ fn parse_slice(
                             repo_root: repo_root(&cwdp),
                             git_branch: None,
                         });
+                    }
+                }
+                // RADAR (Task 4): preserve the Codex Desktop multi-agent linkage +
+                // honesty fields so the hierarchy pass (Task 5) can pair
+                // `parent_thread_id → id` and the viz can keep VS Code Codex flat
+                // (subagents exist only for `originator == "Codex Desktop"`).
+                if let Some(obj) = meta.as_object_mut() {
+                    for key in [
+                        "thread_source",
+                        "parent_thread_id",
+                        "agent_role",
+                        "agent_nickname",
+                        "multi_agent_version",
+                        "originator",
+                    ] {
+                        if let Some(val) = payload.get(key) {
+                            if !val.is_null() {
+                                obj.insert(key.to_string(), val.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -907,6 +964,72 @@ mod tests {
             assert_eq!(e.raw_ref.source_path, path, "raw_ref.source_path mismatch");
             assert!(e.raw_ref.line >= 1, "raw_ref.line must be 1-based");
         }
+    }
+
+    /// Task 4 (RADAR): a `session_meta` whose payload carries the Codex Desktop
+    /// multi-agent fields propagates them into `Session.meta` so the hierarchy and
+    /// honest-viz passes can read `thread_source`/`parent_thread_id`/`originator`.
+    #[test]
+    fn session_meta_captures_multi_agent_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("rollout-sub.jsonl");
+        std::fs::write(
+            &p,
+            "{\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"cwd\":\"/tmp\",\"model_provider\":\"openai\",\"thread_source\":\"subagent\",\"parent_thread_id\":\"P\",\"agent_role\":\"explorer\",\"agent_nickname\":\"Dirac\",\"multi_agent_version\":\"v1\",\"originator\":\"Codex Desktop\"}}\n",
+        )
+        .unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        let b = parse_file(&p, &bytes, hash64(&bytes)).unwrap();
+        let m = &b.session.meta;
+        assert_eq!(m.get("thread_source").and_then(Value::as_str), Some("subagent"));
+        assert_eq!(m.get("parent_thread_id").and_then(Value::as_str), Some("P"));
+        assert_eq!(m.get("agent_role").and_then(Value::as_str), Some("explorer"));
+        assert_eq!(m.get("agent_nickname").and_then(Value::as_str), Some("Dirac"));
+        assert_eq!(m.get("multi_agent_version").and_then(Value::as_str), Some("v1"));
+        assert_eq!(m.get("originator").and_then(Value::as_str), Some("Codex Desktop"));
+    }
+
+    /// Task 5 end-to-end: two Codex rollouts — a parent (external_id "P") and a
+    /// Desktop subagent whose `session_meta` has `thread_source:"subagent"` and
+    /// `parent_thread_id:"P"` — link in the store after `link_codex_subagents_in_store`.
+    #[test]
+    fn link_codex_subagents_in_store_persists_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::memory().unwrap();
+
+        // Parent rollout (a normal user session).
+        let parent_path = dir.path().join("rollout-P.jsonl");
+        std::fs::write(
+            &parent_path,
+            "{\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"P\",\"cwd\":\"/tmp\",\"model_provider\":\"openai\",\"thread_source\":\"user\"}}\n",
+        )
+        .unwrap();
+        let pb = parse_file(&parent_path, &std::fs::read(&parent_path).unwrap(), 1).unwrap();
+        store
+            .upsert_session_batch(&pb.session, &pb.turns, &pb.events, pb.offset)
+            .unwrap();
+
+        // Child Desktop subagent rollout pointing at parent thread "P".
+        let child_path = dir.path().join("rollout-C.jsonl");
+        std::fs::write(
+            &child_path,
+            "{\"timestamp\":\"2026-01-01T00:00:01Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"C\",\"cwd\":\"/tmp\",\"model_provider\":\"openai\",\"thread_source\":\"subagent\",\"parent_thread_id\":\"P\",\"agent_nickname\":\"Dirac\",\"originator\":\"Codex Desktop\"}}\n",
+        )
+        .unwrap();
+        let cb = parse_file(&child_path, &std::fs::read(&child_path).unwrap(), 2).unwrap();
+        store
+            .upsert_session_batch(&cb.session, &cb.turns, &cb.events, cb.offset)
+            .unwrap();
+
+        let recorded = link_codex_subagents_in_store(&store).unwrap();
+        assert_eq!(recorded, 1, "exactly one Codex Desktop link recorded");
+        assert_eq!(
+            store.parent_of(&cb.session.id).unwrap(),
+            Some(pb.session.id.clone()),
+            "the subagent's parent must be persisted by external_id → session_id mapping"
+        );
+        // The parent itself has no parent (it is a root).
+        assert_eq!(store.parent_of(&pb.session.id).unwrap(), None);
     }
 
     /// A `token_count` whose `info` is `null` (the real shape early in a session)

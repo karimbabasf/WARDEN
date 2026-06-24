@@ -107,6 +107,82 @@ impl Adapter for ClaudeCodeAdapter {
     }
 }
 
+/// RADAR (Task 2): the sidecar metadata Claude writes next to each subagent
+/// transcript at `<session>/subagents/agent-<id>.meta.json`. `agent_id` is not in
+/// the file — it is derived from the `agent-<id>` filename stem so the hierarchy
+/// pass (Task 3) can key children by it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentMeta {
+    pub agent_type: String,
+    pub description: String,
+    pub tool_use_id: String,
+    pub agent_id: String,
+}
+
+/// Read and parse a Claude subagent sidecar `agent-<id>.meta.json`. The three
+/// payload fields (`agentType`, `description`, `toolUseId`) are read leniently
+/// (missing → empty string, never an error), while `agent_id` comes from the
+/// `agent-<id>` filename stem. Returns an error only when the file cannot be read
+/// or is not valid JSON.
+pub fn read_subagent_meta(path: &Path) -> Result<SubagentMeta> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let v: Value =
+        serde_json::from_str(&text).with_context(|| format!("parse meta {}", path.display()))?;
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Ok(SubagentMeta {
+        agent_type: s("agentType"),
+        description: s("description"),
+        tool_use_id: s("toolUseId"),
+        agent_id: subagent_agent_id(path),
+    })
+}
+
+/// Derive the subagent id from an `agent-<id>.{jsonl,meta.json}` path: strip a
+/// leading `agent-` from the file stem (and a trailing `.meta` for the sidecar).
+pub fn subagent_agent_id(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // `agent-abc.meta.json` → file_stem is `agent-abc.meta`; drop the `.meta`.
+    let stem = stem.strip_suffix(".meta").unwrap_or(&stem);
+    stem.strip_prefix("agent-").unwrap_or(stem).to_string()
+}
+
+/// Collect the subagent sidecar metas for the detected transcripts. A subagent
+/// transcript lives at `<session>/subagents/agent-<id>.jsonl` with a sibling
+/// `agent-<id>.meta.json`; for every such transcript we read its meta. Paths that
+/// are not subagent transcripts, or whose meta is missing/malformed, are skipped
+/// (no error — schema drift never aborts ingest).
+pub fn collect_subagent_metas(paths: &[PathBuf]) -> Vec<SubagentMeta> {
+    let mut metas = Vec::new();
+    for p in paths {
+        let in_subagents = p
+            .parent()
+            .and_then(|d| d.file_name())
+            .map(|n| n == "subagents")
+            .unwrap_or(false);
+        let is_agent_file = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("agent-"))
+            .unwrap_or(false);
+        if !in_subagents || !is_agent_file {
+            continue;
+        }
+        let meta_path = p.with_extension("meta.json");
+        if let Ok(meta) = read_subagent_meta(&meta_path) {
+            metas.push(meta);
+        }
+    }
+    metas
+}
+
 pub fn ingest_all(
     store: &Store,
     root: Option<PathBuf>,
@@ -115,15 +191,113 @@ pub fn ingest_all(
     let mut a =
         ClaudeCodeAdapter::with_root(root.unwrap_or_else(default_claude_projects), store.clone());
     a.max_files = max_files;
-    let batches = a.backfill()?;
+    // Subagent metas are read from the same detected file set so the Task-3
+    // linkage pass can pair children (subagents/agent-<id>.jsonl) to the parent
+    // whose Agent/Task tool-call id == meta.toolUseId.
+    let detected = a.detect().unwrap_or_default();
+    let metas = collect_subagent_metas(&detected);
+    let mut batches = a.backfill()?;
+
+    // RADAR (Task 3): resolve parent↔child links from the freshly parsed batches,
+    // patch the in-memory `SubagentSpawn.child_session` so it is no longer always
+    // `None`, then persist. Linkage is recorded after the rows exist.
+    let pairs = crate::radar::hierarchy::link_claude_subagents(&batches, &metas);
+    if !pairs.is_empty() {
+        use std::collections::HashMap;
+        // parent session id → its single linked child (one Agent dispatch → one
+        // subagent transcript). Enough to fill the spawn event's child_session.
+        let child_by_parent: HashMap<&str, &str> = pairs
+            .iter()
+            .map(|(c, p)| (p.as_str(), c.as_str()))
+            .collect();
+        for b in &mut batches {
+            if let Some(child) = child_by_parent.get(b.session.id.as_str()) {
+                for e in &mut b.events {
+                    if let Event::SubagentSpawn { child_session, .. } = &mut e.event {
+                        if child_session.is_none() {
+                            *child_session = Some((*child).to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // child session id → its sidecar meta (description/agentType), so the linkage
+    // pass can thread the subagent's identity onto its row for the RADAR forest.
+    // A subagent batch's `agent_id` (from its `subagents/agent-<id>.jsonl` path)
+    // joins to the meta of the same `agent_id`.
+    let mut child_sid_to_meta: HashMap<&str, &SubagentMeta> = HashMap::new();
+    {
+        let mut agent_to_child: HashMap<String, &str> = HashMap::new();
+        for b in &batches {
+            let is_subagent = b
+                .session
+                .source_path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n == "subagents")
+                .unwrap_or(false);
+            if is_subagent {
+                agent_to_child
+                    .insert(subagent_agent_id(&b.session.source_path), b.session.id.as_str());
+            }
+        }
+        for m in &metas {
+            if let Some(child_sid) = agent_to_child.get(&m.agent_id) {
+                child_sid_to_meta.insert(*child_sid, m);
+            }
+        }
+    }
+
     let mut sessions = 0;
     let mut events = 0;
-    for b in batches {
+    for b in &batches {
         events += b.events.len();
         store.upsert_session_batch(&b.session, &b.turns, &b.events, b.offset)?;
         sessions += 1;
     }
+    // Persist linkage now that both parent and child rows exist, and thread the
+    // subagent's description/agentType onto the child row (label/role for RADAR).
+    for (child, parent) in &pairs {
+        store.link_child_session(child, parent)?;
+        if let Some(meta) = child_sid_to_meta.get(child.as_str()) {
+            store.merge_session_meta(
+                child,
+                &json!({ "description": meta.description, "agentType": meta.agent_type }),
+            )?;
+        }
+    }
     Ok((sessions, events))
+}
+
+/// RADAR (Finding 2): re-derive Claude subagent parent→child links over every
+/// persisted session and record them via `Store::link_child_session`. Derived
+/// purely from store state — each parent's `SubagentSpawn.child_session` (filled
+/// during ingest) names its child — so it is safe to run idempotently on each radar
+/// recompute (re-recording the same parent is a plain UPDATE). Returns the number
+/// of links (re)recorded. A spawn whose `child_session` is still `None` (child not
+/// yet ingested) is skipped — children are never fabricated.
+pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
+    let sessions = store.sessions()?;
+    let mut recorded = 0;
+    for s in &sessions {
+        if !matches!(s.harness, Harness::ClaudeCode) {
+            continue;
+        }
+        let events = store.session_events(&s.id).unwrap_or_default();
+        for (_, e) in events {
+            if let Event::SubagentSpawn {
+                child_session: Some(child),
+                ..
+            } = e.event
+            {
+                store.link_child_session(&child, &s.id)?;
+                recorded += 1;
+            }
+        }
+    }
+    Ok(recorded)
 }
 
 /// Full (offset-0) parse: the first record carries `sessionId`, which resolves
@@ -746,6 +920,129 @@ mod tests {
         }
         // Watermark advances to the new EOF.
         assert_eq!(b.offset, full.len() as u64, "watermark advances to new EOF");
+    }
+
+    /// Task 2 (RADAR): a subagent transcript under `<session>/subagents/` is
+    /// discoverable by `detect()` (WalkDir recurses), and its sidecar
+    /// `agent-<id>.meta.json` parses into the three fields plus an `agent_id`
+    /// derived from the `agent-<id>` filename stem.
+    #[test]
+    fn detect_includes_subagents_and_meta_parses() {
+        let dir = tempdir().unwrap();
+        let proj = dir.path().join("proj").join("session-1");
+        let subs = proj.join("subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        // The subagent transcript + its sidecar meta.
+        let jsonl = subs.join("agent-abc.jsonl");
+        std::fs::write(
+            &jsonl,
+            "{\"type\":\"user\",\"uuid\":\"u\",\"sessionId\":\"sub\",\"isSidechain\":true,\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{\"content\":\"go\"}}\n",
+        )
+        .unwrap();
+        let meta_path = subs.join("agent-abc.meta.json");
+        std::fs::write(
+            &meta_path,
+            r#"{"agentType":"Explore","description":"map frontend","toolUseId":"toolu_01"}"#,
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        let adapter = ClaudeCodeAdapter::with_root(dir.path().to_path_buf(), store);
+        let detected = adapter.detect().unwrap();
+        assert!(
+            detected.iter().any(|p| p == &jsonl),
+            "detect() must include the subagent transcript under subagents/; got {detected:?}"
+        );
+
+        let meta = read_subagent_meta(&meta_path).expect("meta parses");
+        assert_eq!(meta.agent_type, "Explore");
+        assert_eq!(meta.description, "map frontend");
+        assert_eq!(meta.tool_use_id, "toolu_01");
+        assert_eq!(meta.agent_id, "abc", "agent_id derived from agent-<id> stem");
+    }
+
+    /// Task 3 end-to-end: a parent transcript that issues a `Task` tool-call
+    /// (id `toolu_xyz`) plus a child subagent transcript at
+    /// `subagents/agent-<id>.jsonl` with a matching meta → after `ingest_all`,
+    /// the store records the child's parent and the spawn event carries the child.
+    #[test]
+    fn ingest_all_links_claude_subagent_to_parent() {
+        let dir = tempdir().unwrap();
+        let proj = dir.path().join("proj");
+        let session = proj.join("019sess");
+        let subs = session.join("subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+
+        // Parent transcript: an assistant turn with a Task tool_use + a sidechain
+        // spawn pointer so a SubagentSpawn event is emitted.
+        let parent_jsonl = session.join("019sess.jsonl");
+        std::fs::write(&parent_jsonl, "{\"type\":\"assistant\",\"uuid\":\"a1\",\"sessionId\":\"019sess\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"sourceToolAssistantUuid\":\"a1\",\"message\":{\"role\":\"assistant\",\"model\":\"claude\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_xyz\",\"name\":\"Task\",\"input\":{}}]}}\n").unwrap();
+
+        // Child subagent transcript + sidecar meta keyed by the same toolUseId.
+        let child_jsonl = subs.join("agent-deadbeef.jsonl");
+        std::fs::write(&child_jsonl, "{\"type\":\"user\",\"uuid\":\"cu\",\"sessionId\":\"019sess-sub\",\"isSidechain\":true,\"agentId\":\"deadbeef\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{\"content\":\"work\"}}\n").unwrap();
+        std::fs::write(
+            subs.join("agent-deadbeef.meta.json"),
+            r#"{"agentType":"Explore","description":"sweep the radar module","toolUseId":"toolu_xyz"}"#,
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        ingest_all(&store, Some(proj.clone()), None).unwrap();
+
+        // Resolve the two session ids the parser assigned (stable_id over path).
+        let parent_sid = stable_id(&[
+            "claude_code",
+            "019sess",
+            &parent_jsonl.to_string_lossy(),
+        ]);
+        let child_sid = stable_id(&[
+            "claude_code",
+            "019sess-sub",
+            &child_jsonl.to_string_lossy(),
+        ]);
+
+        assert_eq!(
+            store.parent_of(&child_sid).unwrap(),
+            Some(parent_sid.clone()),
+            "child session's parent must be persisted"
+        );
+
+        // Finding 1: the subagent's description/agentType are threaded onto the
+        // child row's meta when the link is persisted (label/role for RADAR).
+        let child_meta = store
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == child_sid)
+            .expect("child session row present")
+            .meta;
+        assert_eq!(
+            child_meta.get("description").and_then(|v| v.as_str()),
+            Some("sweep the radar module"),
+            "child meta carries the sidecar description"
+        );
+        assert_eq!(
+            child_meta.get("agentType").and_then(|v| v.as_str()),
+            Some("Explore"),
+            "child meta carries the sidecar agentType"
+        );
+
+        // The parent's SubagentSpawn event now carries the child session id.
+        let spawn_child = store
+            .session_events(&parent_sid)
+            .unwrap()
+            .into_iter()
+            .find_map(|(_, e)| match e.event {
+                Event::SubagentSpawn { child_session, .. } => Some(child_session),
+                _ => None,
+            })
+            .expect("a SubagentSpawn event must exist on the parent");
+        assert_eq!(
+            spawn_child,
+            Some(child_sid),
+            "SubagentSpawn.child_session must be patched (no longer None)"
+        );
     }
 
     #[test]
