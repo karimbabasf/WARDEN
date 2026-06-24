@@ -8,6 +8,10 @@
 //
 // Pure module: no Three.js import, so it is trivially unit-testable and shared by
 // the layout, the render and the detail panel without dragging in WebGL.
+//
+// Harness colour/glyph/label literals live in `harnessColors.ts` — no duplication.
+
+import { harnessColor } from './harnessColors';
 
 export type RadarTheme = {
   /** Human label rendered in cards/legend, e.g. "Claude". */
@@ -19,14 +23,18 @@ export type RadarTheme = {
 };
 
 // Keys are snake_case harness ids exactly as the backend emits them.
+// Values sourced from harnessColors — no literals duplicated here.
+const _cl = harnessColor('claude_code');
+const _cx = harnessColor('codex');
 export const RADAR_PALETTE = {
-  claude_code: { label: 'Claude', color: '#ff8c42', glyph: '●' },
-  codex: { label: 'Codex', color: '#b98cff', glyph: '◆' },
+  claude_code: { label: _cl.label, color: _cl.hue, glyph: _cl.glyph },
+  codex:       { label: _cx.label, color: _cx.hue, glyph: _cx.glyph },
 } as const satisfies Record<string, RadarTheme>;
 
 // Unknown / schema-drift harness — a quiet slate globe, never borrowing another
 // harness's identity (honest-viz). Distinct hue from both brand colours.
-export const RADAR_NEUTRAL: RadarTheme = { label: 'Unknown', color: '#8fa0b8', glyph: '▲' };
+const _un = harnessColor('unknown');
+export const RADAR_NEUTRAL: RadarTheme = { label: _un.label, color: _un.hue, glyph: _un.glyph };
 
 export type RadarHarnessId = keyof typeof RADAR_PALETTE;
 

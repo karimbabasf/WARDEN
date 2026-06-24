@@ -3,6 +3,12 @@
 // labels live here and nowhere else so the legend, cage rims and any future HUD
 // all agree. Always pair the colour with the glyph + label (color-blind a11y):
 // colour alone is never a signal in WARDEN.
+//
+// Harness colour/glyph/label literals live in `harnessColors.ts` (one source of
+// truth for both Habits and Radar). This file re-exposes them as the HarnessTheme
+// shape that existing consumers expect, without duplicating any values.
+
+import { harnessColor } from './harnessColors';
 
 export type HarnessTheme = {
   /** Human label rendered in the legend, e.g. "Claude". */
@@ -15,23 +21,18 @@ export type HarnessTheme = {
 
 // Keys are snake_case harness ids exactly as the Rust side emits them
 // ("claude_code", "codex"). Anything else falls through to `NEUTRAL`.
-//
-// Palette (V3, brand-aligned + vivid): luminous, electric colours that glow on
-// black. The lattice + crystal form already reads sophisticated, so the colour
-// can be saturated and exciting without going childish-flat.
-//   • Claude — luminous coral-orange, Claude's own warm brand hue.
-//   • Codex  — electric aqua-teal, the cool counter to Claude's warmth.
-// This is the single source of truth for harness colour on the web; the orb
-// hubs, links and legend all read it (the backend OrbAgent.color is no longer
-// rendered). Always pair the colour with the glyph + label (color-blind a11y).
+// Values are sourced from harnessColors — no literals duplicated here.
+const _cl = harnessColor('claude_code');
+const _cx = harnessColor('codex');
 export const HARNESS = {
-  claude_code: { label: 'Claude', color: '#ff7d50', glyph: '◆' },
-  codex: { label: 'Codex', color: '#2de2c0', glyph: '▲' },
+  claude_code: { label: _cl.label, color: _cl.hue, glyph: _cl.glyph },
+  codex:       { label: _cx.label, color: _cx.hue, glyph: _cx.glyph },
 } as const satisfies Record<string, HarnessTheme>;
 
 // Schema drift / off-Fugu / unknown harnesses degrade to a quiet slate chip
 // rather than borrowing another harness's identity.
-export const NEUTRAL: HarnessTheme = { label: 'Unknown', color: '#9aa7a2', glyph: '●' };
+const _un = harnessColor('unknown');
+export const NEUTRAL: HarnessTheme = { label: _un.label, color: _un.hue, glyph: _un.glyph };
 
 export type HarnessId = keyof typeof HARNESS;
 
