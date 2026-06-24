@@ -21,6 +21,60 @@ function candidate(patternId: string, harness = 'claude_code', severityHint = 2)
 }
 
 describe('bridge reducer', () => {
+  it('stores the persistent orb scene without disturbing live run signals', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('candidates_nominated', { candidates: [candidate('p1')] });
+    bridge.ingest('orb_scene_ready', {
+      agents: [
+        {
+          id: 'claude_code',
+          harness: 'claude_code',
+          label: 'Claude',
+          glyph: '◆',
+          color: '#3dffa0',
+          sessions: 2,
+          event_count: 10,
+          total_load: 3,
+        },
+      ],
+      issues: [
+        {
+          id: 'claude_code:CONTEXT_BLOAT',
+          agent_id: 'claude_code',
+          harness: 'claude_code',
+          pattern_id: 'CONTEXT_BLOAT',
+          title: 'Context bloat',
+          count: 3,
+          severity: 4,
+          rationale: 'Main-context discovery is recurring.',
+          est_cost_tokens: 12000,
+          est_cost_minutes: 8,
+          frequency: 0.75,
+          confidence: 0.82,
+          session_ids: ['c1', 'c2', 'c3'],
+          evidence: [],
+          finding_id: 'f-context',
+          verifier_verdict: 'confirmed',
+          status: 'confirmed',
+        },
+      ],
+      links: [{ source: 'claude_code', target: 'claude_code:CONTEXT_BLOAT', kind: 'agent_issue' }],
+      guidance: { do_items: ['Delegate broad search.'], stop_items: ['Stop flooding main context.'] },
+    });
+    const s = snapshot(bridge);
+    expect(s.phase).toBe('war');
+    expect(s.candidates).toHaveLength(1);
+    expect(s.orbScene?.agents[0].totalLoad).toBe(3);
+    expect(s.orbScene?.issues[0]).toMatchObject({
+      id: 'claude_code:CONTEXT_BLOAT',
+      agentId: 'claude_code',
+      patternId: 'CONTEXT_BLOAT',
+      count: 3,
+      severity: 4,
+    });
+    expect(s.orbScene?.guidance.doItems).toEqual(['Delegate broad search.']);
+  });
+
   it('spawns one node per nominated candidate', () => {
     const bridge = createBridge(noopListen);
     bridge.ingest('candidates_nominated', {
@@ -81,6 +135,37 @@ describe('bridge reducer', () => {
     expect(s.usage['Diagnostician']).toEqual({ in: 1200, out: 300, orchIn: 80, orchOut: 40 });
   });
 
+  it('does not fabricate a usage pulse for all-zero Chat Completions usage', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('fugu_usage', {
+      stage: 'Verifier',
+      input_tokens: 0,
+      output_tokens: 0,
+      orchestration_input_tokens: 0,
+      orchestration_output_tokens: 0,
+    });
+
+    const s = snapshot(bridge);
+    expect(s.usage['Verifier']).toEqual({ in: 0, out: 0, orchIn: 0, orchOut: 0 });
+    expect(s.pulses).toHaveLength(0);
+  });
+
+  it('uses plain token weight when Chat Completions has no orchestration tokens', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('fugu_usage', {
+      stage: 'Coach',
+      input_tokens: 800,
+      output_tokens: 200,
+      orchestration_input_tokens: 0,
+      orchestration_output_tokens: 0,
+    });
+
+    const s = snapshot(bridge);
+    expect(s.usage['Coach']).toEqual({ in: 800, out: 200, orchIn: 0, orchOut: 0 });
+    expect(s.pulses).toHaveLength(1);
+    expect(s.pulses[0].intensity).toBeGreaterThan(0);
+  });
+
   it('clamps nodes at 24 and counts the clustered overflow', () => {
     const bridge = createBridge(noopListen);
     bridge.ingest('candidates_nominated', {
@@ -100,20 +185,51 @@ describe('bridge reducer', () => {
     expect(s.candidates).toHaveLength(0);
     expect(Object.keys(s.verdicts)).toHaveLength(0);
   });
+
+  it('reset preserves persistent orb scene and summon state while clearing live signals', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('orb_scene_ready', {
+      agents: [{ id: 'codex', harness: 'codex', label: 'Codex', glyph: '▲', color: '#b98cff' }],
+      issues: [],
+      links: [],
+      guidance: {},
+    });
+    bridge.ingest('warden_hotkey', {});
+    bridge.ingest('candidates_nominated', { candidates: [candidate('p1')] });
+    bridge.ingest('fugu_delta', { stage: 'Diagnostician', delta: 'x' });
+
+    bridge.reset();
+
+    const s = snapshot(bridge);
+    expect(s.phase).toBe('idle');
+    expect(s.candidates).toHaveLength(0);
+    expect(s.pulses).toHaveLength(0);
+    expect(s.orbScene?.agents[0].id).toBe('codex');
+    expect(s.summoned).toBe(true);
+  });
+
+  it('wakes on warden_hotkey and pauses on warden_dismiss (overlay summon signal)', () => {
+    const bridge = createBridge(noopListen);
+    expect(snapshot(bridge).summoned).toBeFalsy();
+    bridge.ingest('warden_hotkey', {});
+    expect(snapshot(bridge).summoned).toBe(true);
+    bridge.ingest('warden_dismiss', {});
+    expect(snapshot(bridge).summoned).toBe(false);
+  });
 });
 
 describe('harnessTheme', () => {
-  it('maps codex to violet', () => {
-    expect(harnessTheme('codex').color).toBe('#b98cff');
+  it('maps codex to its electric aqua mark', () => {
+    expect(harnessTheme('codex').color).toBe('#2de2c0');
     expect(harnessTheme('codex').glyph).toBe('▲');
   });
 
-  it('maps claude_code to emerald', () => {
-    expect(harnessTheme('claude_code').color).toBe('#3dffa0');
+  it('maps claude_code to its luminous coral brand colour', () => {
+    expect(harnessTheme('claude_code').color).toBe('#ff7d50');
   });
 
   it('falls back to a neutral theme for unknown harnesses', () => {
     expect(harnessTheme('gemini').label).toBe('Unknown');
-    expect(harnessTheme('gemini').color).toBe('#76ff9d');
+    expect(harnessTheme('gemini').color).toBe('#9aa7a2');
   });
 });

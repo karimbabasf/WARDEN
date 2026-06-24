@@ -1,0 +1,83 @@
+WARDEN — The Agent That Watches Your Agents
+A non-technical overview
+===========================================
+
+
+THE ONE-LINER
+-------------
+WARDEN is a Mac app that quietly supervises the AI coding assistants you
+already use — and tells you, with receipts, when they're going off the rails.
+
+
+THE PROBLEM IT SOLVES
+---------------------
+More and more real coding is being done by AI agents — tools like Claude Code
+and Codex that don't just autocomplete, but actually read your project, make
+changes, and run commands on their own. They're powerful, but they're also a
+black box. They go in circles, develop bad habits, quietly burn money, and make
+confident mistakes. When something goes wrong, you're left scrolling through an
+enormous log trying to figure out what happened and why.
+
+And it's getting harder, not easier: people are starting to run several agents
+at once. There's no control tower. You're managing a team of tireless workers
+you can't actually see.
+
+
+WHAT WARDEN DOES
+----------------
+WARDEN runs in the background on your Mac, always on. It reads the work logs
+your AI agents leave behind — the complete record of everything they did — and
+continuously analyzes them for trouble: wasted effort, risky shortcuts,
+repeated mistakes, ballooning cost.
+
+When you want to know what's going on, you hit one keyboard shortcut and a
+"war room" overlay appears: a cinematic command-center view that gives you a
+clear diagnosis. Here's where your agent went wrong. Here's exactly why. Here's
+how to fix it.
+
+The thing that makes it trustworthy is that every conclusion comes with
+evidence. WARDEN doesn't just say "your agent was inefficient" — it points you
+to the exact moment in the transcript it's talking about, the specific quote,
+so you can verify it yourself. It's a diagnosis with citations, not a vague
+vibe.
+
+
+WHAT MAKES IT DIFFERENT
+-----------------------
+- It's honest. The dramatic visuals aren't decoration — every glowing node and
+  pulse maps to something real that actually happened. Nothing is faked for
+  effect.
+
+- It's private and safe. Everything happens locally on your machine. Today it
+  only watches and advises — it never touches or changes your actual code.
+
+- It speaks human. The whole point is to turn a wall of impenetrable logs into
+  a clear story a person can act on.
+
+
+WHERE IT'S HEADED — THE END GOAL
+--------------------------------
+WARDEN started as a kind of forensic investigator: something that looks back at
+what an agent did and explains what went wrong. The vision is to grow it into a
+live control tower for your AI workforce.
+
+The path there, in plain terms:
+
+- See them live. Instead of looking back at finished work, watch every agent and
+  sub-agent that's running right now, as living shapes on a radar — which ones
+  are busy, which are stuck, how much "headroom" each has left.
+  (This is the part being built now.)
+
+- Let it act. Move from "here's the fix you should make" to "want me to make
+  it?" — so WARDEN can actually step in and correct an agent, not just point at
+  the problem.
+
+- Make it ambient. Add voice, so it can warn you out loud, and support every
+  kind of AI agent, not just a couple.
+
+The end state: as AI agents take over more and more of the actual coding, and
+as you go from running one to running many, WARDEN becomes the single place
+where a human stays in control — seeing the whole fleet at a glance, catching
+agents the moment they go wrong, understanding why in plain language, and
+stepping in to fix it. It's the oversight, quality, and trust layer for a world
+where you manage AI workers instead of writing every line yourself.

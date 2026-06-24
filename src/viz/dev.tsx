@@ -135,5 +135,8 @@ function DevApp() {
   return <WarRoom bridge={bridge} forceIntro={introPulse} />;
 }
 
-const root = createRoot(document.getElementById('dev-root')!);
-root.render(<DevApp />);
+const devRootEl = document.getElementById('dev-root')! as HTMLElement & {
+  __wardenWarRoomRoot?: ReturnType<typeof createRoot>;
+};
+devRootEl.__wardenWarRoomRoot ??= createRoot(devRootEl);
+devRootEl.__wardenWarRoomRoot.render(<DevApp />);

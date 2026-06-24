@@ -18,7 +18,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mountWarRoom, unmountWarRoom } from './mount';
-import { frameloopFor } from './WarRoom';
+import { activeFor, frameloopFor } from './WarRoom';
 
 afterEach(() => {
   // Reset module-level mount singletons so each case starts clean.
@@ -50,18 +50,40 @@ describe('frameloopFor — RAF pauses when hidden', () => {
   });
 
   it('reflects a simulated document.hidden === true as a paused loop', () => {
-    // Simulate the overlay window being hidden, exactly as the component reads it
-    // (`active = !document.hidden`, then `frameloop={frameloopFor(!active)}`).
+    // dev/browser harness, no daemon summon: the component derives
+    // `active = activeFor(scene.summoned, document.hidden)`, then
+    // `frameloop={frameloopFor(!active)}`.
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
-    const active = !document.hidden; // false → paused
+    const active = activeFor(undefined, document.hidden); // false → paused
     expect(active).toBe(false);
     expect(frameloopFor(!active)).toBe('never');
   });
 
   it('reflects a simulated document.hidden === false as a running loop', () => {
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
-    const active = !document.hidden; // true → running
+    const active = activeFor(undefined, document.hidden); // true → running
     expect(active).toBe(true);
     expect(frameloopFor(!active)).toBe('always');
+  });
+});
+
+describe('activeFor — the war-room wakes on daemon summon OR a visible page', () => {
+  it('is active when the daemon summoned the overlay, even with a hidden page', () => {
+    // The packaged app's overlay is a hidden native window: document.hidden stays
+    // true, but the warden_hotkey summon (summoned=true) must wake the loop. This
+    // is the exact regression that left the live war-room blank.
+    expect(activeFor(true, true)).toBe(true);
+    expect(frameloopFor(!activeFor(true, true))).toBe('always');
+  });
+
+  it('is active when the page is visible even without a summon (dev/browser)', () => {
+    expect(activeFor(false, false)).toBe(true);
+    expect(activeFor(undefined, false)).toBe(true);
+  });
+
+  it('pauses only when neither summoned nor visible', () => {
+    expect(activeFor(false, true)).toBe(false);
+    expect(activeFor(undefined, true)).toBe(false);
+    expect(frameloopFor(!activeFor(false, true))).toBe('never');
   });
 });

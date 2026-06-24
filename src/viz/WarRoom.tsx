@@ -1,529 +1,339 @@
-// WarRoom.tsx — the cinematic R3F war-room island (spec §6). It renders ONLY
-// real signals from `bridge.ts`:
-//   • one Wireframe-Cell node per real candidate (+ a cluster glyph for overflow)
-//   • 3 stage nodes (Diagnostician / Coach / Verifier) sized & lit by REAL
-//     `fugu_usage` token weight (orchestration when present, plain tokens off-Fugu)
-//   • core colour driven by REAL `finding_verdict` — emerald → amber flare + grow
-//     + persist on `confirmed`; dim / collapse / die on `refuted`
-//   • travelling token-pulses from REAL `fugu_delta` / `fugu_usage` activity
-//   • harness identity as a thin cage-rim tint + a legend (colour ALWAYS paired
-//     with glyph + label — never colour alone)
+// WarRoom.tsx — the persistent orb mind-map AND the whole interface.
 //
-// Built per r3f-mastery: capped dpr, ACESFilmic tone mapping, FogExp2, an
-// UnrealBloom + vignette + film-grain post stack, geometry/materials created
-// once (never inside useFrame), frame-rate-independent damping, RAF paused when
-// the overlay window is hidden, and full GPU disposal on unmount.
+// This is no longer an ambient backdrop behind a terminal: the terminal is gone
+// and the war room is the app. The 3D layer (fresnel orbs, free-orbit camera,
+// links, atmosphere) renders the aggregate `OrbSceneModel` built by Rust from
+// real detector hits; the DOM `Chrome` layer over it carries the HUD, ask bar,
+// live pipeline rail, inspector, legend and empty-state. Hubs are harnesses,
+// issue orbs are (harness × pattern), links are issue→own-hub only.
+//
+// Honest-viz holds throughout: every orb/link/flare maps to a computed signal,
+// and off-Fugu runs degrade gracefully (no fabricated counts, verdicts or costs).
 
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { EffectComposer, Bloom, Vignette, Noise } from '@react-three/postprocessing';
-import { BlendFunction } from 'postprocessing';
+import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
+import { Sparkles, Stars, Environment, Lightformer, Html, Billboard } from '@react-three/drei';
 import * as THREE from 'three';
-import type { Bridge, SceneState, Verdict } from './bridge';
+import { invoke } from '@tauri-apps/api/core';
+import type { Bridge, SceneState } from './bridge';
 import { harnessTheme } from './harnessTheme';
+import { layoutOrbScene } from './orbLayout';
+import type { LayoutNode, OrbIssue, OrbLayout, OrbSceneModel } from './orbTypes';
+import { Orb } from './Orb';
+import { CameraRig } from './CameraRig';
+import { Chrome, type FixPreview } from './chrome';
 import type { RevealFinding } from './compositions/Reveal';
 
-// LAZY Remotion boundary: the <Player> host (and the whole Remotion graph it
-// pulls) is a deferred chunk so it never loads on the summon hot path and never
-// bloats the main bundle (risk R-Bundle / R-Rem). Only mounted on first summon
-// (intro) and on the reveal phase.
 const PlayerHost = lazy(() => import('./PlayerHost'));
 
-// ── palette (mirrors style.css phosphor tokens) ──────────────────────────────
-// Spec §6.1: every node nucleus reads HOT-WHITE at its center. The core mesh is
-// an additive near-white nucleus that blooms to a white-hot point; the verdict
-// channel only *tints* that white (emerald-white idle → white-hot amber on
-// confirmed) so the white core is always the brightest thing on screen while the
-// harness colour stays on the cage rim. Refuted collapses + dims the nucleus.
-const CORE_HOT = new THREE.Color('#ffffff'); // hot-white nucleus (bloom seed)
-const CORE_IDLE = new THREE.Color('#d8ffe8'); // emerald-white idle tint
-const CORE_CONFIRM = new THREE.Color('#ffd9c8'); // white-hot amber tint (confirmed)
-const HALO_IDLE = new THREE.Color('#76ff9d'); // emerald phosphor halo
-const HALO_CONFIRM = new THREE.Color('#ff5a37'); // verdict amber/red flare halo
-const CAGE_BASE = new THREE.Color('#1b6f3a'); // dim cage wire
-const STAGE_NAMES = ['Diagnostician', 'Coach', 'Verifier'] as const;
+const BG = '#020403';
 
-// Frame-rate-independent damping (r3f-mastery key math pattern).
-function damp(current: number, target: number, lambda: number, dt: number): number {
-  return THREE.MathUtils.lerp(current, target, 1 - Math.exp(-lambda * dt));
-}
-
-// Pure visibility→frameloop decision, extracted so it is unit-testable without a
-// GPU/jsdom Canvas (Task 10 viz smoke). The overlay pauses its RAF whenever the
-// window is hidden — `frameloop="never"` halts r3f's loop entirely — and runs
-// `"always"` when visible. Keep this the single source of the pause rule so the
-// test asserts exactly what the Canvas uses.
 export function frameloopFor(hidden: boolean): 'always' | 'never' {
   return hidden ? 'never' : 'always';
 }
 
-// Deterministic placement on a sphere shell so node layout is stable per index
-// (Fibonacci sphere — even, non-clumping distribution).
-function fib(i: number, n: number, radius: number): THREE.Vector3 {
-  const golden = Math.PI * (3 - Math.sqrt(5));
-  const y = n <= 1 ? 0 : 1 - (i / (n - 1)) * 2;
-  const r = Math.sqrt(Math.max(0, 1 - y * y));
-  const theta = golden * i;
-  return new THREE.Vector3(Math.cos(theta) * r, y, Math.sin(theta) * r).multiplyScalar(radius);
+export function activeFor(summoned: boolean | undefined, visHidden: boolean): boolean {
+  return Boolean(summoned) || !visHidden;
 }
 
-type NodeKind = 'stage' | 'candidate';
+function humanisePattern(patternId: string): string {
+  return (
+    patternId
+      .split(/[_\s]+/)
+      .filter(Boolean)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(' ') || 'Unknown Pattern'
+  );
+}
 
-type NodeView = {
-  key: string;
-  kind: NodeKind;
-  position: THREE.Vector3;
-  harness: string; // 'claude_code' | 'codex' | 'unknown'
-  /** stage index for stage nodes (token-weight lookup), else -1 */
-  stageIndex: number;
-  /** finding ids that target this node's pattern (for verdict colouring) */
-  findingKey: string; // pattern id for candidates, stage name for stages
-};
+export function deriveFindings(scene: SceneState): RevealFinding[] {
+  return Object.values(scene.verdicts)
+    .filter((v) => v.verdict === 'confirmed')
+    .sort((a, b) => b.severity - a.severity)
+    .map((v) => ({ title: humanisePattern(v.patternId), severity: v.severity, harness: v.harness }));
+}
 
-// ── one Wireframe-Cell ───────────────────────────────────────────────────────
-// Three concentric shells, clarity over noise (no vertex sparkle):
-//   1. a HOT-WHITE additive nucleus at the center (spec §6.1) — the brightest
-//      thing on screen, the bloom seed; verdict only *tints* the white
-//      (emerald-white idle → white-hot amber on confirmed);
-//   2. an emissive halo carrying the full verdict colour (emerald → amber) so
-//      the verdict reads at a glance even past the white blowout;
-//   3. a single wireframe cage whose rim is tinted by harness (secondary accent).
-// Refuted collapses + dims all three.
-function WireframeCell({
-  node,
-  verdict,
-  stageWeight,
-}: {
-  node: NodeView;
-  verdict: Verdict | undefined;
-  stageWeight: number; // 0..1 real token weight (stage nodes only)
-}) {
-  const group = useRef<THREE.Group>(null!);
-  const coreMat = useRef<THREE.MeshBasicMaterial>(null!);
-  const haloMat = useRef<THREE.MeshBasicMaterial>(null!);
-  const cageMat = useRef<THREE.MeshBasicMaterial>(null!);
-  const theme = harnessTheme(node.harness);
+// Live-run fallback model: before `get_orb_scene` lands (or off-Fugu), build a
+// provisional scene from the nominated candidates so the map is never empty mid-run.
+function fallbackOrbScene(scene: SceneState): OrbSceneModel {
+  const agentsByHarness = new Map<string, { count: number; worst: number }>();
+  for (const c of scene.candidates) {
+    const cur = agentsByHarness.get(c.harness) ?? { count: 0, worst: 0 };
+    cur.count += 1;
+    cur.worst = Math.max(cur.worst, c.severityHint);
+    agentsByHarness.set(c.harness, cur);
+  }
+  const agents = Array.from(agentsByHarness, ([harness, meta]) => {
+    const t = harnessTheme(harness);
+    return { id: harness, harness, label: t.label, glyph: t.glyph, color: t.color, sessions: 0, eventCount: 0, totalLoad: meta.count };
+  });
+  const issues = scene.candidates.map((c) => ({
+    id: `${c.harness}:${c.patternId}`,
+    agentId: c.harness,
+    harness: c.harness,
+    patternId: c.patternId,
+    title: humanisePattern(c.patternId),
+    count: 1,
+    severity: c.severityHint,
+    rationale: 'Live candidate nominated by the current diagnosis run.',
+    estCostTokens: 0,
+    estCostMinutes: 0,
+    frequency: 0,
+    confidence: 0,
+    sessionIds: [c.sessionId],
+    evidence: [],
+  }));
+  return {
+    agents,
+    issues,
+    links: issues.map((issue) => ({ source: issue.agentId, target: issue.id, kind: 'agent_issue' as const })),
+    guidance: { doItems: [], stopItems: [] },
+  };
+}
 
-  // Geometry/materials are created ONCE via useMemo, never in useFrame.
-  const cageColor = useMemo(() => CAGE_BASE.clone().lerp(new THREE.Color(theme.color), 0.55), [theme.color]);
-  const baseScale = node.kind === 'stage' ? 0.62 : 0.34;
+// soft round sprite for the travelling link dots
+let linkDotCache: THREE.Texture | null = null;
+function linkDotTexture(): THREE.Texture {
+  if (linkDotCache) return linkDotCache;
+  const s = 48;
+  const c = document.createElement('canvas');
+  c.width = c.height = s;
+  const ctx = c.getContext('2d')!;
+  const g = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.4, 'rgba(255,255,255,0.75)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, s, s);
+  linkDotCache = new THREE.CanvasTexture(c);
+  linkDotCache.needsUpdate = true;
+  return linkDotCache;
+}
 
-  // Scratch colours mutated in-place each frame (never reallocate in useFrame).
-  const coreColor = useRef(CORE_IDLE.clone());
-  const haloColor = useRef(HALO_IDLE.clone());
+// ── links: faint harness-tinted lines + an energy dot flowing issue → hub, so
+// every issue visibly belongs to its agent (the grouping cue, since the orbs
+// themselves are severity-coloured). ─────────────────────────────────────────
+function AnimatedLinks({ layout }: { layout: OrbLayout }) {
+  const byId = useMemo(() => new Map(layout.nodes.map((n) => [n.id, n])), [layout]);
+  const links = useMemo(() => layout.links.filter((l) => byId.has(l.source) && byId.has(l.target)), [layout, byId]);
 
-  // Smoothed visual state lives in a ref so we don't re-render per frame.
-  // `heat` 0..1 drives how hot-white the nucleus reads (confirmed → 1, refuted → 0).
-  const sim = useRef({ scale: baseScale, glow: 0.5, dead: 0, heat: node.kind === 'stage' ? 0.35 : 0.25 });
+  const lineGeo = useMemo(() => {
+    const positions = new Float32Array(links.length * 6);
+    const colors = new Float32Array(links.length * 6);
+    links.forEach((link, i) => {
+      const hub = byId.get(link.source)!;
+      const iss = byId.get(link.target)!;
+      positions.set([hub.position.x, hub.position.y, hub.position.z, iss.position.x, iss.position.y, iss.position.z], i * 6);
+      const c = new THREE.Color(harnessTheme(hub.harness).color);
+      colors.set([c.r, c.g, c.b, c.r * 0.45, c.g * 0.45, c.b * 0.45], i * 6);
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    return g;
+  }, [links, byId]);
 
-  useFrame((_, dtRaw) => {
-    const dt = Math.min(dtRaw, 0.05); // clamp huge tab-restore deltas
-    const t = performance.now() / 1000;
-    const s = sim.current;
+  const dotGeo = useMemo(() => {
+    const positions = new Float32Array(links.length * 3);
+    const colors = new Float32Array(links.length * 3);
+    links.forEach((link, i) => {
+      const c = new THREE.Color(harnessTheme(byId.get(link.source)!.harness).color);
+      colors.set([c.r, c.g, c.b], i * 3);
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    return g;
+  }, [links, byId]);
 
-    // Verdict → core/halo tint + size + persistence + nucleus heat.
-    let targetCore = CORE_IDLE;
-    let targetHalo = HALO_IDLE;
-    let targetScale = baseScale;
-    let targetGlow = node.kind === 'stage' ? 0.4 + stageWeight * 1.6 : 0.55;
-    let targetDead = 0;
-    let targetHeat = node.kind === 'stage' ? 0.3 + stageWeight * 0.45 : 0.25;
+  const meta = useMemo(
+    () => links.map((link, i) => ({ hub: byId.get(link.source)!.position, iss: byId.get(link.target)!.position, phase: (i * 0.37) % 1 })),
+    [links, byId],
+  );
 
-    if (verdict?.verdict === 'confirmed') {
-      targetCore = CORE_CONFIRM;
-      targetHalo = HALO_CONFIRM;
-      // grow with confirmed severity (real signal), then persist.
-      targetScale = baseScale * (1.35 + Math.min(verdict.severity, 5) * 0.12);
-      targetGlow = 2.2;
-      targetHeat = 1; // white-hot nucleus
-    } else if (verdict?.verdict === 'refuted') {
-      // collapse + die: shrink toward nothing, cool the nucleus, fade out.
-      targetScale = baseScale * 0.18;
-      targetGlow = 0.05;
-      targetDead = 1;
-      targetHeat = 0;
+  const lineMat = useRef<THREE.LineBasicMaterial>(null);
+  const dotTex = useMemo(() => linkDotTexture(), []);
+
+  useEffect(() => () => { lineGeo.dispose(); dotGeo.dispose(); }, [lineGeo, dotGeo]);
+
+  useFrame((state) => {
+    const t = state.clock.elapsedTime;
+    const attr = dotGeo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < meta.length; i++) {
+      const m = meta[i];
+      const tt = (t * 0.4 + m.phase) % 1; // issue → hub
+      attr.setXYZ(
+        i,
+        m.iss.x + (m.hub.x - m.iss.x) * tt,
+        m.iss.y + (m.hub.y - m.iss.y) * tt,
+        m.iss.z + (m.hub.z - m.iss.z) * tt,
+      );
     }
-
-    s.scale = damp(s.scale, targetScale, 5, dt);
-    s.glow = damp(s.glow, targetGlow, 4, dt);
-    s.dead = damp(s.dead, targetDead, 3, dt);
-    s.heat = damp(s.heat, targetHeat, 4, dt);
-
-    if (group.current) {
-      // gentle breathing + slow tumble; idle stages breathe to token weight.
-      const breathe = 1 + Math.sin(t * 1.6 + node.position.x) * 0.04;
-      group.current.scale.setScalar(s.scale * breathe);
-      group.current.rotation.y += dt * (0.18 + stageWeight * 0.25);
-      group.current.rotation.x += dt * 0.07;
-    }
-    if (coreMat.current) {
-      // Nucleus: lerp the verdict tint toward pure hot-white by `heat`, then push
-      // past 1.0 (toneMapped off) so it blows out and seeds the bloom.
-      coreColor.current.copy(targetCore).lerp(CORE_HOT, 0.45 + s.heat * 0.55);
-      coreMat.current.color.copy(coreColor.current);
-      coreMat.current.opacity = Math.min(1, (0.9 + s.glow * 0.06) * (1 - s.dead));
-    }
-    if (haloMat.current) {
-      // Halo carries the verdict colour at lower opacity so the hue survives the
-      // white blowout (and the amber/emerald reads even at a glance).
-      haloColor.current.copy(targetHalo);
-      haloMat.current.color.copy(haloColor.current);
-      haloMat.current.opacity = (0.16 + s.glow * 0.16) * (1 - s.dead);
-    }
-    if (cageMat.current) {
-      cageMat.current.opacity = (0.45 + s.glow * 0.12) * (1 - s.dead * 0.9);
-    }
+    attr.needsUpdate = true;
+    if (lineMat.current) lineMat.current.opacity = 0.22 + Math.sin(t * 1.4) * 0.05;
   });
 
+  if (links.length === 0) return null;
   return (
-    <group ref={group} position={node.position}>
-      {/* 1 — hot-white additive nucleus (bloom seed; verdict only tints it) */}
-      <mesh scale={0.66}>
-        <icosahedronGeometry args={[0.5, 0]} />
-        <meshBasicMaterial
-          ref={coreMat}
-          color={CORE_IDLE}
+    <group>
+      <lineSegments geometry={lineGeo}>
+        <lineBasicMaterial ref={lineMat} vertexColors transparent opacity={0.24} toneMapped={false} blending={THREE.AdditiveBlending} />
+      </lineSegments>
+      <points geometry={dotGeo}>
+        <pointsMaterial
+          vertexColors
+          size={0.17}
+          map={dotTex}
           transparent
-          toneMapped={false}
-          blending={THREE.AdditiveBlending}
+          opacity={0.95}
+          sizeAttenuation
           depthWrite={false}
-        />
-      </mesh>
-      {/* 2 — verdict-coloured halo (emerald → amber) so the hue reads past white */}
-      <mesh>
-        <icosahedronGeometry args={[0.5, 0]} />
-        <meshBasicMaterial
-          ref={haloMat}
-          color={HALO_IDLE}
-          transparent
-          opacity={0.22}
-          toneMapped={false}
           blending={THREE.AdditiveBlending}
-          depthWrite={false}
+          toneMapped={false}
         />
-      </mesh>
-      {/* 3 — single wireframe cage, harness-tinted rim */}
-      <mesh scale={1.55}>
-        <icosahedronGeometry args={[0.5, node.kind === 'stage' ? 1 : 0]} />
-        <meshBasicMaterial ref={cageMat} color={cageColor} wireframe transparent opacity={0.5} toneMapped={false} />
-      </mesh>
+      </points>
     </group>
   );
 }
 
-// ── nearest-neighbour edges (constellation lines) ────────────────────────────
-// Built once per node set; positions are static so a single LineSegments buffer
-// is enough. Each candidate links to its k nearest neighbours among all nodes.
-function Edges({ nodes }: { nodes: NodeView[] }) {
-  const geometry = useMemo(() => {
-    const pts: number[] = [];
-    const k = 2;
-    for (let i = 0; i < nodes.length; i++) {
-      const a = nodes[i];
-      const dists = nodes
-        .map((b, j) => ({ j, d: a.position.distanceToSquared(b.position) }))
-        .filter(x => x.j !== i)
-        .sort((x, y) => x.d - y.d)
-        .slice(0, k);
-      for (const { j } of dists) {
-        const b = nodes[j];
-        pts.push(a.position.x, a.position.y, a.position.z, b.position.x, b.position.y, b.position.z);
-      }
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    return g;
-  }, [nodes]);
-
-  useEffect(() => () => geometry.dispose(), [geometry]);
-
+// Faint camera-facing ring bounding each agent's cluster — "everything inside
+// here is this agent" — sized to the cluster's dynamic extent.
+function TerritoryRings({ hubs }: { hubs: LayoutNode[] }) {
   return (
-    <lineSegments geometry={geometry}>
-      <lineBasicMaterial color="#1b6f3a" transparent opacity={0.22} toneMapped={false} />
-    </lineSegments>
+    <>
+      {hubs.map((h) => {
+        const r = h.territoryRadius ?? 2;
+        return (
+          <Billboard key={`terr-${h.id}`} position={[h.position.x, h.position.y, h.position.z]}>
+            <mesh>
+              <ringGeometry args={[r * 0.975, r, 96]} />
+              <meshBasicMaterial
+                color={harnessTheme(h.harness).color}
+                transparent
+                opacity={0.12}
+                side={THREE.DoubleSide}
+                depthWrite={false}
+                blending={THREE.AdditiveBlending}
+                toneMapped={false}
+              />
+            </mesh>
+          </Billboard>
+        );
+      })}
+    </>
   );
 }
 
-// ── travelling token-pulses ──────────────────────────────────────────────────
-// One short-lived sprite per real `fugu_delta`/`fugu_usage` pulse, flying from a
-// stage node outward. A fixed-size pool keyed by pulse id (mount-once buffers).
-function Pulses({ pulses, stagePositions }: { pulses: SceneState['pulses']; stagePositions: THREE.Vector3[] }) {
-  const POOL = 48;
-  const points = useRef<THREE.Points>(null!);
-  const geom = useMemo(() => {
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(POOL * 3), 3));
-    g.setAttribute('aIntensity', new THREE.BufferAttribute(new Float32Array(POOL), 1));
-    return g;
-  }, []);
-
-  // Active pulse simulation state (origin, direction, life). Mutated in place.
-  const active = useRef<{ id: number; born: number; from: THREE.Vector3; dir: THREE.Vector3; intensity: number }[]>([]);
-  const seen = useRef(new Set<number>());
-
-  useEffect(() => () => geom.dispose(), [geom]);
-
-  // Spawn newly-arrived pulses (ids we haven't seen) on each state change.
-  useEffect(() => {
-    for (const p of pulses) {
-      if (seen.current.has(p.id)) continue;
-      seen.current.add(p.id);
-      const si = Math.max(0, STAGE_NAMES.indexOf(p.stage as (typeof STAGE_NAMES)[number]));
-      const from = (stagePositions[si] ?? new THREE.Vector3()).clone();
-      const dir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
-      active.current.push({ id: p.id, born: performance.now() / 1000, from, dir, intensity: p.intensity });
-      if (active.current.length > POOL) active.current.shift();
-    }
-    // keep the seen-set bounded
-    if (seen.current.size > 256) seen.current = new Set(pulses.map(p => p.id));
-  }, [pulses, stagePositions]);
-
-  useFrame(() => {
-    const now = performance.now() / 1000;
-    const pos = geom.getAttribute('position') as THREE.BufferAttribute;
-    const inten = geom.getAttribute('aIntensity') as THREE.BufferAttribute;
-    const LIFE = 1.4;
-    let w = 0;
-    active.current = active.current.filter(p => now - p.born < LIFE);
-    for (const p of active.current) {
-      if (w >= POOL) break;
-      const age = (now - p.born) / LIFE; // 0..1
-      const reach = 2.4 * age;
-      pos.setXYZ(w, p.from.x + p.dir.x * reach, p.from.y + p.dir.y * reach, p.from.z + p.dir.z * reach);
-      inten.setX(w, p.intensity * (1 - age));
-      w++;
-    }
-    // park the rest of the pool far offscreen
-    for (let i = w; i < POOL; i++) {
-      pos.setXYZ(i, 0, 0, 9999);
-      inten.setX(i, 0);
-    }
-    pos.needsUpdate = true;
-    inten.needsUpdate = true;
-  });
-
+// Harness name under each hub — the explicit "this is Claude / this is Codex".
+function HubLabels({ hubs }: { hubs: LayoutNode[] }) {
   return (
-    <points ref={points} geometry={geom}>
-      <pointsMaterial
-        color="#b8ff6b"
-        size={0.16}
-        sizeAttenuation
-        transparent
-        opacity={0.9}
-        depthWrite={false}
-        blending={THREE.AdditiveBlending}
-        toneMapped={false}
-      />
-    </points>
+    <>
+      {hubs.map((h) => {
+        const t = harnessTheme(h.harness);
+        const r = h.territoryRadius ?? 2;
+        return (
+          <Html
+            key={`label-${h.id}`}
+            position={[h.position.x, h.position.y - r * 0.84, h.position.z]}
+            center
+            zIndexRange={[6, 0]}
+            style={{ pointerEvents: 'none' }}
+          >
+            <div className="wd-hub-label" style={{ '--harness': t.color } as CSSProperties}>
+              <span className="wd-hub-label-glyph">{t.glyph}</span>
+              {t.label}
+            </div>
+          </Html>
+        );
+      })}
+    </>
   );
 }
 
-// ── ambient dust ─────────────────────────────────────────────────────────────
-// Static drifting motes for depth. Pure decoration (NOT a signal) — deliberately
-// dim so it never reads as data.
-function Dust() {
-  const ref = useRef<THREE.Points>(null!);
-  const geom = useMemo(() => {
-    const N = 260;
-    const arr = new Float32Array(N * 3);
-    for (let i = 0; i < N; i++) {
-      arr[i * 3] = (Math.random() - 0.5) * 16;
-      arr[i * 3 + 1] = (Math.random() - 0.5) * 10;
-      arr[i * 3 + 2] = (Math.random() - 0.5) * 16;
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(arr, 3));
-    return g;
-  }, []);
-  useEffect(() => () => geom.dispose(), [geom]);
-  useFrame((_, dt) => {
-    if (ref.current) ref.current.rotation.y += Math.min(dt, 0.05) * 0.015;
-  });
-  return (
-    <points ref={ref} geometry={geom}>
-      <pointsMaterial color="#3dffa0" size={0.025} sizeAttenuation transparent opacity={0.28} depthWrite={false} toneMapped={false} />
-    </points>
-  );
-}
-
-// ── slow camera drift so the constellation feels alive ───────────────────────
-function CameraRig() {
-  const { camera } = useThree();
-  useFrame((_, dtRaw) => {
-    const dt = Math.min(dtRaw, 0.05);
-    const t = performance.now() / 1000;
-    const tx = Math.sin(t * 0.12) * 1.1;
-    const ty = Math.cos(t * 0.09) * 0.6;
-    camera.position.x = damp(camera.position.x, tx, 1.5, dt);
-    camera.position.y = damp(camera.position.y, ty, 1.5, dt);
-    camera.lookAt(0, 0, 0);
-  });
-  return null;
-}
-
-// Build the full node set from scene state: 3 stage nodes (outer ring) + the
-// candidate cloud (inner sphere). Layout is deterministic per index.
-function useNodes(scene: SceneState): { nodes: NodeView[]; stagePositions: THREE.Vector3[] } {
-  return useMemo(() => {
-    const stagePositions = STAGE_NAMES.map((_, i) => {
-      const a = (i / STAGE_NAMES.length) * Math.PI * 2;
-      return new THREE.Vector3(Math.cos(a) * 3.4, Math.sin(a) * 0.4, Math.sin(a) * 3.4);
-    });
-    const stages: NodeView[] = STAGE_NAMES.map((name, i) => ({
-      key: `stage-${name}`,
-      kind: 'stage',
-      position: stagePositions[i],
-      harness: 'unknown',
-      stageIndex: i,
-      findingKey: name,
-    }));
-    const cands: NodeView[] = scene.candidates.map((c, i) => ({
-      key: `cand-${c.patternId}-${c.sessionId}-${i}`,
-      kind: 'candidate',
-      position: fib(i + 1, scene.candidates.length + 2, 1.9),
-      harness: c.harness,
-      stageIndex: -1,
-      findingKey: c.patternId,
-    }));
-    return { nodes: [...stages, ...cands], stagePositions };
-  }, [scene.candidates]);
-}
-
-// Resolve the verdict that targets a given node (match on pattern id). Confirmed
-// wins over refuted if (rarely) both exist for one pattern.
-function verdictFor(scene: SceneState, findingKey: string): Verdict | undefined {
-  let refuted: Verdict | undefined;
-  for (const v of Object.values(scene.verdicts)) {
-    if (v.patternId !== findingKey) continue;
-    if (v.verdict === 'confirmed') return v;
-    refuted = v;
-  }
-  return refuted;
-}
-
-// Humanise a snake_case pattern id into a readable hole title
-// ("unbounded_context" → "Unbounded Context"). The reveal shows real findings;
-// when the backend later carries a human title this is the deterministic
-// fallback so the slam-in always reads cleanly.
-function humanisePattern(patternId: string): string {
-  return patternId
-    .split(/[_\s]+/)
-    .filter(Boolean)
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ') || 'Unknown Pattern';
-}
-
-// Derive the reveal's ranked findings from the REAL confirmed verdicts in scene
-// state (severity-desc). This is the honest bridge from the war-room signal to
-// the Remotion reveal: nothing is fabricated — only confirmed holes appear, each
-// with its real severity + harness. `est_cost` is left undefined (SceneState
-// does not carry it), so the reveal simply omits the cost line.
-export function deriveFindings(scene: SceneState): RevealFinding[] {
-  return Object.values(scene.verdicts)
-    .filter(v => v.verdict === 'confirmed')
-    .sort((a, b) => b.severity - a.severity)
-    .map(v => ({ title: humanisePattern(v.patternId), severity: v.severity, harness: v.harness }));
-}
-
-// Real token weight for a stage, normalised 0..1. Orchestration tokens (Fugu)
-// preferred; degrade to plain tokens off-Fugu — honest, never fabricated.
-function stageWeight(scene: SceneState, stage: string): number {
-  const u = scene.usage[stage];
-  if (!u) return 0;
-  const orch = u.orchIn + u.orchOut;
-  const tokens = orch > 0 ? orch : u.in + u.out;
-  if (tokens <= 0) return 0;
-  return Math.min(1, Math.log10(tokens + 10) / 5);
-}
-
-function Scene({ scene }: { scene: SceneState }) {
+function Scene({
+  layout,
+  selected,
+  selectedId,
+  hoveredId,
+  onHover,
+  onLeave,
+  onSelect,
+  onClear,
+}: {
+  layout: OrbLayout;
+  selected: LayoutNode | null;
+  selectedId: string | null;
+  hoveredId: string | null;
+  onHover: (node: LayoutNode) => void;
+  onLeave: (node: LayoutNode) => void;
+  onSelect: (node: LayoutNode) => void;
+  onClear: () => void;
+}) {
   const { gl } = useThree();
-  const { nodes, stagePositions } = useNodes(scene);
-
-  // r3f-mastery: cap dpr at 2 + ACESFilmic tone mapping.
   useEffect(() => {
     gl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     gl.toneMapping = THREE.ACESFilmicToneMapping;
     gl.toneMappingExposure = 1.05;
   }, [gl]);
 
+  const selectedAgent = selected?.agentId;
+  const hubs = useMemo(() => layout.nodes.filter((n) => n.kind === 'hub'), [layout]);
+
   return (
     <>
-      <fogExp2 attach="fog" args={['#020403', 0.085]} />
-      <color attach="background" args={['#020403']} />
-      <CameraRig />
-      <Dust />
-      <Edges nodes={nodes} />
-      {nodes.map(n => (
-        <WireframeCell
-          key={n.key}
-          node={n}
-          verdict={n.kind === 'candidate' ? verdictFor(scene, n.findingKey) : undefined}
-          stageWeight={n.kind === 'stage' ? stageWeight(scene, n.findingKey) : 0}
-        />
-      ))}
-      <Pulses pulses={scene.pulses} stagePositions={stagePositions} />
-      <EffectComposer>
-        {/* Modestly punchier bloom for cinematic glow. The threshold is RAISED
-            (0.15→0.2) so only the hot-white nuclei + confirmed flares blow out
-            and bloom hard — the dim emerald cages/dust stay phosphor-dim and the
-            green mood is preserved (honest-viz: glow still tracks real signals). */}
-        <Bloom intensity={1.35} luminanceThreshold={0.2} luminanceSmoothing={0.85} mipmapBlur radius={0.78} />
-        <Vignette eskil={false} offset={0.24} darkness={0.88} />
-        <Noise premultiply blendFunction={BlendFunction.OVERLAY} opacity={0.06} />
+      <color attach="background" args={[BG]} />
+      {/* light fog only — heavy fog was swallowing the entire starfield. */}
+      <fogExp2 attach="fog" args={[BG, 0.014]} />
+
+      {/* Lights sculpt only the crystal gem hearts (the cages/nodes are unlit
+          emissive); the Environment probe gives each facet its glint. */}
+      <ambientLight intensity={0.1} />
+      <directionalLight position={[5, 6, 4]} intensity={2.2} color="#e6fff0" />
+      <directionalLight position={[-6, -1, -2]} intensity={0.7} color="#9fd0ff" />
+      <Environment resolution={128}>
+        <Lightformer form="rect" intensity={1.8} color="#bfffe0" position={[-5, 3, -3]} scale={[7, 7, 1]} />
+        <Lightformer form="rect" intensity={1.3} color="#3dffa0" position={[5, 1, -4]} scale={[6, 6, 1]} />
+        <Lightformer form="ring" intensity={1.2} color="#cfe9d8" position={[2, 4, 2]} scale={[2, 2, 1]} />
+      </Environment>
+
+      {/* Real starfield (pulled in close + dense so it actually reads as a sky)
+          plus a few slow near motes for parallax depth. */}
+      <Stars radius={34} depth={46} count={4200} factor={5} saturation={0} fade speed={0.1} />
+      <Sparkles count={45} scale={[26, 15, 24]} size={1.5} speed={0.05} opacity={0.26} color="#bfeaff" />
+
+      <CameraRig selected={selected} />
+
+      <group onPointerMissed={onClear}>
+        <TerritoryRings hubs={hubs} />
+        <AnimatedLinks layout={layout} />
+        {layout.nodes.map((node, i) => (
+          <Orb
+            key={node.id}
+            node={node}
+            selected={selectedId === node.id}
+            hovered={hoveredId === node.id}
+            dimmed={Boolean(selectedId && selectedId !== node.id && node.agentId !== selectedAgent)}
+            appearDelay={Math.min(i * 0.045, 0.6)}
+            onHover={onHover}
+            onLeave={onLeave}
+            onSelect={onSelect}
+          />
+        ))}
+      </group>
+      <HubLabels hubs={hubs} />
+
+      {/* multisampling AA on the composer input stops the thin bright lattice
+          lines from sub-pixel shimmering into the bloom pass (the flicker). High
+          smoothing + a higher threshold keep the bloom stable + calm. */}
+      <EffectComposer multisampling={4}>
+        <Bloom intensity={0.92} luminanceThreshold={0.28} luminanceSmoothing={0.95} mipmapBlur radius={0.74} />
+        <Vignette eskil={false} offset={0.2} darkness={0.92} />
       </EffectComposer>
     </>
   );
 }
 
-// ── legend (colour ALWAYS paired with glyph + label — a11y) ──────────────────
-function Legend({ scene }: { scene: SceneState }) {
-  // surface which harnesses are actually present, plus a verdict key.
-  const present = useMemo(() => {
-    const set = new Set(scene.candidates.map(c => (c.harness === 'codex' ? 'codex' : c.harness === 'claude_code' ? 'claude_code' : 'unknown')));
-    if (set.size === 0) set.add('claude_code');
-    return Array.from(set);
-  }, [scene.candidates]);
-
-  const confirmed = Object.values(scene.verdicts).filter(v => v.verdict === 'confirmed').length;
-  const refuted = Object.values(scene.verdicts).filter(v => v.verdict === 'refuted').length;
-
-  return (
-    <div className="viz-legend" aria-hidden="false">
-      {present.map(h => {
-        const t = harnessTheme(h);
-        return (
-          <span className="viz-legend-item" key={h}>
-            <span className="viz-glyph" style={{ color: t.color }}>{t.glyph}</span>
-            {t.label}
-          </span>
-        );
-      })}
-      <span className="viz-legend-item">
-        <span className="viz-glyph" style={{ color: '#ff5a37' }}>◆</span>
-        confirmed {confirmed > 0 ? `· ${confirmed}` : ''}
-      </span>
-      {refuted > 0 && (
-        <span className="viz-legend-item viz-legend-dim">
-          <span className="viz-glyph" style={{ color: '#1b6f3a' }}>×</span>
-          refuted · {refuted}
-        </span>
-      )}
-      {scene.clustered > 0 && (
-        <span className="viz-legend-item viz-legend-dim">
-          <span className="viz-glyph">⊕</span>
-          +{scene.clustered} clustered
-        </span>
-      )}
-    </div>
-  );
-}
-
-/**
- * The mounted island. Subscribes to the bridge for live `SceneState`, renders
- * the R3F constellation, and pauses the render loop when the overlay window is
- * hidden (summon-cost / battery hygiene).
- */
 export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: boolean }) {
   const [scene, setScene] = useState<SceneState>(() => ({
     phase: 'idle',
@@ -533,54 +343,133 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     usage: {},
     clustered: 0,
   }));
-  const [active, setActive] = useState(() => !document.hidden);
-  // Branded intro plays exactly ONCE, on first summon (hidden→visible). Tracked
-  // in a ref so re-summons never replay it; `showIntro` drives the overlay.
-  const introPlayed = useRef(!document.hidden); // already-visible dev mount = skip
+  const [visHidden, setVisHidden] = useState(() => document.hidden);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [fixPreview, setFixPreview] = useState<FixPreview | undefined>();
+  const [loadingFix, setLoadingFix] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const active = activeFor(scene.summoned, visHidden);
+  const introPlayed = useRef(!document.hidden);
   const [showIntro, setShowIntro] = useState(false);
 
   useEffect(() => bridge.subscribe(setScene), [bridge]);
 
-  // Dev-preview hook: the QA harness (dev.tsx) toggles `forceIntro` to replay the
-  // branded boot each loop without faking a window visibility change. No effect
-  // in the app (the prop is never passed there).
   useEffect(() => {
     if (forceIntro) setShowIntro(true);
   }, [forceIntro]);
 
-  // Pause RAF when the overlay is hidden; resume on show. First time the overlay
-  // becomes visible, fire the one-shot branded intro.
   useEffect(() => {
-    const onVis = () => {
-      const visible = !document.hidden;
-      setActive(visible);
-      if (visible && !introPlayed.current) {
-        introPlayed.current = true;
-        setShowIntro(true);
-      }
-    };
+    if (active && !introPlayed.current) {
+      introPlayed.current = true;
+      setShowIntro(true);
+    }
+  }, [active]);
+
+  useEffect(() => {
+    const onVis = () => setVisHidden(document.hidden);
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, []);
 
-  // Real confirmed holes → reveal findings (honest; empty until verdicts land).
+  const model = useMemo(() => scene.orbScene ?? fallbackOrbScene(scene), [scene.orbScene, scene.candidates]);
+  const layout = useMemo(() => layoutOrbScene(model), [model]);
+  const selectedNode = useMemo(() => layout.nodes.find((n) => n.id === selectedId) ?? null, [layout, selectedId]);
+  const hoveredNode = useMemo(() => layout.nodes.find((n) => n.id === hoveredId) ?? null, [layout, hoveredId]);
+
+  const onHover = useCallback((node: LayoutNode) => setHoveredId(node.id), []);
+  const onLeave = useCallback((node: LayoutNode) => setHoveredId((cur) => (cur === node.id ? null : cur)), []);
+  const onSelect = useCallback((node: LayoutNode) => {
+    setSelectedId(node.id);
+    setFixPreview(undefined);
+  }, []);
+  const onClear = useCallback(() => {
+    setSelectedId(null);
+    setFixPreview(undefined);
+  }, []);
+
+  const onAsk = useCallback(
+    async (query: string) => {
+      if (scene.running) return;
+      setRunError(null);
+      bridge.ingest('diagnosis_run', { running: true, query });
+      try {
+        const d = await invoke('run_diagnosis', {
+          scope: { harness: 'claude_code', query, force: false, max_files: null },
+        });
+        bridge.ingest('diagnosis_loaded', d);
+        bridge.ingest('diagnosis_run', { running: false });
+      } catch (e) {
+        setRunError(String(e));
+        bridge.ingest('diagnosis_run_failed', {});
+      }
+    },
+    [bridge, scene.running],
+  );
+
+  const onRequestFix = useCallback(async (issue: OrbIssue) => {
+    setLoadingFix(true);
+    setFixPreview(undefined);
+    try {
+      const preview = issue.findingId
+        ? await invoke<FixPreview>('get_fix_preview', { findingId: issue.findingId })
+        : await invoke<FixPreview>('get_orb_fix_preview', { issueId: issue.id });
+      setFixPreview(preview);
+    } catch {
+      setFixPreview({
+        finding_id: issue.findingId ?? issue.id,
+        pattern_id: issue.patternId,
+        target_path: 'WARDEN overlay',
+        diff: 'Fix preview is available in the WARDEN app. This browser QA stage never writes or applies fixes.',
+        applied: false,
+      });
+    } finally {
+      setLoadingFix(false);
+    }
+  }, []);
+
+  const onDismiss = useCallback(() => {
+    invoke('hide_overlay').catch(() => {});
+  }, []);
+
   const findings = useMemo(() => deriveFindings(scene), [scene.verdicts]);
   const diagnosisId = scene.diagnosisId ?? 'diagnosis';
 
   return (
-    <div className={`viz-root viz-phase-${scene.phase}`}>
+    <div className={`viz-root viz-phase-${scene.phase} viz-orb-map`}>
       <Canvas
         dpr={[1, 2]}
         frameloop={frameloopFor(!active)}
-        gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}
-        camera={{ position: [0, 0, 8.5], fov: 50, near: 0.1, far: 100 }}
+        gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
+        camera={{ position: [3.6, 2.4, 8.8], fov: 46, near: 0.1, far: 120 }}
       >
-        <Scene scene={scene} />
+        <Scene
+          layout={layout}
+          selected={selectedNode}
+          selectedId={selectedId}
+          hoveredId={hoveredId}
+          onHover={onHover}
+          onLeave={onLeave}
+          onSelect={onSelect}
+          onClear={onClear}
+        />
       </Canvas>
-      <Legend scene={scene} />
 
-      {/* Remotion overlays — lazy chunk, mounted ABOVE the canvas only when
-          needed. Suspense fallback is null so nothing blocks the warm scene. */}
+      <Chrome
+        scene={scene}
+        model={model}
+        hoveredNode={hoveredNode}
+        selectedNode={selectedNode}
+        running={Boolean(scene.running)}
+        error={runError}
+        fixPreview={fixPreview}
+        loadingFix={loadingFix}
+        onAsk={onAsk}
+        onRequestFix={onRequestFix}
+        onClearSelection={onClear}
+        onDismiss={onDismiss}
+      />
+
       {showIntro && (
         <Suspense fallback={null}>
           <PlayerHost kind="intro" findings={[]} diagnosisId={diagnosisId} onEnded={() => setShowIntro(false)} />
