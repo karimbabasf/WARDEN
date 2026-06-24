@@ -85,6 +85,53 @@ function scene(): OrbSceneModel {
   };
 }
 
+// Many agents across both harnesses, each with a variable issue load — exercises
+// harness zoning, collision-free hub packing and zone-bounds disjointness.
+function multiHarnessScene(agentsPerHarness = 6, maxIssues = 8): OrbSceneModel {
+  const harnesses = ['claude_code', 'codex'];
+  const agents: OrbSceneModel['agents'] = [];
+  const issues: OrbSceneModel['issues'] = [];
+  const links: OrbSceneModel['links'] = [];
+  for (const harness of harnesses) {
+    for (let a = 0; a < agentsPerHarness; a++) {
+      const id = `${harness}:agent${a}`;
+      const load = (a % 5) + 1;
+      agents.push({
+        id,
+        harness,
+        label: id,
+        glyph: harness === 'codex' ? '▲' : '◆',
+        color: harness === 'codex' ? '#b98cff' : '#3dffa0',
+        sessions: 1,
+        eventCount: 10,
+        totalLoad: load,
+      });
+      const n = (a % maxIssues) + 1; // 1..maxIssues issues, varies per agent
+      for (let k = 0; k < n; k++) {
+        const issueId = `${id}:P${k}`;
+        issues.push({
+          id: issueId,
+          agentId: id,
+          harness,
+          patternId: `P${k}`,
+          title: `Issue ${k}`,
+          count: (k % 4) + 1,
+          severity: (k % 5) + 1,
+          rationale: 'r',
+          estCostTokens: 1,
+          estCostMinutes: 1,
+          frequency: 0.1,
+          confidence: 0.5,
+          sessionIds: ['s'],
+          evidence: [],
+        });
+        links.push({ source: id, target: issueId, kind: 'agent_issue' as const });
+      }
+    }
+  }
+  return { agents, issues, links, guidance: { doItems: [], stopItems: [] } };
+}
+
 // One busy agent with a spread of severities + counts — exercises the shell
 // placement, severity→latitude ordering and non-intersection at real density.
 function richScene(): OrbSceneModel {
@@ -206,6 +253,107 @@ describe('layoutOrbScene', () => {
         expect(dist(issues[i].position, issues[j].position)).toBeGreaterThan(
           issues[i].radius + issues[j].radius,
         );
+      }
+    }
+  });
+
+  // ─── harness-zone + collision-free rewrite (task 4) ───
+
+  it('no two nodes overlap across the whole scene (dist ≥ r1+r2)', () => {
+    const layout = layoutOrbScene(multiHarnessScene());
+    const ns = layout.nodes;
+    const MARGIN = -1e-6; // allow exact tangency, reject real overlap
+    for (let i = 0; i < ns.length; i++) {
+      for (let j = i + 1; j < ns.length; j++) {
+        const gap = dist(ns[i].position, ns[j].position) - (ns[i].radius + ns[j].radius);
+        expect(gap).toBeGreaterThanOrEqual(MARGIN);
+      }
+    }
+  });
+
+  it('groups hubs into per-harness zones with disjoint X bounds', () => {
+    const layout = layoutOrbScene(multiHarnessScene());
+    const hubs = layout.nodes.filter((n) => n.kind === 'hub');
+    // collect each harness zone's X extent from its hubs' footprints
+    const byHarness = new Map<string, { min: number; max: number }>();
+    for (const h of hubs) {
+      const r = h.territoryRadius ?? h.radius;
+      const lo = h.position.x - r;
+      const hi = h.position.x + r;
+      const cur = byHarness.get(h.harness);
+      if (!cur) byHarness.set(h.harness, { min: lo, max: hi });
+      else {
+        cur.min = Math.min(cur.min, lo);
+        cur.max = Math.max(cur.max, hi);
+      }
+    }
+    expect(byHarness.size).toBeGreaterThanOrEqual(2);
+    // every issue sits in the same harness X-band as its hub's zone
+    const zoneOf = new Map(hubs.map((h) => [h.agentId, h.harness]));
+    for (const n of layout.nodes.filter((n) => n.kind === 'issue')) {
+      const harness = zoneOf.get(n.agentId)!;
+      const band = byHarness.get(harness)!;
+      expect(n.position.x).toBeGreaterThanOrEqual(band.min - 1e-9);
+      expect(n.position.x).toBeLessThanOrEqual(band.max + 1e-9);
+    }
+    // zones' X intervals are pairwise disjoint
+    const intervals = [...byHarness.values()].sort((a, b) => a.min - b.min);
+    for (let i = 1; i < intervals.length; i++) {
+      expect(intervals[i].min).toBeGreaterThan(intervals[i - 1].max);
+    }
+  });
+
+  it('arranges zones on a shallow camera-facing arc (mild Z curvature, not one flat line)', () => {
+    const layout = layoutOrbScene(multiHarnessScene());
+    const hubs = layout.nodes.filter((n) => n.kind === 'hub');
+    const cx = new Map<string, number[]>();
+    const cz = new Map<string, number[]>();
+    for (const h of hubs) {
+      (cx.get(h.harness) ?? cx.set(h.harness, []).get(h.harness)!).push(h.position.x);
+      (cz.get(h.harness) ?? cz.set(h.harness, []).get(h.harness)!).push(h.position.z);
+    }
+    const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+    const harnesses = [...cx.keys()];
+    const zoneX = harnesses.map((h) => mean(cx.get(h)!));
+    const zoneZ = harnesses.map((h) => mean(cz.get(h)!));
+    const xSpread = Math.max(...zoneX) - Math.min(...zoneX);
+    const zSpread = Math.max(...zoneZ) - Math.min(...zoneZ);
+    // zones spread laterally in X (decodable side-by-side)
+    expect(xSpread).toBeGreaterThan(2);
+    // the arc gives zones a *real* depth difference — they are not all on one
+    // flat Z line (the old layout pinned every zone to z≈0; this must change).
+    expect(zSpread).toBeGreaterThan(0.6);
+    // but the curvature is shallow: depth difference stays well under the
+    // lateral spread, so it reads as an arc facing the camera, not a column.
+    expect(zSpread).toBeLessThan(xSpread);
+  });
+
+  it('keeps the constellation compact, not a long receding line', () => {
+    // 12 agents across 2 harnesses must pack into a bounded footprint. The old
+    // single-axis packing blew X out to ~100 units; the zoned arc keeps it tight.
+    const layout = layoutOrbScene(multiHarnessScene());
+    const hubs = layout.nodes.filter((n) => n.kind === 'hub');
+    const xs = hubs.map((h) => h.position.x);
+    const xSpan = Math.max(...xs) - Math.min(...xs);
+    expect(xSpan).toBeLessThan(60);
+  });
+
+  it('is deterministic at scale', () => {
+    const a = layoutOrbScene(multiHarnessScene(30, 12));
+    const b = layoutOrbScene(multiHarnessScene(30, 12));
+    expect(a.nodes.map((n) => [n.id, n.position.x, n.position.y, n.position.z])).toEqual(
+      b.nodes.map((n) => [n.id, n.position.x, n.position.y, n.position.z]),
+    );
+  });
+
+  it('stays collision-free at scale (30 agents × up to 12 issues)', () => {
+    const layout = layoutOrbScene(multiHarnessScene(30, 12));
+    const ns = layout.nodes;
+    expect(ns.length).toBeGreaterThan(100);
+    for (let i = 0; i < ns.length; i++) {
+      for (let j = i + 1; j < ns.length; j++) {
+        const gap = dist(ns[i].position, ns[j].position) - (ns[i].radius + ns[j].radius);
+        expect(gap).toBeGreaterThanOrEqual(-1e-6);
       }
     }
   });
