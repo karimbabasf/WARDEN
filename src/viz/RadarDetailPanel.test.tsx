@@ -14,7 +14,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { RadarDetailPanel } from './RadarDetailPanel';
+import { RadarDetailPanel, relativeTime } from './RadarDetailPanel';
 import type { RadarActivity, RadarAgent, RadarComposition } from './radarTypes';
 
 function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
@@ -104,5 +104,54 @@ describe('RadarDetailPanel — context gauge + composition', () => {
     expect((el.textContent ?? '')).toContain('0%');
     // exact bar is always present regardless of fill.
     expect(el.querySelector('[data-exact-seg="cacheRead"]')).toBeTruthy();
+  });
+});
+
+// ── Task 20: live activity feed ───────────────────────────────────────────────
+describe('RadarDetailPanel — live activity feed', () => {
+  const activity = (over: Partial<RadarActivity>): RadarActivity => ({
+    ts: '2026-06-23T22:00:00Z',
+    kind: 'message',
+    label: 'untitled',
+    ...over,
+  });
+
+  it('renders recentActivity newest-first with kind labels', () => {
+    const recent: RadarActivity[] = [
+      activity({ ts: '2026-06-23T22:00:00Z', kind: 'message', label: 'oldest msg' }),
+      activity({ ts: '2026-06-23T22:01:00Z', kind: 'thinking', label: 'mid think' }),
+      activity({ ts: '2026-06-23T22:02:00Z', kind: 'tool', label: 'newest tool' }),
+    ];
+    const el = render(<RadarDetailPanel agent={agentFixture({ recentActivity: recent })} />);
+    const rows = Array.from(el.querySelectorAll('[data-activity-row]'));
+    expect(rows).toHaveLength(3);
+    // newest first → the tool call leads, the oldest message trails.
+    expect(rows[0].textContent).toContain('newest tool');
+    expect(rows[2].textContent).toContain('oldest msg');
+    // kind is surfaced (label/title), not only colour.
+    const feed = el.querySelector('[data-section="activity"]');
+    expect((feed?.textContent ?? '').toLowerCase()).toContain('tool');
+    expect((feed?.textContent ?? '').toLowerCase()).toContain('thinking');
+  });
+
+  it('handles the empty feed with an explicit empty state', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ recentActivity: [] })} />);
+    const feed = el.querySelector('[data-section="activity"]');
+    expect(feed).toBeTruthy();
+    expect(el.querySelectorAll('[data-activity-row]')).toHaveLength(0);
+    expect((feed?.textContent ?? '').toLowerCase()).toMatch(/no (recent )?activity|quiet|idle/);
+  });
+});
+
+describe('relativeTime — honest, tolerant', () => {
+  const now = Date.UTC(2026, 5, 23, 22, 5, 0); // 2026-06-23T22:05:00Z
+  it('formats sub-minute / minute / hour deltas', () => {
+    expect(relativeTime('2026-06-23T22:04:30Z', now)).toMatch(/s ago|just now/);
+    expect(relativeTime('2026-06-23T22:00:00Z', now)).toBe('5m ago');
+    expect(relativeTime('2026-06-23T20:05:00Z', now)).toBe('2h ago');
+  });
+  it('returns an empty string for an unparseable timestamp (never NaN)', () => {
+    expect(relativeTime('not-a-date', now)).toBe('');
+    expect(relativeTime('', now)).toBe('');
   });
 });

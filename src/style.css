@@ -592,6 +592,33 @@ html, body {
 .wd-radar-legend-val { color: var(--ink-soft); }
 
 .wd-radar-empty { margin-top: 7px; color: var(--ink-faint); font-size: 13px; letter-spacing: 0.1em; }
+.wd-radar-feed-empty { padding: 8px 0; font-size: 11px; letter-spacing: 0.06em; }
+
+/* live activity feed (newest-first) */
+.wd-radar-feed { list-style: none; margin: 10px 0 0; padding: 0; }
+.wd-radar-feed-row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 6px 0;
+  border-top: 1px solid var(--hair);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.wd-radar-feed-row:first-child { border-top: none; }
+.wd-radar-feed-glyph { flex: none; width: 14px; text-align: center; filter: drop-shadow(0 0 6px currentColor); }
+.wd-radar-feed-glyph.is-tool { color: var(--acid); }
+.wd-radar-feed-glyph.is-message { color: var(--ink-soft); }
+.wd-radar-feed-glyph.is-thinking { color: #b98cff; }
+.wd-radar-feed-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wd-radar-feed-kind {
+  margin-right: 7px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.wd-radar-feed-time { flex: none; font-size: 10px; color: var(--ink-faint); }
 
 /* ── empty state (center invite) ───────────────────────────────────────────*/
 .wd-empty {

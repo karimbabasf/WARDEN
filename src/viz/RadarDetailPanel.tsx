@@ -37,6 +37,34 @@ const STATUS_LABEL: Record<RadarAgent['status'], string> = {
   closed: 'Closed',
 };
 
+/**
+ * Relative-time stamp for the activity feed ("5m ago"), computed against `now`
+ * (injectable so it is pure + testable). Tolerant of an unparseable/missing ts:
+ * returns '' rather than ever rendering NaN — the feed simply omits the time then.
+ */
+export function relativeTime(ts: string, now: number = Date.now()): string {
+  const t = Date.parse(ts);
+  if (!Number.isFinite(t)) return '';
+  const sec = Math.max(0, Math.round((now - t) / 1000));
+  if (sec < 5) return 'just now';
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
+}
+
+/** Per-kind glyph + readable word (colour is never the only signal). */
+const ACTIVITY_KIND: Record<string, { glyph: string; label: string }> = {
+  tool: { glyph: '⚙', label: 'Tool' },
+  message: { glyph: '✎', label: 'Message' },
+  thinking: { glyph: '✶', label: 'Thinking' },
+};
+function activityKind(kind: string): { glyph: string; label: string } {
+  return ACTIVITY_KIND[kind] ?? { glyph: '•', label: kind || 'Event' };
+}
+
 // ── one stacked composition bar ────────────────────────────────────────────────
 type Segment = { key: string; label: string; value: number; color: string };
 
@@ -142,6 +170,50 @@ function ContextSection({ agent }: { agent: RadarAgent }) {
   );
 }
 
+// ── Section 2: live activity feed (Task 20) ────────────────────────────────────
+const ACTIVITY_CAP = 8;
+
+function ActivitySection({ agent }: { agent: RadarAgent }) {
+  // Newest-first. Sort by parsed ts desc; entries with an unparseable ts keep
+  // their original order and sink to the end (stable, never throws on bad data).
+  const ordered = agent.recentActivity
+    .map((a, i) => ({ a, i, t: Date.parse(a.ts) }))
+    .sort((x, y) => {
+      const xt = Number.isFinite(x.t) ? x.t : -Infinity;
+      const yt = Number.isFinite(y.t) ? y.t : -Infinity;
+      return yt - xt || x.i - y.i;
+    })
+    .slice(0, ACTIVITY_CAP);
+
+  return (
+    <section className="wd-radar-section wd-radar-activity" data-section="activity">
+      <div className="wd-card-kicker">Activity</div>
+      {ordered.length === 0 ? (
+        <div className="wd-radar-empty wd-radar-feed-empty">No recent activity</div>
+      ) : (
+        <ul className="wd-radar-feed">
+          {ordered.map(({ a, i }) => {
+            const k = activityKind(a.kind);
+            const rel = relativeTime(a.ts);
+            return (
+              <li key={`${a.ts}-${i}`} className="wd-radar-feed-row" data-activity-row data-kind={a.kind}>
+                <span className={`wd-radar-feed-glyph is-${a.kind}`} title={k.label} aria-hidden>
+                  {k.glyph}
+                </span>
+                <span className="wd-radar-feed-label">
+                  <span className="wd-radar-feed-kind">{k.label}</span>
+                  {a.label}
+                </span>
+                {rel ? <time className="wd-radar-feed-time">{rel}</time> : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 export type RadarDetailPanelProps = {
   agent: RadarAgent;
   onClose?: () => void;
@@ -177,6 +249,7 @@ export function RadarDetailPanel({ agent, onClose }: RadarDetailPanelProps) {
       </div>
 
       <ContextSection agent={agent} />
+      <ActivitySection agent={agent} />
     </aside>
   );
 }
