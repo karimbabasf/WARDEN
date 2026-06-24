@@ -20,3 +20,11 @@ status.sh
 /warden-*.png
 /*stars*.png
 /star-check-*.png
+
+# dev screenshots and standalone test artifacts
+/habits-agentcore.png
+/radar-bg-fixed.png
+/radar-empty-state.png
+/warp-flight.png
+/warp-streaks.png
+/radar-real.html

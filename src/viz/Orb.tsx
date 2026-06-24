@@ -17,6 +17,7 @@ import { Wireframe } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode } from './orbTypes';
 import { harnessTheme, severityColor } from './harnessTheme';
+import { AgentCore } from './AgentCore';
 
 const WHITE = new THREE.Color('#ffffff');
 
@@ -239,6 +240,11 @@ export function Orb({
           />
         </mesh>
       </group>
+
+      {/* orchestrator signature — only the agent hubs (Claude/Codex) wear the gyro
+          cradle + brand heart, so they read as the things RUNNING the habit orbs
+          they tether out to, never as just another bigger lattice. */}
+      {isHub && <AgentCore harness={node.harness} color={color} dimmed={dimmed} active={selected || hovered} />}
     </group>
   );
 }

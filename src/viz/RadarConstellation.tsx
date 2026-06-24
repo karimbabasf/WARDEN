@@ -16,12 +16,15 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
-import { Sparkles, Stars, Environment, Lightformer, Wireframe, Html } from '@react-three/drei';
+import { Environment, Lightformer, Wireframe, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode, OrbLayout } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 import { layoutRadarScene } from './radarLayout';
 import { radarHarness, heatColor } from './radarTheme';
+import { AgentCore } from './AgentCore';
+import { StarCatalog } from './StarCatalog';
+import { FoldGroup } from './Transition';
 import { CameraRig } from './CameraRig';
 import { frameloopFor } from './WarRoom';
 import { reconcileLifecycle, pruneGone, isVisible, type LifecycleMap, type LiveId } from './radarLifecycle';
@@ -275,6 +278,13 @@ function RadarGlobe({
           />
         </mesh>
       </group>
+
+      {/* orchestrator signature — a ROOT agent (depth 0) is the one spawning the
+          orbiting subagent moons, so it wears the same gyro cradle + brand heart as
+          its Habits hub. Subagents stay bare lattices. Heat-coloured to match. */}
+      {isRoot && (
+        <AgentCore harness={agent.harness} color={color} dimmed={dimmed} active={selected || hovered} />
+      )}
     </group>
   );
 }
@@ -407,6 +417,8 @@ export type RadarConstellationProps = {
   model: RadarSceneModel;
   hoveredId: string | null;
   selectedId: string | null;
+  /** Live fold scale for the constellation swap (1 = at rest). Omitted in the dev harness. */
+  scaleRef?: { current: number };
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -488,15 +500,15 @@ function RadarHoverLayer({ node, suppressed }: { node: LayoutNode | null; suppre
   );
 }
 
-// The scene body (lights + space + nodes). Pulled out so it can sit inside the
-// shared <Canvas> in WarRoom OR a standalone <Canvas> in the dev harness.
-export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
-  const { gl } = useThree();
-  useEffect(() => {
-    gl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    gl.toneMapping = THREE.ACESFilmicToneMapping;
-    gl.toneMappingExposure = 1.05;
-  }, [gl]);
+// The DATA forest only — live globes, parent→child links, lifecycle + hover, wrapped
+// in the fold group. It carries NO background/lights/camera/post: those live once in
+// the persistent scene shell (WarRoom's SceneShell), so a Habits↔Radar swap only ever
+// remounts this forest (already folded to nothing) and the void never flickers. The
+// standalone dev harness wraps this in `RadarSceneBody`, which adds its own shell.
+export function RadarForest({ model, hoveredId, selectedId, scaleRef, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
+  // The dev harness mounts the radar without a fold; default to a stable scale-1 ref.
+  const fallbackScale = useRef(1);
+  const sref = scaleRef ?? fallbackScale;
 
   const layout = useMemo(() => layoutRadarScene(model), [model]);
 
@@ -546,7 +558,6 @@ export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [layout, ghostNodes, renderTick],
   );
-  const selectedNode = useMemo(() => layout.nodes.find((n) => n.id === selectedId) ?? null, [layout, selectedId]);
   // Pin the hover card to whichever globe is currently rendered (live or a
   // still-imploding ghost) so it tracks the node even mid-lifecycle.
   const hoveredNode = useMemo(
@@ -556,8 +567,59 @@ export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave,
 
   return (
     <>
+      <LifecycleDriver
+        live={live}
+        mapRef={lifecycleRef}
+        goneIdsRef={goneIdsRef}
+        onRenderSetChange={() => setRenderTick((v) => v + 1)}
+      />
+
+      {/* The whole forest folds as one on a tab swap (Transition.tsx). */}
+      <FoldGroup scaleRef={sref}>
+        <group onPointerMissed={onClear}>
+          <RadarLinks layout={layout} lifecycleRef={lifecycleRef} />
+          {renderNodes.map((node) => (
+            <RadarGlobe
+              key={node.id}
+              node={node}
+              selected={selectedId === node.id}
+              hovered={hoveredId === node.id}
+              dimmed={Boolean(selectedId && selectedId !== node.id)}
+              lifecycleRef={lifecycleRef}
+              onHover={onHover}
+              onLeave={onLeave}
+              onSelect={onSelect}
+            />
+          ))}
+        </group>
+
+        <RadarHoverLayer node={hoveredNode} suppressed={Boolean(hoveredId && hoveredId === selectedId)} />
+      </FoldGroup>
+    </>
+  );
+}
+
+// The full radar scene body (shell + forest) — used ONLY by the standalone dev
+// harness `<Canvas>`. In the live app the forest renders inside WarRoom's shared
+// SceneShell instead (so the void persists across the Habits↔Radar swap).
+export function RadarSceneBody(props: RadarConstellationProps) {
+  const { gl } = useThree();
+  useEffect(() => {
+    gl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    gl.toneMapping = THREE.ACESFilmicToneMapping;
+    gl.toneMappingExposure = 1.05;
+  }, [gl]);
+
+  const layout = useMemo(() => layoutRadarScene(props.model), [props.model]);
+  const selectedNode = useMemo(
+    () => layout.nodes.find((n) => n.id === props.selectedId) ?? null,
+    [layout, props.selectedId],
+  );
+
+  return (
+    <>
       <color attach="background" args={[BG]} />
-      <fogExp2 attach="fog" args={[BG, 0.012]} />
+      <fogExp2 attach="fog" args={[BG, 0.014]} />
 
       <ambientLight intensity={0.1} />
       <directionalLight position={[5, 6, 4]} intensity={2.2} color="#e6fff0" />
@@ -569,35 +631,10 @@ export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave,
         <Lightformer form="ring" intensity={1.2} color="#ffffff" position={[2, 4, 2]} scale={[2, 2, 1]} />
       </Environment>
 
-      <Stars radius={36} depth={48} count={3800} factor={5} saturation={0} fade speed={0.08} />
-      <Sparkles count={40} scale={[28, 16, 26]} size={1.4} speed={0.05} opacity={0.22} color="#d8c8ff" />
-
-      <LifecycleDriver
-        live={live}
-        mapRef={lifecycleRef}
-        goneIdsRef={goneIdsRef}
-        onRenderSetChange={() => setRenderTick((v) => v + 1)}
-      />
+      <StarCatalog />
       <CameraRig selected={selectedNode} />
 
-      <group onPointerMissed={onClear}>
-        <RadarLinks layout={layout} lifecycleRef={lifecycleRef} />
-        {renderNodes.map((node) => (
-          <RadarGlobe
-            key={node.id}
-            node={node}
-            selected={selectedId === node.id}
-            hovered={hoveredId === node.id}
-            dimmed={Boolean(selectedId && selectedId !== node.id)}
-            lifecycleRef={lifecycleRef}
-            onHover={onHover}
-            onLeave={onLeave}
-            onSelect={onSelect}
-          />
-        ))}
-      </group>
-
-      <RadarHoverLayer node={hoveredNode} suppressed={Boolean(hoveredId && hoveredId === selectedId)} />
+      <RadarForest {...props} />
 
       <EffectComposer multisampling={4}>
         <Bloom intensity={0.95} luminanceThreshold={0.26} luminanceSmoothing={0.95} mipmapBlur radius={0.74} />

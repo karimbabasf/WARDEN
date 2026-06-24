@@ -58,14 +58,14 @@ export function radarRadius(contextTokens: number, depth: number): number {
 // collide. A floor keeps a lone/duo root from sitting on the origin awkwardly.
 function rootRingRadius(count: number, maxRootR: number): number {
   if (count <= 1) return 0;
-  const circumferenceNeed = (count * (maxRootR * 2 + 2.6)) / (2 * Math.PI);
-  return Math.max(3.2, circumferenceNeed);
+  const circumferenceNeed = (count * (maxRootR * 2 + 3.4)) / (2 * Math.PI);
+  return Math.max(4.0, circumferenceNeed);
 }
 
 // A child's orbit radius around its parent — scaled by the parent's size and the
 // child's depth so deeper moons hug tighter. Bounded to keep the tree compact.
 function orbitRadius(parentRadius: number, childDepth: number): number {
-  const base = parentRadius + 1.1;
+  const base = parentRadius + 1.5;
   const shrink = Math.max(0.5, 1 - (childDepth - 1) * 0.22);
   return base * shrink;
 }

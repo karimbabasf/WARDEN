@@ -169,40 +169,68 @@ function PipelineRail({ scene, running }: { scene: SceneState; running: boolean 
   );
 }
 
-// ── legend: harness identity + severity ramp (colour always with glyph+label) ─
-function Legend({ model }: { model: OrbSceneModel }) {
+// ── bottom status deck: a READ-ONLY instrument readout ───────────────────────
+// Harnesses present · live telemetry (habits/agents/sessions/events/findings) ·
+// the severity ramp · a "watching" pulse. There are no inputs — the conversational
+// "ask WARDEN" surface is a separate chat interface, added later. pointer-events
+// are off in CSS so the deck never intercepts the orbit camera. Honest-viz: every
+// figure is a real field (counts fall back to "—" rather than fabricating).
+function StatusDeck({ scene, model }: { scene: SceneState; model: OrbSceneModel }) {
+  const p = scene.profile;
   const agents = model.agents.length
     ? model.agents
     : [{ id: 'unknown', harness: 'unknown', label: 'Unknown', glyph: '●', color: '#76ff9d', sessions: 0, eventCount: 0, totalLoad: 0 }];
+  const habits = model.issues.length;
   const ramp: Array<[string, number]> = [
     ['low', 2],
     ['watch', 3],
     ['high', 4],
     ['critical', 5],
   ];
+  const phaseLabel = scene.running ? 'scanning' : scene.phase === 'reveal' ? 'diagnosis ready' : 'watching';
   return (
-    <div className="wd-legend">
-      <div className="wd-legend-group">
+    <div className="wd-deck" role="status" aria-label="WARDEN status">
+      <div className="wd-deck-group">
         {agents.map((a) => {
           const t = harnessTheme(a.harness);
           return (
-            <span className="wd-legend-item" key={a.id}>
-              <span className="wd-legend-glyph" style={{ color: t.color }}>{t.glyph}</span>
+            <span className="wd-deck-harness" key={a.id} style={{ '--harness': t.color } as CSSProperties}>
+              <span className="wd-deck-glyph" aria-hidden="true">{t.glyph}</span>
               {t.label}
             </span>
           );
         })}
       </div>
-      <div className="wd-legend-group wd-legend-ramp" aria-label="severity ramp">
-        <span className="wd-legend-key">severity</span>
+      <span className="wd-deck-div" aria-hidden="true" />
+      <div className="wd-deck-group wd-deck-stats">
+        <DeckStat value={String(habits)} label={habits === 1 ? 'habit' : 'habits'} />
+        <DeckStat value={String(model.agents.length)} label={model.agents.length === 1 ? 'agent' : 'agents'} />
+        <DeckStat value={fmtCount(p?.sessions)} label="sessions" />
+        <DeckStat value={fmtCount(p?.events)} label="events" />
+        <DeckStat value={fmtCount(p?.findings)} label="findings" />
+      </div>
+      <span className="wd-deck-div" aria-hidden="true" />
+      <div className="wd-deck-group wd-deck-ramp" aria-label="severity ramp">
+        <span className="wd-deck-ramp-key">severity</span>
         {ramp.map(([label, sev]) => (
-          <span className="wd-ramp-step" key={label} title={label}>
-            <span className="wd-ramp-swatch" style={{ background: severityColor(sev) }} />
-            {label}
-          </span>
+          <span className="wd-deck-swatch" key={label} title={label} style={{ background: severityColor(sev) }} />
         ))}
       </div>
+      <span className="wd-deck-div" aria-hidden="true" />
+      <div className="wd-deck-group wd-deck-live">
+        <span className={`wd-deck-pulse${scene.running ? ' is-live' : ''}`} aria-hidden="true" />
+        <span className="wd-deck-phase">{phaseLabel}</span>
+      </div>
     </div>
+  );
+}
+
+function DeckStat({ value, label }: { value: string; label: string }) {
+  return (
+    <span className="wd-deck-stat">
+      <span className="wd-deck-stat-val">{value}</span>
+      <span className="wd-deck-stat-key">{label}</span>
+    </span>
   );
 }
 
@@ -382,12 +410,12 @@ export function Chrome({
   onClearSelection: () => void;
   onDismiss: () => void;
 }) {
-  // The top HUD + bottom ask bar are intentionally not rendered — that chrome is
-  // being redesigned. Their components stay defined (Hud/Console/EmptyState) and
-  // the data/handlers stay wired so the replacement drops straight in.
+  // The bottom is a read-only StatusDeck (no inputs). The top HUD + conversational
+  // ask bar are intentionally not rendered yet — Hud/Console/EmptyState stay
+  // defined and wired so the later chat interface drops straight in.
   return (
     <div className="wd-chrome">
-      <Legend model={model} />
+      <StatusDeck scene={scene} model={model} />
 
       <div className={`wd-inspector ${selectedNode || hoveredNode ? 'is-open' : ''}`}>
         {selectedNode ? (

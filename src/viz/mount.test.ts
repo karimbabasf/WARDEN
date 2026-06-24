@@ -87,3 +87,32 @@ describe('activeFor — the war-room wakes on daemon summon OR a visible page', 
     expect(frameloopFor(!activeFor(false, true))).toBe('never');
   });
 });
+
+describe('activeFor — an unfocused dev surface pauses (stop rendering what nobody watches)', () => {
+  it('pauses a visible, unsummoned page when the window is blurred', () => {
+    // Dev iteration: the dev-viz tab/window is visible but you are typing in your
+    // IDE. With no daemon summon, visibility alone keeps the 60fps loop alive — and
+    // a blurred window means nobody is looking, so the heavy render must halt.
+    expect(activeFor(false, false, true)).toBe(false);
+    expect(frameloopFor(!activeFor(false, false, true))).toBe('never');
+  });
+
+  it('runs a visible, unsummoned page while the window is focused', () => {
+    expect(activeFor(false, false, false)).toBe(true);
+    expect(frameloopFor(!activeFor(false, false, false))).toBe('always');
+  });
+
+  it('keeps a summoned overlay running even when blurred (prod summon is focus-independent)', () => {
+    // The packaged overlay never steals focus ("focus": false in tauri.conf) and
+    // dismisses on blur on its own; while summoned, the render must NOT hinge on
+    // focus, or the live war-room would blank the instant it appears.
+    expect(activeFor(true, true, true)).toBe(true);
+    expect(activeFor(true, false, true)).toBe(true);
+  });
+
+  it('defaults to focused when the blur flag is omitted (back-compat with the 2-arg calls)', () => {
+    expect(activeFor(false, false)).toBe(true);
+    expect(activeFor(undefined, false)).toBe(true);
+    expect(activeFor(false, true)).toBe(false);
+  });
+});

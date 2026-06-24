@@ -10,24 +10,37 @@ function hubRadius(load: number): number {
   return 0.55 + Math.min(0.42, Math.sqrt(Math.max(0, load)) * 0.09);
 }
 
-// DYNAMIC spacing: the satellite ring grows with the issue count so orbs never
-// crowd — there must be enough circumference for each orb plus a clear gap. A
-// sensible floor keeps small clusters from collapsing onto the hub.
-function ringRadius(count: number, maxIssueR: number): number {
-  if (count <= 1) return 1.5;
-  const circumferenceNeed = (count * (maxIssueR * 2 + 0.55)) / (2 * Math.PI);
-  return Math.max(1.6, circumferenceNeed + maxIssueR * 0.5);
+// Golden angle — the azimuth step of a Fibonacci sphere, the most even way to
+// scatter N points over a sphere without them lining up or clumping.
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+// Shell radius so N issues, Fibonacci-spread, keep a clear gap between orbs. The
+// nearest-neighbour spacing on a Fibonacci sphere is ≈ R·3.09/√N, so we invert
+// that for the smallest R that guarantees surface-to-surface clearance. It grows
+// with √N — a busy agent simply gets a bigger sphere, never a crowded one — and
+// is floored so issues always clear the hub globe at the centre.
+function shellRadius(count: number, maxIssueR: number, hubR: number): number {
+  const clearance = hubR + maxIssueR + 0.9;
+  if (count <= 1) return Math.max(1.9, clearance);
+  const need = maxIssueR * 2 + 0.9; // wanted gap between two neighbouring orbs
+  const fromSpacing = (need * Math.sqrt(count)) / 2.3; // invert R·3.09/√N, with safety
+  return Math.max(2.0, clearance, fromSpacing);
 }
 
-// Satellites sit on a tilted ring. Starting at 12 o'clock and going clockwise,
-// combined with a severity-desc sort, puts the worst issues up top so the spread
-// reads the same way every time.
-function satellitePosition(center: Vec3, index: number, total: number, ring: number): Vec3 {
-  const angle = -Math.PI / 2 + (index / Math.max(1, total)) * Math.PI * 2;
+// Fibonacci-sphere placement. Issues arrive worst-first, so index 0 lands at the
+// top of the shell and index N-1 at the bottom: severity maps straight to
+// latitude (critical up top, calm below), same-severity issues share a band, and
+// the golden-angle azimuth fans every issue a different way in true 3D — never
+// one flat plane.
+function shellPosition(center: Vec3, index: number, total: number, R: number): Vec3 {
+  const denom = Math.max(1, total);
+  const y = 1 - ((index + 0.5) / denom) * 2; // +1 (top) .. -1 (bottom)
+  const rXZ = Math.sqrt(Math.max(0, 1 - y * y));
+  const theta = GOLDEN_ANGLE * index;
   return {
-    x: center.x + Math.cos(angle) * ring,
-    y: center.y + Math.sin(angle) * ring * 0.62,
-    z: center.z + Math.sin(angle) * ring * 0.5,
+    x: center.x + R * Math.cos(theta) * rXZ,
+    y: center.y + R * y,
+    z: center.z + R * Math.sin(theta) * rXZ,
   };
 }
 
@@ -41,14 +54,14 @@ export function layoutOrbScene(scene: OrbSceneModel): OrbLayout {
       .filter((i) => i.agentId === agent.id)
       .sort((a, b) => b.severity - a.severity || b.count - a.count || a.id.localeCompare(b.id));
     const maxIssueR = issues.reduce((m, i) => Math.max(m, radiusFromCount(i.count)), 0.4);
-    const ring = ringRadius(issues.length, maxIssueR);
-    const extent = (issues.length ? ring : hubRadius(agent.totalLoad)) + maxIssueR + 0.4;
-    return { agent, issues, ring, extent };
+    const shell = shellRadius(issues.length, maxIssueR, hubRadius(agent.totalLoad));
+    const extent = (issues.length ? shell : hubRadius(agent.totalLoad)) + maxIssueR + 0.6;
+    return { agent, issues, shell, extent };
   });
 
   // Pass 2 — lay clusters out left→right, each separated by its OWN extent (plus
   // a gap), so two busy clusters can never overlap however many issues they hold.
-  const GAP = 1.6;
+  const GAP = 2.4;
   const totalWidth = clusters.reduce((sum, c) => sum + c.extent * 2, 0) + GAP * Math.max(0, clusters.length - 1);
   let cursor = -totalWidth / 2;
 
@@ -73,7 +86,7 @@ export function layoutOrbScene(scene: OrbSceneModel): OrbLayout {
       nodes.push({
         id: issue.id,
         kind: 'issue',
-        position: satellitePosition(center, index, c.issues.length, c.ring),
+        position: shellPosition(center, index, c.issues.length, c.shell),
         radius: radiusFromCount(issue.count),
         agentId: c.agent.id,
         harness: issue.harness,

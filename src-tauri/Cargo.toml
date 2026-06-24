@@ -48,3 +48,13 @@ walkdir = "2.5"
 
 [dev-dependencies]
 tempfile = "3.23"
+
+# `pnpm tauri dev` builds WARDEN in the debug profile. The CPU-hot dev-time paths
+# — walkdir over the Codex roots, serde_json transcript parsing, rusqlite/FTS5,
+# notify, tiktoken — all live in DEPENDENCIES. Compiling those with optimizations
+# (while keeping our own crate at opt-level 0 so incremental rebuilds stay fast)
+# sharply cuts dev-mode backend CPU with zero effect on the shipped release build.
+# One-time cost: the first dependency compile after this change is slower, then
+# cached. Our crate (`warden`/`warden_lib`) is intentionally left unoptimized here.
+[profile.dev.package."*"]
+opt-level = 2

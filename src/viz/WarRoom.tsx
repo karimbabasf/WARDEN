@@ -11,9 +11,9 @@
 // and off-Fugu runs degrade gracefully (no fabricated counts, verdicts or costs).
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Canvas, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
-import { Environment, Lightformer, Html, Billboard } from '@react-three/drei';
+import { Environment, Lightformer, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { invoke } from '@tauri-apps/api/core';
 import type { Bridge, SceneState } from './bridge';
@@ -22,14 +22,15 @@ import { layoutOrbScene } from './orbLayout';
 import type { LayoutNode, OrbIssue, OrbLayout, OrbSceneModel } from './orbTypes';
 import { Orb } from './Orb';
 import { StarCatalog } from './StarCatalog';
+import { ConstellationWeb } from './Constellation';
 import { CameraRig } from './CameraRig';
 import { Chrome, type FixPreview } from './chrome';
 import type { RevealFinding } from './compositions/Reveal';
 import { NavBar, type ConstellationTab } from './NavBar';
-import { RadarSceneBody } from './RadarConstellation';
+import { RadarForest } from './RadarConstellation';
 import { RadarDetailPanel } from './RadarDetailPanel';
 import { layoutRadarScene, isFlatAgent } from './radarLayout';
-import { crossfadeFactor, crossfadeOverlay } from './radarLifecycle';
+import { TransitionDriver, FoldGroup, makeTransition, beginTransition } from './Transition';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 
 const PlayerHost = lazy(() => import('./PlayerHost'));
@@ -40,8 +41,20 @@ export function frameloopFor(hidden: boolean): 'always' | 'never' {
   return hidden ? 'never' : 'always';
 }
 
-export function activeFor(summoned: boolean | undefined, visHidden: boolean): boolean {
-  return Boolean(summoned) || !visHidden;
+// The render loop should run when the daemon summoned the overlay (prod) OR the
+// page is genuinely being watched — visible AND focused. `blurred` defaults to
+// false so the existing 2-arg call sites keep their old meaning. The focus gate
+// is what stops the heavy 60fps war-room from rendering while you sit in your IDE
+// during `pnpm tauri dev` (the dev surface is visible but unwatched). A `summoned`
+// overlay stays active regardless of focus: the packaged window never takes focus
+// ("focus": false) and dismisses on blur on its own, so its render must not hinge
+// on it.
+export function activeFor(
+  summoned: boolean | undefined,
+  visHidden: boolean,
+  blurred = false,
+): boolean {
+  return Boolean(summoned) || (!visHidden && !blurred);
 }
 
 function humanisePattern(patternId: string): string {
@@ -99,139 +112,6 @@ function fallbackOrbScene(scene: SceneState): OrbSceneModel {
   };
 }
 
-// soft round sprite for the travelling link dots
-let linkDotCache: THREE.Texture | null = null;
-function linkDotTexture(): THREE.Texture {
-  if (linkDotCache) return linkDotCache;
-  const s = 48;
-  const c = document.createElement('canvas');
-  c.width = c.height = s;
-  const ctx = c.getContext('2d')!;
-  const g = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
-  g.addColorStop(0, 'rgba(255,255,255,1)');
-  g.addColorStop(0.4, 'rgba(255,255,255,0.75)');
-  g.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, s, s);
-  linkDotCache = new THREE.CanvasTexture(c);
-  linkDotCache.needsUpdate = true;
-  return linkDotCache;
-}
-
-// ── links: faint harness-tinted lines + an energy dot flowing issue → hub, so
-// every issue visibly belongs to its agent (the grouping cue, since the orbs
-// themselves are severity-coloured). ─────────────────────────────────────────
-function AnimatedLinks({ layout }: { layout: OrbLayout }) {
-  const byId = useMemo(() => new Map(layout.nodes.map((n) => [n.id, n])), [layout]);
-  const links = useMemo(() => layout.links.filter((l) => byId.has(l.source) && byId.has(l.target)), [layout, byId]);
-
-  const lineGeo = useMemo(() => {
-    const positions = new Float32Array(links.length * 6);
-    const colors = new Float32Array(links.length * 6);
-    links.forEach((link, i) => {
-      const hub = byId.get(link.source)!;
-      const iss = byId.get(link.target)!;
-      positions.set([hub.position.x, hub.position.y, hub.position.z, iss.position.x, iss.position.y, iss.position.z], i * 6);
-      const c = new THREE.Color(harnessTheme(hub.harness).color);
-      colors.set([c.r, c.g, c.b, c.r * 0.45, c.g * 0.45, c.b * 0.45], i * 6);
-    });
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    return g;
-  }, [links, byId]);
-
-  const dotGeo = useMemo(() => {
-    const positions = new Float32Array(links.length * 3);
-    const colors = new Float32Array(links.length * 3);
-    links.forEach((link, i) => {
-      const c = new THREE.Color(harnessTheme(byId.get(link.source)!.harness).color);
-      colors.set([c.r, c.g, c.b], i * 3);
-    });
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    return g;
-  }, [links, byId]);
-
-  const meta = useMemo(
-    () => links.map((link, i) => ({ hub: byId.get(link.source)!.position, iss: byId.get(link.target)!.position, phase: (i * 0.37) % 1 })),
-    [links, byId],
-  );
-
-  const lineMat = useRef<THREE.LineBasicMaterial>(null);
-  const dotTex = useMemo(() => linkDotTexture(), []);
-
-  useEffect(() => () => { lineGeo.dispose(); dotGeo.dispose(); }, [lineGeo, dotGeo]);
-
-  useFrame((state) => {
-    const t = state.clock.elapsedTime;
-    const attr = dotGeo.getAttribute('position') as THREE.BufferAttribute;
-    for (let i = 0; i < meta.length; i++) {
-      const m = meta[i];
-      const tt = (t * 0.4 + m.phase) % 1; // issue → hub
-      attr.setXYZ(
-        i,
-        m.iss.x + (m.hub.x - m.iss.x) * tt,
-        m.iss.y + (m.hub.y - m.iss.y) * tt,
-        m.iss.z + (m.hub.z - m.iss.z) * tt,
-      );
-    }
-    attr.needsUpdate = true;
-    if (lineMat.current) lineMat.current.opacity = 0.22 + Math.sin(t * 1.4) * 0.05;
-  });
-
-  if (links.length === 0) return null;
-  return (
-    <group>
-      <lineSegments geometry={lineGeo}>
-        <lineBasicMaterial ref={lineMat} vertexColors transparent opacity={0.24} toneMapped={false} blending={THREE.AdditiveBlending} />
-      </lineSegments>
-      <points geometry={dotGeo}>
-        <pointsMaterial
-          vertexColors
-          size={0.17}
-          map={dotTex}
-          transparent
-          opacity={0.95}
-          sizeAttenuation
-          depthWrite={false}
-          blending={THREE.AdditiveBlending}
-          toneMapped={false}
-        />
-      </points>
-    </group>
-  );
-}
-
-// Faint camera-facing ring bounding each agent's cluster — "everything inside
-// here is this agent" — sized to the cluster's dynamic extent.
-function TerritoryRings({ hubs }: { hubs: LayoutNode[] }) {
-  return (
-    <>
-      {hubs.map((h) => {
-        const r = h.territoryRadius ?? 2;
-        return (
-          <Billboard key={`terr-${h.id}`} position={[h.position.x, h.position.y, h.position.z]}>
-            <mesh>
-              <ringGeometry args={[r * 0.975, r, 96]} />
-              <meshBasicMaterial
-                color={harnessTheme(h.harness).color}
-                transparent
-                opacity={0.12}
-                side={THREE.DoubleSide}
-                depthWrite={false}
-                blending={THREE.AdditiveBlending}
-                toneMapped={false}
-              />
-            </mesh>
-          </Billboard>
-        );
-      })}
-    </>
-  );
-}
-
 // Harness name under each hub — the explicit "this is Claude / this is Codex".
 function HubLabels({ hubs }: { hubs: LayoutNode[] }) {
   return (
@@ -258,61 +138,39 @@ function HubLabels({ hubs }: { hubs: LayoutNode[] }) {
   );
 }
 
-function Scene({
+// The Habits DATA forest only (orbs + tethers + hub labels), wrapped in the fold
+// group. Carries no background/lights/camera/post — those live once in `SceneShell`
+// so the void persists across the Habits↔Radar swap (mirrors radar's RadarForest).
+function HabitsForest({
   layout,
-  selected,
   selectedId,
   hoveredId,
+  scaleRef,
   onHover,
   onLeave,
   onSelect,
   onClear,
 }: {
   layout: OrbLayout;
-  selected: LayoutNode | null;
   selectedId: string | null;
   hoveredId: string | null;
+  /** Live fold scale for the constellation swap (1 = at rest). */
+  scaleRef: { current: number };
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
   onClear: () => void;
 }) {
-  const { gl } = useThree();
-  useEffect(() => {
-    gl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    gl.toneMapping = THREE.ACESFilmicToneMapping;
-    gl.toneMappingExposure = 1.05;
-  }, [gl]);
-
-  const selectedAgent = selected?.agentId;
+  const selectedAgent = useMemo(
+    () => layout.nodes.find((n) => n.id === selectedId)?.agentId,
+    [layout, selectedId],
+  );
   const hubs = useMemo(() => layout.nodes.filter((n) => n.kind === 'hub'), [layout]);
 
   return (
-    <>
-      <color attach="background" args={[BG]} />
-      {/* light fog only — heavy fog was swallowing the entire starfield. */}
-      <fogExp2 attach="fog" args={[BG, 0.014]} />
-
-      {/* Lights sculpt only the crystal gem hearts (the cages/nodes are unlit
-          emissive); the Environment probe gives each facet its glint. */}
-      <ambientLight intensity={0.1} />
-      <directionalLight position={[5, 6, 4]} intensity={2.2} color="#e6fff0" />
-      <directionalLight position={[-6, -1, -2]} intensity={0.7} color="#9fd0ff" />
-      <Environment resolution={128}>
-        <Lightformer form="rect" intensity={1.8} color="#bfffe0" position={[-5, 3, -3]} scale={[7, 7, 1]} />
-        <Lightformer form="rect" intensity={1.3} color="#3dffa0" position={[5, 1, -4]} scale={[6, 6, 1]} />
-        <Lightformer form="ring" intensity={1.2} color="#cfe9d8" position={[2, 4, 2]} scale={[2, 2, 1]} />
-      </Environment>
-
-      {/* Deep multi-layer star catalog — fine, dense, glacially drifting, and
-          deliberately subordinate so the data reads first (see StarCatalog.tsx). */}
-      <StarCatalog />
-
-      <CameraRig selected={selected} />
-
+    <FoldGroup scaleRef={scaleRef}>
       <group onPointerMissed={onClear}>
-        <TerritoryRings hubs={hubs} />
-        <AnimatedLinks layout={layout} />
+        <ConstellationWeb layout={layout} />
         {layout.nodes.map((node, i) => (
           <Orb
             key={node.id}
@@ -328,12 +186,106 @@ function Scene({
         ))}
       </group>
       <HubLabels hubs={hubs} />
+    </FoldGroup>
+  );
+}
+
+// The persistent scene shell — the SINGLE always-mounted void (background, fog,
+// lights, Environment, starfield, the shared free-orbit CameraRig and the post
+// stack). It is rendered UNCONDITIONALLY by WarRoom, so a Habits↔Radar tab swap
+// only ever changes the ONE forest child slot (already folded to nothing at the
+// swap); none of the void unmounts, so the whole app is one continuous motion with
+// no flicker. The Environment carries formers for every harness hue (Claude-emerald,
+// Codex-violet, warm) so neither tab loses its glint.
+function SceneShell({
+  displayTab,
+  habitsLayout,
+  radarModel,
+  selected,
+  selectedId,
+  hoveredId,
+  scaleRef,
+  onHover,
+  onLeave,
+  onSelect,
+  onClear,
+}: {
+  displayTab: ConstellationTab;
+  habitsLayout: OrbLayout;
+  radarModel: RadarSceneModel;
+  selected: LayoutNode | null;
+  selectedId: string | null;
+  hoveredId: string | null;
+  scaleRef: { current: number };
+  onHover: (node: LayoutNode) => void;
+  onLeave: (node: LayoutNode) => void;
+  onSelect: (node: LayoutNode) => void;
+  onClear: () => void;
+}) {
+  const { gl } = useThree();
+  useEffect(() => {
+    gl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    gl.toneMapping = THREE.ACESFilmicToneMapping;
+    gl.toneMappingExposure = 1.05;
+  }, [gl]);
+
+  return (
+    <>
+      <color attach="background" args={[BG]} />
+      {/* light fog only — heavy fog was swallowing the entire starfield. */}
+      <fogExp2 attach="fog" args={[BG, 0.014]} />
+
+      {/* Lights sculpt only the crystal gem hearts (the cages/nodes are unlit
+          emissive); the Environment probe gives each facet its glint. */}
+      <ambientLight intensity={0.1} />
+      <directionalLight position={[5, 6, 4]} intensity={2.2} color="#e6fff0" />
+      <directionalLight position={[-6, -1, -2]} intensity={0.7} color="#9fd0ff" />
+      <Environment resolution={128}>
+        {/* one shared probe for both tabs — emerald, violet + warm formers so
+            Claude, Codex and the radar gems all glint without the void changing. */}
+        <Lightformer form="rect" intensity={1.7} color="#bfffe0" position={[-5, 3, -3]} scale={[7, 7, 1]} />
+        <Lightformer form="rect" intensity={1.3} color="#cab8ff" position={[5, 1, -4]} scale={[6, 6, 1]} />
+        <Lightformer form="rect" intensity={1.0} color="#ffd9b8" position={[0, -3, -4]} scale={[6, 4, 1]} />
+        <Lightformer form="ring" intensity={1.1} color="#ffffff" position={[2, 4, 2]} scale={[2, 2, 1]} />
+      </Environment>
+
+      {/* Deep multi-layer star catalog — fine, dense, glacially drifting, and
+          deliberately subordinate so the data reads first (see StarCatalog.tsx). */}
+      <StarCatalog />
+
+      <CameraRig selected={selected} />
+
+      {/* The ONLY thing that swaps on a tab change — folded to nothing at the swap
+          midpoint, then bloomed back. The shell around it never remounts. */}
+      {displayTab === 'radar' ? (
+        <RadarForest
+          model={radarModel}
+          selectedId={selectedId}
+          hoveredId={hoveredId}
+          scaleRef={scaleRef}
+          onHover={onHover}
+          onLeave={onLeave}
+          onSelect={onSelect}
+          onClear={onClear}
+        />
+      ) : (
+        <HabitsForest
+          layout={habitsLayout}
+          selectedId={selectedId}
+          hoveredId={hoveredId}
+          scaleRef={scaleRef}
+          onHover={onHover}
+          onLeave={onLeave}
+          onSelect={onSelect}
+          onClear={onClear}
+        />
+      )}
 
       {/* multisampling AA on the composer input stops the thin bright lattice
           lines from sub-pixel shimmering into the bloom pass (the flicker). High
           smoothing + a higher threshold keep the bloom stable + calm. */}
       <EffectComposer multisampling={4}>
-        <Bloom intensity={0.92} luminanceThreshold={0.28} luminanceSmoothing={0.95} mipmapBlur radius={0.74} />
+        <Bloom intensity={0.93} luminanceThreshold={0.27} luminanceSmoothing={0.95} mipmapBlur radius={0.74} />
         <Vignette eskil={false} offset={0.2} darkness={0.92} />
       </EffectComposer>
     </>
@@ -350,27 +302,36 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     clustered: 0,
   }));
   const [visHidden, setVisHidden] = useState(() => document.hidden);
+  // Twin of `visHidden`: true while the window is blurred (e.g. you alt-tabbed to
+  // your editor during `pnpm tauri dev`). Combined with `visHidden` it lets the
+  // Canvas pause the heavy render whenever nobody is actually watching the page.
+  const [blurred, setBlurred] = useState(() =>
+    typeof document.hasFocus === 'function' ? !document.hasFocus() : false,
+  );
+  // `tab` is the nav INTENT (the lit tab — flips instantly on click); `displayTab`
+  // is the constellation actually on screen, which only swaps at the PEAK of the
+  // hyperspace jump so the change happens hidden under the streaks.
   const [tab, setTab] = useState<ConstellationTab>('habits');
+  const [displayTab, setDisplayTab] = useState<ConstellationTab>('habits');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [fixPreview, setFixPreview] = useState<FixPreview | undefined>();
   const [loadingFix, setLoadingFix] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
-  const active = activeFor(scene.summoned, visHidden);
+  const active = activeFor(scene.summoned, visHidden, blurred);
   const introPlayed = useRef(!document.hidden);
   const [showIntro, setShowIntro] = useState(false);
 
-  // ── tab cross-fade (I-2 / spec §8) ─────────────────────────────────────────
-  // The single warm <Canvas> never remounts; on a Habits↔Radar switch its CONTENT
-  // swaps instantly, but a frozen frame of the OUTGOING constellation is held as a
-  // DOM layer on top and dissolved away (driven by the pure `crossfadeFactor` →
-  // `crossfadeOverlay`) so the eye sees a cross-fade, never a hard cut. Capturing a
-  // last frame needs the drawing buffer preserved (set on the Canvas `gl` below).
-  const glRef = useRef<THREE.WebGLRenderer | null>(null);
-  const [snapshot, setSnapshot] = useState<string | null>(null);
-  const [snapshotOpacity, setSnapshotOpacity] = useState(0);
-  const fadeRaf = useRef<number | null>(null);
-  const fadeProgress = useRef(1);
+  // ── tab fold transition (Radar spec §8 — nothing ever cuts) ─────────────────
+  // The single warm <Canvas> never remounts. On a Habits↔Radar switch the current
+  // constellation folds down to nothing, the content swaps at zero size, then the
+  // next blooms back out (Transition.tsx). `transitionRef` is the shared fold state
+  // the in-Canvas driver runs down each frame; `foldScale` is the live scale the
+  // constellation FoldGroups read; `pendingTab` is where we're headed (committed to
+  // the screen at the fold midpoint).
+  const transitionRef = useRef(makeTransition());
+  const foldScale = useRef(1);
+  const pendingTab = useRef<ConstellationTab>('habits');
 
   useEffect(() => bridge.subscribe(setScene), [bridge]);
 
@@ -387,15 +348,23 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
 
   useEffect(() => {
     const onVis = () => setVisHidden(document.hidden);
+    const onFocus = () => setBlurred(false);
+    const onBlur = () => setBlurred(true);
     document.addEventListener('visibilitychange', onVis);
-    return () => document.removeEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
   }, []);
 
   const model = useMemo(() => scene.orbScene ?? fallbackOrbScene(scene), [scene.orbScene, scene.candidates]);
   const layout = useMemo(() => layoutOrbScene(model), [model]);
   // Radar forest (live agents) — empty until the backend emits `radar_state`.
   const radarModel = useMemo<RadarSceneModel>(() => scene.radarScene ?? { agents: [], generatedAt: '' }, [scene.radarScene]);
-  const activeLayout = tab === 'radar' ? layoutRadarScene(radarModel) : layout;
+  const activeLayout = displayTab === 'radar' ? layoutRadarScene(radarModel) : layout;
   const selectedNode = useMemo(() => activeLayout.nodes.find((n) => n.id === selectedId) ?? null, [activeLayout, selectedId]);
   const hoveredNode = useMemo(() => activeLayout.nodes.find((n) => n.id === hoveredId) ?? null, [activeLayout, hoveredId]);
 
@@ -403,8 +372,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // (agents whose parentId === the selection). A flat agent yields []; the panel
   // then renders no roster (honest-viz — never a fabricated children list).
   const selectedRadarAgent = useMemo<RadarAgent | null>(
-    () => (tab === 'radar' && selectedId ? radarModel.agents.find((a) => a.id === selectedId) ?? null : null),
-    [tab, selectedId, radarModel],
+    () => (displayTab === 'radar' && selectedId ? radarModel.agents.find((a) => a.id === selectedId) ?? null : null),
+    [displayTab, selectedId, radarModel],
   );
   // A flat agent (VS Code Codex / unknown harness) yields [] even if a drifted
   // payload pointed a stray child at it — the roster mirrors the layout's flat-globe
@@ -420,7 +389,9 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const onHover = useCallback((node: LayoutNode) => setHoveredId(node.id), []);
   const onLeave = useCallback((node: LayoutNode) => setHoveredId((cur) => (cur === node.id ? null : cur)), []);
   const onSelect = useCallback((node: LayoutNode) => {
-    setSelectedId(node.id);
+    // Toggle: clicking the already-focused orb backs out, so when a globe fills the
+    // screen there's always an easy way to deselect (alongside empty-click + Esc).
+    setSelectedId((cur) => (cur === node.id ? null : node.id));
     setFixPreview(undefined);
   }, []);
   const onClear = useCallback(() => {
@@ -428,69 +399,72 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     setFixPreview(undefined);
   }, []);
 
+  // Esc backs out one level: while an orb is focused the first Esc deselects, and
+  // is swallowed (capture phase) before main.ts's global handler so the overlay
+  // stays open. With nothing selected this listener is inert and Esc falls through
+  // to the daemon dismiss exactly as before.
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        onClear();
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [selectedId, onClear]);
+
   // Roster jump-to: select a child agent by id, which dives the shared CameraRig
   // onto that globe (selectedId → selectedNode → focus) and re-points the panel.
   const onRadarJump = useCallback((id: string) => setSelectedId(id), []);
 
-  // Capture the current Canvas frame as a still, mount it as the cross-fade overlay
-  // at full opacity, then dissolve it to 0 over ~0.5s via the pure `crossfadeFactor`
-  // ramp. The Canvas content has already swapped to the incoming tab, so the still
-  // sits over the live new scene — a true cross-fade on one warm Canvas (spec §8).
-  const beginCrossfade = useCallback(() => {
-    const gl = glRef.current;
-    if (!gl) return;
-    let frame: string | null = null;
+  // ── live radar feed ─────────────────────────────────────────────────────────
+  // The backend watcher already pushes `radar_state` on every session-file change
+  // (main.ts → bridge), so the forest is always-on. But two cases the push model
+  // can't cover: a working→idle flip happens when NOTHING changes (the transcript's
+  // mtime simply crosses the threshold), and a cold open can predate any change. So
+  // while the radar is actually on screen we also PULL `get_radar_state` right away
+  // and on a light interval, keeping liveness honest. `invoke` rejects in the browser
+  // QA harness (no Tauri) → caught → the forest is left exactly as it was.
+  const fetchRadar = useCallback(async () => {
     try {
-      // preserveDrawingBuffer is on, so the last rendered frame is still readable.
-      frame = gl.domElement.toDataURL('image/png');
+      const rs = await invoke('get_radar_state');
+      bridge.ingest('radar_scene_ready', rs);
     } catch {
-      frame = null; // tainted/again-unavailable buffer → skip the fade, swap is instant
+      /* no backend (harness) or a transient error — never disturb the live forest */
     }
-    if (!frame) return;
+  }, [bridge]);
 
-    if (fadeRaf.current != null) cancelAnimationFrame(fadeRaf.current);
-    setSnapshot(frame);
-    setSnapshotOpacity(1);
-    fadeProgress.current = 0;
+  useEffect(() => {
+    if (displayTab !== 'radar' || !active) return;
+    fetchRadar(); // immediate on entering the radar / on summon
+    const id = window.setInterval(fetchRadar, 3000); // keep idle/working state current
+    return () => window.clearInterval(id);
+  }, [displayTab, active, fetchRadar]);
 
-    let last = performance.now();
-    const tick = (nowMs: number) => {
-      const dt = Math.min(0.05, Math.max(0, (nowMs - last) / 1000));
-      last = nowMs;
-      fadeProgress.current = crossfadeFactor(fadeProgress.current, 1, dt);
-      const overlay = crossfadeOverlay(fadeProgress.current);
-      setSnapshotOpacity(overlay.opacity);
-      if (overlay.mounted) {
-        fadeRaf.current = requestAnimationFrame(tick);
-      } else {
-        fadeRaf.current = null;
-        setSnapshot(null); // fully faded ⇒ drop the layer (no lingering still)
-      }
-    };
-    fadeRaf.current = requestAnimationFrame(tick);
-  }, []);
+  // The constellation on screen swaps at the FOLD MIDPOINT (folded to nothing), so
+  // the change is hidden at zero size — never a visible cut.
+  const onFoldMidpoint = useCallback(() => setDisplayTab(pendingTab.current), []);
+  // Fold landed — the driver has already cleared `transitionRef.active` and reset the
+  // scale to 1; selection/hover were reset at launch. Kept as a seam for arrival polish.
+  const onFoldDone = useCallback(() => {}, []);
 
   // Switching constellations clears the per-scene hover/selection (the two scenes
-  // have disjoint node-id spaces) so the inspector never points at a stale node,
-  // and kicks off the cross-fade from the outgoing scene's last frame.
-  const onTab = useCallback(
-    (next: ConstellationTab) => {
-      setTab((cur) => {
-        if (cur === next) return cur;
-        setSelectedId(null);
-        setHoveredId(null);
-        setFixPreview(undefined);
-        beginCrossfade();
-        return next;
-      });
-    },
-    [beginCrossfade],
-  );
-
-  // Cancel any in-flight fade loop on unmount (no rAF leak across overlay teardown).
-  useEffect(() => () => {
-    if (fadeRaf.current != null) cancelAnimationFrame(fadeRaf.current);
-  }, []);
+  // have disjoint node-id spaces) so no inspector points at a stale node, lights the
+  // target tab instantly, and starts the fold. A tab click mid-fold is ignored so the
+  // collapse→bloom always completes cleanly.
+  const onTab = useCallback((next: ConstellationTab) => {
+    if (transitionRef.current.active) return;
+    if (next === tab) return;
+    setSelectedId(null);
+    setHoveredId(null);
+    setFixPreview(undefined);
+    pendingTab.current = next;
+    setTab(next);
+    beginTransition(transitionRef);
+  }, [tab]);
 
   const onAsk = useCallback(
     async (query: string) => {
@@ -544,61 +518,43 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       <Canvas
         dpr={[1, 2]}
         frameloop={frameloopFor(!active)}
-        // preserveDrawingBuffer lets the tab cross-fade read the outgoing scene's
-        // last frame (gl.domElement.toDataURL) — the snapshot it dissolves away.
-        gl={{ antialias: true, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: true }}
-        onCreated={({ gl }) => {
-          glRef.current = gl;
-        }}
-        camera={{ position: [3.6, 2.4, 8.8], fov: 46, near: 0.1, far: 120 }}
+        gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
+        // Opens further back than before so the (now wider-spaced) constellation
+        // frames with room to breathe; |pos| ≈ CameraRig's OVERVIEW_DIST so the
+        // first frame already sits at rest. Both tabs share this one camera.
+        camera={{ position: [4.8, 3.2, 11.7], fov: 46, near: 0.1, far: 140 }}
       >
-        {tab === 'radar' ? (
-          <RadarSceneBody
-            model={radarModel}
-            selectedId={selectedId}
-            hoveredId={hoveredId}
-            onHover={onHover}
-            onLeave={onLeave}
-            onSelect={onSelect}
-            onClear={onClear}
-          />
-        ) : (
-          <Scene
-            layout={layout}
-            selected={selectedNode}
-            selectedId={selectedId}
-            hoveredId={hoveredId}
-            onHover={onHover}
-            onLeave={onLeave}
-            onSelect={onSelect}
-            onClear={onClear}
-          />
-        )}
+        {/* The fold driver — a sibling of the swapped scene so it survives the
+            mid-fold content swap and keeps running the collapse→bloom throughout. */}
+        <TransitionDriver
+          stateRef={transitionRef}
+          scaleRef={foldScale}
+          onMidpoint={onFoldMidpoint}
+          onDone={onFoldDone}
+        />
+
+        {/* One persistent shell; only its inner forest swaps on a tab change, so the
+            void never remounts — the whole app stays one continuous animation. */}
+        <SceneShell
+          displayTab={displayTab}
+          habitsLayout={layout}
+          radarModel={radarModel}
+          selected={selectedNode}
+          selectedId={selectedId}
+          hoveredId={hoveredId}
+          scaleRef={foldScale}
+          onHover={onHover}
+          onLeave={onLeave}
+          onSelect={onSelect}
+          onClear={onClear}
+        />
       </Canvas>
 
-      {/* Outgoing-constellation still, dissolving over the live incoming scene on a
-          tab switch (driven by the rAF cross-fade loop). pointer-events:none so it
-          never blocks the new scene; unmounted by the loop once fully faded. */}
-      {snapshot ? (
-        <img
-          className="wd-tab-crossfade"
-          src={snapshot}
-          alt=""
-          aria-hidden
-          style={{
-            position: 'fixed',
-            inset: 0,
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            pointerEvents: 'none',
-            zIndex: 2,
-            opacity: snapshotOpacity,
-          }}
-        />
-      ) : null}
-
-      <NavBar tab={tab} onTab={onTab} />
+      <NavBar
+        tab={tab}
+        onTab={onTab}
+        counts={{ habits: layout.nodes.filter((n) => n.kind === 'issue').length, radar: radarModel.agents.length }}
+      />
 
       {/* Chrome is the Habits inspector (keys off node.issue/agent). On the radar
           tab the live selection flows to RadarSceneBody via selectedId; the radar
@@ -607,8 +563,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       <Chrome
         scene={scene}
         model={model}
-        hoveredNode={tab === 'radar' ? null : hoveredNode}
-        selectedNode={tab === 'radar' ? null : selectedNode}
+        hoveredNode={displayTab === 'radar' ? null : hoveredNode}
+        selectedNode={displayTab === 'radar' ? null : selectedNode}
         running={Boolean(scene.running)}
         error={runError}
         fixPreview={fixPreview}
@@ -622,7 +578,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       {/* Radar detail panel — its own right-dock (the Chrome inspector is Habits-
           only). Opens when a radar globe is selected and the camera has dived in;
           the roster's jump-to flies to a child via onRadarJump (select + focus). */}
-      <div className={`wd-inspector wd-radar-dock ${tab === 'radar' && selectedRadarAgent ? 'is-open' : ''}`}>
+      <div className={`wd-inspector wd-radar-dock ${displayTab === 'radar' && selectedRadarAgent ? 'is-open' : ''}`}>
         {selectedRadarAgent ? (
           <RadarDetailPanel
             agent={selectedRadarAgent}
@@ -632,6 +588,16 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           />
         ) : null}
       </div>
+
+      {/* Honest empty state — the radar is live and watching, there's just nothing
+          running yet. Never reads as "broken": it says what to do to populate it. */}
+      {displayTab === 'radar' && radarModel.agents.length === 0 ? (
+        <div className="wd-radar-empty" aria-live="polite">
+          <span className="wd-radar-empty-pulse" aria-hidden />
+          <span className="wd-radar-empty-title">Watching for live agents</span>
+          <span className="wd-radar-empty-sub">Open Claude Code or Codex and your sessions appear here.</span>
+        </div>
+      ) : null}
 
       {showIntro && (
         <Suspense fallback={null}>

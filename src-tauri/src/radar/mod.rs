@@ -26,7 +26,7 @@ use composition::{
 };
 use liveness::{partition_claude, read_claude_registry};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// One agent (root or subagent) in the live forest — the frozen `radar_state`
@@ -160,27 +160,66 @@ pub fn assemble(
         .collect();
     let is_open = |id: &str| open.get(id).copied().unwrap_or(false);
 
-    // childCount per session id, counted over the OPEN set only (a closed child must
-    // not inflate an open parent's count).
-    let mut child_count: HashMap<String, u32> = HashMap::new();
-    for s in &sessions {
-        if !is_open(&s.id) {
-            continue;
+    // ── dedupe: one live session = one globe ────────────────────────────────────
+    // A long-running Claude session is re-ingested as SEVERAL store rows that share a
+    // single `external_id` (one row per compaction/segment). They are the same live
+    // agent, so the forest must show ONE globe — not one per row. Collapse each
+    // external_id group of OPEN sessions to a canonical row (the freshest: latest
+    // started_at, then ingested_at, then id for determinism) and remember the mapping
+    // so a child whose parent link points at a dropped row is re-pointed onto it.
+    let mut by_ext: HashMap<&str, Vec<&Session>> = HashMap::new();
+    for s in sessions.iter().filter(|s| is_open(&s.id)) {
+        by_ext.entry(s.external_id.as_str()).or_default().push(s);
+    }
+    let mut keep: HashSet<String> = HashSet::new();
+    let mut canonical: HashMap<String, String> = HashMap::new();
+    for group in by_ext.values() {
+        let chosen = group
+            .iter()
+            .copied()
+            .max_by(|a, b| {
+                a.started_at
+                    .cmp(&b.started_at)
+                    .then(a.ingested_at.cmp(&b.ingested_at))
+                    .then(a.id.cmp(&b.id))
+            })
+            .expect("group is non-empty");
+        keep.insert(chosen.id.clone());
+        for s in group {
+            canonical.insert(s.id.clone(), chosen.id.clone());
         }
-        if let Some(Some(p)) = parent_of.get(&s.id) {
+    }
+
+    // Parent map over the KEPT set, with dropped-duplicate parents remapped onto their
+    // canonical row (so a subagent linked to a collapsed root still nests under it).
+    let mut kept_parent: HashMap<String, Option<String>> = HashMap::new();
+    for id in &keep {
+        let rp = parent_of
+            .get(id)
+            .cloned()
+            .flatten()
+            .map(|p| canonical.get(&p).cloned().unwrap_or(p))
+            .filter(|p| p != id);
+        kept_parent.insert(id.clone(), rp);
+    }
+
+    // childCount over the kept set only (a closed/duplicate child never inflates it).
+    let mut child_count: HashMap<String, u32> = HashMap::new();
+    for id in &keep {
+        if let Some(Some(p)) = kept_parent.get(id) {
             *child_count.entry(p.clone()).or_insert(0) += 1;
         }
     }
 
-    // Build an agent for each OPEN session. Depth is the parent-chain length within
-    // the (open) tree (root = 0), memoized over the parent map.
-    let mut agents = Vec::with_capacity(sessions.len());
+    // Build one agent per kept session. Depth is the parent-chain length within the
+    // (kept) tree (root = 0). Iterate `sessions` for a stable, source-ordered forest.
+    let mut agents = Vec::with_capacity(keep.len());
     for s in &sessions {
-        if !is_open(&s.id) {
+        if !keep.contains(&s.id) {
             continue;
         }
-        let parent_id = parent_of.get(&s.id).cloned().flatten();
-        let depth = depth_of(&s.id, &parent_of);
+        let parent_id = kept_parent.get(&s.id).cloned().flatten();
+        let depth = depth_of(&s.id, &kept_parent);
         let status = agent_status(s, &claude_status, &mtime_secs_ago);
         agents.push(build_agent(
             store,
@@ -714,6 +753,34 @@ mod tests {
     /// tests whose subject is composition/labels/links, not membership.
     fn codex_all_open(_: &Session) -> bool {
         true
+    }
+
+    /// One live Claude session re-ingested as SEVERAL store rows (same external id,
+    /// distinct store ids — the real shape of a long session crossing compaction
+    /// segments) must collapse to a SINGLE globe, not one per row. Regression for the
+    /// "14 globes for 6 live sessions" duplication.
+    #[test]
+    fn assemble_collapses_duplicate_external_id_rows_to_one_agent() {
+        let store = Store::memory().unwrap();
+        for i in 0..5 {
+            seed(
+                &store,
+                &format!("dup-row-{i}"),
+                "live-sid", // shared external id across all five rows
+                Harness::ClaudeCode,
+                Some("/Users/k/Developer/MyRepo"),
+                Some((2, 100, 1000, 50, "claude-opus-4-8")),
+            );
+        }
+        let reg = claude_registry(&[(4242, "live-sid")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        assert_eq!(
+            state.agents.len(),
+            1,
+            "five store rows of one live session must render as ONE globe"
+        );
+        assert_eq!(state.agents[0].depth, 0);
+        assert_eq!(state.agents[0].child_count, 0);
     }
 
     /// `assemble` builds a forest: the root (depth 0, parentId null, childCount 1,
