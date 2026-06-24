@@ -13,7 +13,7 @@
 // palette, so Radar uses its OWN heat-coloured globe + link mesh here rather than
 // mutating those — but mirrors their lattice look so the two constellations match.
 
-import { useEffect, useMemo, useRef, type MutableRefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import { Sparkles, Stars, Environment, Lightformer, Wireframe } from '@react-three/drei';
@@ -24,7 +24,7 @@ import { layoutRadarScene } from './radarLayout';
 import { radarHarness, heatColor } from './radarTheme';
 import { CameraRig } from './CameraRig';
 import { frameloopFor } from './WarRoom';
-import { reconcileLifecycle, isVisible, type LifecycleMap, type LiveId } from './radarLifecycle';
+import { reconcileLifecycle, pruneGone, isVisible, type LifecycleMap, type LiveId } from './radarLifecycle';
 
 const BG = '#020403';
 const WHITE = new THREE.Color('#ffffff');
@@ -98,7 +98,10 @@ function RadarGlobe({
   const working = agent.status === 'working';
   const seed = useMemo(() => seedOf(node.id), [node.id]);
 
-  const color = useMemo(() => new THREE.Color(radarNodeColor(agent)), [agent]);
+  // Colour depends only on harness hue + fill heat; `normalizeRadarState` rebuilds
+  // the whole `agent` object every emit, so key on those two fields (not identity)
+  // to avoid rebuilding the THREE.Color (and its derived clones) on every frame.
+  const color = useMemo(() => new THREE.Color(radarNodeColor(agent)), [agent.harness, agent.fillPct]);
   const innerColor = useMemo(() => color.clone().lerp(WHITE, 0.24), [color]);
   const nodeColor = useMemo(() => color.clone().lerp(WHITE, 0.16), [color]);
 
@@ -149,7 +152,10 @@ function RadarGlobe({
 
     // lifecycle scale (0..1) is the spawn-in / implode-out factor from the pure
     // reconciler — read live from the ref so a tween never triggers a re-render.
-    const lifecycleScale = lifecycleRef.current[node.id]?.scale ?? 1;
+    // A missing entry means full scale (a fresh, not-yet-reconciled node) EXCEPT
+    // for an already-closed agent: it is dead, so an absent entry (e.g. just pruned
+    // as `gone`) reads 0, never a one-frame full-scale flash before it unmounts.
+    const lifecycleScale = lifecycleRef.current[node.id]?.scale ?? (agent.status === 'closed' ? 0 : 1);
     const targetScale = node.radius * (1 + boost) * Math.max(0, lifecycleScale);
     const fillGlow = 0.25 + agent.fillPct * 0.65; // fuller = hotter core
     const idleDim = working ? 0 : 0.28; // idle agents read dimmer (at-a-glance who's thinking)
@@ -272,10 +278,19 @@ function RadarGlobe({
 }
 
 // ── parent -> child glowing links (depth-N), mirroring Habits' AnimatedLinks but
-// flowing parent → child and radar-tinted by the PARENT's heat colour. ──────────
-function RadarLinks({ layout }: { layout: OrbLayout }) {
+// flowing parent → child and radar-tinted by the PARENT's heat colour. Each link's
+// brightness is multiplied every frame by min(parentScale, childScale) read live
+// from the SAME lifecycle map the globes use, so a link to an imploding/gone globe
+// fades out in lockstep with it (no dangling full-brightness glow to an empty point).
+function RadarLinks({ layout, lifecycleRef }: { layout: OrbLayout; lifecycleRef: MutableRefObject<LifecycleMap> }) {
   const byId = useMemo(() => new Map(layout.nodes.map((n) => [n.id, n])), [layout]);
   const links = useMemo(() => layout.links.filter((l) => byId.has(l.source) && byId.has(l.target)), [layout, byId]);
+
+  // Immutable full-brightness colour bases. The live color attributes are these
+  // scaled by each link's endpoint lifecycle factor per frame (multiplying the
+  // attribute in place would compound; the base never changes after layout).
+  const baseLineColors = useRef<Float32Array>(new Float32Array(0));
+  const baseDotColors = useRef<Float32Array>(new Float32Array(0));
 
   const lineGeo = useMemo(() => {
     const positions = new Float32Array(links.length * 6);
@@ -290,6 +305,7 @@ function RadarLinks({ layout }: { layout: OrbLayout }) {
       const c = new THREE.Color(radarNodeColor(parent.radarAgent!));
       colors.set([c.r, c.g, c.b, c.r * 0.4, c.g * 0.4, c.b * 0.4], i * 6);
     });
+    baseLineColors.current = colors.slice();
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -303,6 +319,7 @@ function RadarLinks({ layout }: { layout: OrbLayout }) {
       const c = new THREE.Color(radarNodeColor(byId.get(link.source)!.radarAgent!));
       colors.set([c.r, c.g, c.b], i * 3);
     });
+    baseDotColors.current = colors.slice();
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -312,6 +329,8 @@ function RadarLinks({ layout }: { layout: OrbLayout }) {
   const meta = useMemo(
     () =>
       links.map((link, i) => ({
+        sourceId: link.source,
+        targetId: link.target,
         parent: byId.get(link.source)!.position,
         child: byId.get(link.target)!.position,
         phase: (i * 0.37) % 1,
@@ -326,18 +345,36 @@ function RadarLinks({ layout }: { layout: OrbLayout }) {
 
   useFrame((state) => {
     const t = state.clock.elapsedTime;
-    const attr = dotGeo.getAttribute('position') as THREE.BufferAttribute;
+    const lc = lifecycleRef.current;
+    const dotPos = dotGeo.getAttribute('position') as THREE.BufferAttribute;
+    const lineCol = lineGeo.getAttribute('color') as THREE.BufferAttribute;
+    const dotCol = dotGeo.getAttribute('color') as THREE.BufferAttribute;
+    const baseLine = baseLineColors.current;
+    const baseDot = baseDotColors.current;
+    const lineArr = lineCol.array as Float32Array;
+    const dotArr = dotCol.array as Float32Array;
+
     for (let i = 0; i < meta.length; i++) {
       const m = meta[i];
       const tt = (t * 0.4 + m.phase) % 1; // parent → child (subagent travels out)
-      attr.setXYZ(
+      dotPos.setXYZ(
         i,
         m.parent.x + (m.child.x - m.parent.x) * tt,
         m.parent.y + (m.child.y - m.parent.y) * tt,
         m.parent.z + (m.child.z - m.parent.z) * tt,
       );
+
+      // fade a link out in lockstep with whichever endpoint globe is shrinking
+      // (imploding/gone). Live link (both endpoints alive) → factor 1 → unchanged.
+      const factor = Math.min(lc[m.sourceId]?.scale ?? 1, lc[m.targetId]?.scale ?? 1);
+      const l = i * 6;
+      for (let k = 0; k < 6; k++) lineArr[l + k] = baseLine[l + k] * factor;
+      const d = i * 3;
+      for (let k = 0; k < 3; k++) dotArr[d + k] = baseDot[d + k] * factor;
     }
-    attr.needsUpdate = true;
+    dotPos.needsUpdate = true;
+    lineCol.needsUpdate = true;
+    dotCol.needsUpdate = true;
     if (lineMat.current) lineMat.current.opacity = 0.22 + Math.sin(t * 1.4) * 0.05;
   });
 
@@ -376,10 +413,51 @@ export type RadarConstellationProps = {
 
 // Steps the PURE lifecycle reconciler once per frame into a ref the globes read
 // live (no re-render on tween). Must live inside the Canvas to get useFrame's dt.
-function LifecycleDriver({ live, mapRef }: { live: LiveId[]; mapRef: MutableRefObject<LifecycleMap> }) {
+//
+// After reconciling it PRUNES fully-collapsed (`gone`) entries so a node unmounts
+// promptly the frame it finishes imploding instead of lingering (invisible, but
+// still a mounted globe with a hit-sphere) until the next model emit. The mount set
+// is driven off the React tree, so the only re-render trigger is `onRenderSetChange`
+// — fired ONLY when the set of gone/ghost ids actually changes (≈ once per node
+// death, never per frame), keeping the tween path itself re-render-free.
+function LifecycleDriver({
+  live,
+  mapRef,
+  goneIdsRef,
+  onRenderSetChange,
+}: {
+  live: LiveId[];
+  mapRef: MutableRefObject<LifecycleMap>;
+  /** Ids whose globe should unmount this frame (finished imploding). */
+  goneIdsRef: MutableRefObject<Set<string>>;
+  onRenderSetChange: () => void;
+}) {
+  const sigRef = useRef('');
   useFrame((_, dtRaw) => {
     const dt = Math.min(dtRaw, 0.05);
-    mapRef.current = reconcileLifecycle(mapRef.current, live, dt);
+    const reconciled = reconcileLifecycle(mapRef.current, live, dt);
+
+    // ids that just finished imploding (drop them from the mount set) + ids still
+    // mid-implosion that are no longer live (ghosts kept mounted to finish the anim).
+    const liveSet = new Set(live.map((l) => l.id));
+    const gone = new Set<string>();
+    const renderable: string[] = [];
+    for (const id in reconciled) {
+      const phase = reconciled[id].phase;
+      if (phase === 'gone') gone.add(id);
+      else if (!liveSet.has(id)) renderable.push(id); // a mounted ghost
+    }
+
+    mapRef.current = pruneGone(reconciled); // drop gone now → prompt unmount
+    goneIdsRef.current = gone;
+
+    // re-render only when the mounted-ghost/gone signature changes (node birth or
+    // death), never on every tween frame.
+    const sig = `${[...gone].sort().join(',')}|${renderable.sort().join(',')}`;
+    if (sig !== sigRef.current) {
+      sigRef.current = sig;
+      onRenderSetChange();
+    }
   });
   return null;
 }
@@ -400,7 +478,18 @@ export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave,
   // id, so an imploding agent keeps rendering at its last position until it has
   // fully collapsed-into-self (spec §8 — removals never just pop out).
   const lifecycleRef = useRef<LifecycleMap>({});
+  // Ids that finished imploding this frame — filtered out of the mount set so a
+  // `gone` globe (e.g. a closed agent still listed in `model.agents`) unmounts
+  // promptly. `renderTick` is bumped by the driver ONLY when this set (or the live
+  // ghost set) changes, so the unmount happens without waiting for the next emit.
+  const goneIdsRef = useRef<Set<string>>(new Set());
+  const [renderTick, setRenderTick] = useState(0);
   const nodeCache = useRef<Map<string, LayoutNode>>(new Map());
+  // Intentional mid-render write: append-only + idempotent. We record each live
+  // node's latest layout so an imploding node keeps its last position after it
+  // leaves `model.agents`. Writing the same id twice with the current layout is a
+  // no-op replacement (never stale — re-runs use the same `layout`), so this is
+  // safe under React's double-invoked render. Entries are pruned in LifecycleDriver.
   for (const n of layout.nodes) nodeCache.current.set(n.id, n);
 
   const live = useMemo<LiveId[]>(
@@ -411,6 +500,7 @@ export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave,
   // Render the live nodes PLUS any cached node still mid-implosion (present in the
   // lifecycle map, not yet `gone`, and no longer in the live layout).
   const liveIds = useMemo(() => new Set(layout.nodes.map((n) => n.id)), [layout]);
+  // `renderTick` is a dep so a gone/ghost transition between emits re-runs this.
   const ghostNodes = useMemo(() => {
     const ghosts: LayoutNode[] = [];
     for (const [id, entry] of Object.entries(lifecycleRef.current)) {
@@ -419,9 +509,17 @@ export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave,
       if (cached) ghosts.push(cached);
     }
     return ghosts;
-  }, [liveIds, model]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveIds, model, renderTick]);
 
-  const renderNodes = useMemo(() => [...layout.nodes, ...ghostNodes], [layout, ghostNodes]);
+  // Drop any layout node that has finished imploding (`gone`) so its globe — and
+  // its hit-sphere — unmount immediately, even for a closed agent still present in
+  // `model.agents`. Imploding (mid-collapse) nodes are NOT gone, so they stay.
+  const renderNodes = useMemo(
+    () => [...layout.nodes.filter((n) => !goneIdsRef.current.has(n.id)), ...ghostNodes],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [layout, ghostNodes, renderTick],
+  );
   const selectedNode = useMemo(() => layout.nodes.find((n) => n.id === selectedId) ?? null, [layout, selectedId]);
 
   return (
@@ -442,11 +540,16 @@ export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave,
       <Stars radius={36} depth={48} count={3800} factor={5} saturation={0} fade speed={0.08} />
       <Sparkles count={40} scale={[28, 16, 26]} size={1.4} speed={0.05} opacity={0.22} color="#d8c8ff" />
 
-      <LifecycleDriver live={live} mapRef={lifecycleRef} />
+      <LifecycleDriver
+        live={live}
+        mapRef={lifecycleRef}
+        goneIdsRef={goneIdsRef}
+        onRenderSetChange={() => setRenderTick((v) => v + 1)}
+      />
       <CameraRig selected={selectedNode} />
 
       <group onPointerMissed={onClear}>
-        <RadarLinks layout={layout} />
+        <RadarLinks layout={layout} lifecycleRef={lifecycleRef} />
         {renderNodes.map((node) => (
           <RadarGlobe
             key={node.id}

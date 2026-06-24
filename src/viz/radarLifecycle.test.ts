@@ -3,6 +3,7 @@ import {
   reconcileLifecycle,
   crossfadeFactor,
   isVisible,
+  pruneGone,
   type LifecycleMap,
   type LiveId,
 } from './radarLifecycle';
@@ -105,6 +106,43 @@ describe('reconcileLifecycle — smoothness', () => {
     for (let i = 25; i < 50; i++) {
       expect(['imploding', 'gone']).toContain(map[`n${i}`]?.phase ?? 'gone');
     }
+  });
+});
+
+describe('pruneGone', () => {
+  it('drops fully-collapsed (gone) entries from the map', () => {
+    const map: LifecycleMap = {
+      alive: { phase: 'alive', t: 1, scale: 1 },
+      imploding: { phase: 'imploding', t: 0.2, scale: 0.4 },
+      gone: { phase: 'gone', t: 0.5, scale: 0 },
+    };
+    const pruned = pruneGone(map);
+    expect(pruned.gone).toBeUndefined(); // gone node is dropped from the map
+    expect(pruned.alive).toBe(map.alive); // survivors kept (identity preserved)
+    expect(pruned.imploding).toBe(map.imploding); // mid-collapse still mounted
+    expect(Object.keys(pruned)).toEqual(['alive', 'imploding']);
+  });
+
+  it('returns a new map and never mutates the input', () => {
+    const map: LifecycleMap = { gone: { phase: 'gone', t: 0, scale: 0 } };
+    const pruned = pruneGone(map);
+    expect(pruned).not.toBe(map);
+    expect(map.gone).toBeDefined(); // input untouched
+    expect(Object.keys(pruned)).toHaveLength(0);
+  });
+
+  it('a closed id that has gone stays dropped after prune (no resurrection bloom)', () => {
+    // alive → closed → fully imploded → pruned; feeding it closed again must keep
+    // it gone (it must NOT bloom back to scale 1).
+    const alive = run({}, [live('a', 'working')], 240);
+    const gone = run(alive, [live('a', 'closed')], 240);
+    expect(gone.a.phase).toBe('gone');
+    const pruned = pruneGone(gone);
+    expect(pruned.a).toBeUndefined();
+    // next frame still reports the agent as closed (it lingers in model.agents)
+    const after = reconcileLifecycle(pruned, [live('a', 'closed')], DT);
+    expect(after.a.phase).toBe('gone');
+    expect(after.a.scale).toBe(0); // did not resurrect to 1
   });
 });
 

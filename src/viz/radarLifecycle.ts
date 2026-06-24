@@ -52,13 +52,19 @@ export function reconcileLifecycle(prev: LifecycleMap, live: LiveId[], dt: numbe
     const closed = status === 'closed';
 
     if (closed) {
+      // A closed id whose gone entry was already pruned (or that first appears
+      // closed) must NOT bloom back to scale 1 just to implode again — it is dead.
+      // Stay gone so `pruneGone` keeps it dropped (no resurrection flicker).
+      if (!was || was.phase === 'gone') {
+        next[id] = { phase: 'gone', t: 0, scale: 0 };
+        continue;
+      }
       // Present but ended → implode (handled in the same shrink path as vanished).
-      const from = was ?? { phase: 'alive' as LifecyclePhase, t: 0, scale: 1 };
-      const scale = dampValue(from.scale, 0, IMPLODE_LAMBDA, dt);
+      const scale = dampValue(was.scale, 0, IMPLODE_LAMBDA, dt);
       if (scale <= GONE_AT) {
-        next[id] = { phase: 'gone', t: from.t + dt, scale: 0 };
+        next[id] = { phase: 'gone', t: was.t + dt, scale: 0 };
       } else {
-        next[id] = { phase: 'imploding', t: from.phase === 'imploding' ? from.t + dt : 0, scale };
+        next[id] = { phase: 'imploding', t: was.phase === 'imploding' ? was.t + dt : 0, scale };
       }
       continue;
     }
@@ -104,6 +110,21 @@ export function reconcileLifecycle(prev: LifecycleMap, live: LiveId[], dt: numbe
 export function isVisible(entry: LifecycleEntry | undefined): boolean {
   if (!entry) return true;
   return entry.phase !== 'gone';
+}
+
+/**
+ * Drop every fully-collapsed (`gone`) entry, returning a NEW map. A `gone` globe
+ * has finished imploding — keeping it lingers an invisible (scale 0) node + its
+ * hit-sphere until the next model emit. Pruning it here unmounts it promptly. Pure
+ * (no Three.js) so the prune is unit-tested. Imploding/spawning/alive entries are
+ * preserved untouched so their animation keeps playing.
+ */
+export function pruneGone(map: LifecycleMap): LifecycleMap {
+  const next: LifecycleMap = {};
+  for (const id in map) {
+    if (map[id].phase !== 'gone') next[id] = map[id];
+  }
+  return next;
 }
 
 /**
