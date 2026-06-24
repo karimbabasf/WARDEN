@@ -34,6 +34,7 @@ import { TransitionDriver, FoldGroup, makeTransition, beginTransition } from './
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 import { targetDim, type EmphasisFilter } from './emphasis';
 import { subtreeBounds, type Bounds } from './cameraFraming';
+import IntroVideo from './IntroVideo';
 
 const PlayerHost = lazy(() => import('./PlayerHost'));
 
@@ -659,8 +660,11 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       <Chrome
         scene={scene}
         model={model}
+        tab={tab}
         hoveredNode={displayTab === 'radar' ? null : hoveredNode}
         selectedNode={displayTab === 'radar' ? null : selectedNode}
+        emphasisFilter={emphasisFilter}
+        focusStack={focusStack}
         running={Boolean(scene.running)}
         error={runError}
         fixPreview={fixPreview}
@@ -669,6 +673,9 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         onRequestFix={onRequestFix}
         onClearSelection={onClear}
         onDismiss={onDismiss}
+        onFilter={onFilter}
+        onPopFocus={onPopFocus}
+        onClearFocus={onClearFocus}
       />
 
       {/* Radar detail panel — its own right-dock (the Chrome inspector is Habits-
@@ -695,11 +702,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         </div>
       ) : null}
 
-      {showIntro && (
-        <Suspense fallback={null}>
-          <PlayerHost kind="intro" findings={[]} diagnosisId={diagnosisId} onEnded={() => setShowIntro(false)} />
-        </Suspense>
-      )}
+      {showIntro && <IntroVideo onEnded={() => setShowIntro(false)} />}
       {scene.phase === 'reveal' && (
         <Suspense fallback={null}>
           <PlayerHost kind="reveal" findings={findings} diagnosisId={diagnosisId} />

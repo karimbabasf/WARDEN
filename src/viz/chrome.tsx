@@ -9,10 +9,12 @@
 // resolved orb layout and calls back to WarRoom for the few user actions
 // (ask, request fix, clear, dismiss). No Tauri, no Three — trivially reasoned about.
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { SceneState } from './bridge';
 import { harnessTheme, severityColor } from './harnessTheme';
 import type { LayoutNode, OrbIssue, OrbSceneModel } from './orbTypes';
+import type { EmphasisFilter } from './emphasis';
+import type { ConstellationTab } from './NavBar';
 
 export type FixPreview = {
   finding_id: string;
@@ -24,6 +26,27 @@ export type FixPreview = {
 
 const PIPELINE_STAGES = ['Diagnostician', 'Coach', 'Verifier'] as const;
 const DEFAULT_QUERY = "what's wrong with how I use my agents?";
+
+// Severity buckets the legend exposes as filter chips. The bucket id matches
+// `EmphasisFilter` ('low'|'med'|'high'|'crit'); `sev` is the representative
+// numeric severity fed to `severityColor` so the swatch agrees with the orbs
+// and detail meters (one colour source). Glyphs grow with danger for a
+// colour-blind-legible ramp.
+type SevBucket = EmphasisFilter & { kind: 'severity' };
+const SEVERITY_CHIPS: ReadonlyArray<{ bucket: SevBucket['bucket']; label: string; sev: number; glyph: string }> = [
+  { bucket: 'low', label: 'Low', sev: 2, glyph: '○' },
+  { bucket: 'med', label: 'Watch', sev: 3, glyph: '◔' },
+  { bucket: 'high', label: 'High', sev: 4, glyph: '◑' },
+  { bucket: 'crit', label: 'Critical', sev: 5, glyph: '●' },
+];
+
+/** True when `filter` is the same chip the user just rendered (used for toggle + aria-pressed). */
+function isSeverityActive(filter: EmphasisFilter, bucket: SevBucket['bucket']): boolean {
+  return filter?.kind === 'severity' && filter.bucket === bucket;
+}
+function isHarnessActive(filter: EmphasisFilter, harness: string): boolean {
+  return filter?.kind === 'harness' && filter.harness === harness;
+}
 
 function fmtCount(n: number | undefined): string {
   return typeof n === 'number' && Number.isFinite(n) ? Math.round(n).toLocaleString() : '—';
@@ -169,52 +192,152 @@ function PipelineRail({ scene, running }: { scene: SceneState; running: boolean 
   );
 }
 
-// ── bottom status deck: a READ-ONLY instrument readout ───────────────────────
-// Harnesses present · live telemetry (habits/agents/sessions/events/findings) ·
-// the severity ramp · a "watching" pulse. There are no inputs — the conversational
-// "ask WARDEN" surface is a separate chat interface, added later. pointer-events
-// are off in CSS so the deck never intercepts the orbit camera. Honest-viz: every
-// figure is a real field (counts fall back to "—" rather than fabricating).
-function StatusDeck({ scene, model }: { scene: SceneState; model: OrbSceneModel }) {
-  const p = scene.profile;
+// ── interactive legend: filter chips (the dim is wired in WarRoom) ───────────
+// The legend is no longer a static key — each entry is a real <button> that
+// toggles a single `EmphasisFilter`. Clicking a chip emphasises matching orbs
+// (siblings dim, wired in WarRoom); clicking the lit chip clears the filter.
+// Honest-viz contract is preserved: chips pair colour + glyph + text label so
+// the signal is never colour-only (a11y), and harness chips key off the *real*
+// snake_case harness id so `matchesFilter` lines up with the scene nodes.
+// Severity is a per-habit signal, so those chips appear on the Habits tab only;
+// harness chips appear on both tabs.
+function Legend({
+  tab,
+  model,
+  filter,
+  onFilter,
+}: {
+  tab: ConstellationTab;
+  model: OrbSceneModel;
+  filter: EmphasisFilter;
+  onFilter: (f: EmphasisFilter) => void;
+}) {
+  // Harness chips reflect the agents actually present; fall back to a quiet
+  // Unknown chip so the legend is never empty (and never fabricates a harness).
   const agents = model.agents.length
     ? model.agents
     : [{ id: 'unknown', harness: 'unknown', label: 'Unknown', glyph: '●', color: '#76ff9d', sessions: 0, eventCount: 0, totalLoad: 0 }];
-  const habits = model.issues.length;
-  const ramp: Array<[string, number]> = [
-    ['low', 2],
-    ['watch', 3],
-    ['high', 4],
-    ['critical', 5],
-  ];
-  const phaseLabel = scene.running ? 'scanning' : scene.phase === 'reveal' ? 'diagnosis ready' : 'watching';
+  // De-dupe by real harness id (multiple hubs can share one harness).
+  const harnesses = Array.from(new Map(agents.map((a) => [a.harness, a])).values());
+
   return (
-    <div className="wd-deck" role="status" aria-label="WARDEN status">
-      <div className="wd-deck-group">
-        {agents.map((a) => {
+    <div className="wd-legend" role="group" aria-label="Emphasis filter">
+      {tab === 'habits' && (
+        <div className="wd-legend-group" aria-label="severity">
+          <span className="wd-legend-key">severity</span>
+          {SEVERITY_CHIPS.map((c) => {
+            const active = isSeverityActive(filter, c.bucket);
+            const next: EmphasisFilter = active ? null : { kind: 'severity', bucket: c.bucket };
+            return (
+              <button
+                type="button"
+                key={c.bucket}
+                className={`wd-chip wd-chip-sev${active ? ' is-active' : ''}`}
+                aria-pressed={active}
+                aria-label={`${active ? 'Clear' : 'Show only'} ${c.label} severity habits`}
+                title={`${c.label} severity${active ? ' (active — click to clear)' : ''}`}
+                onClick={() => onFilter(next)}
+                style={{ '--chip': severityColor(c.sev) } as CSSProperties}
+              >
+                <span className="wd-chip-swatch" aria-hidden="true" />
+                <span className="wd-chip-glyph" aria-hidden="true">{c.glyph}</span>
+                <span className="wd-chip-label">{c.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div className="wd-legend-group" aria-label="harness">
+        <span className="wd-legend-key">harness</span>
+        {harnesses.map((a) => {
           const t = harnessTheme(a.harness);
+          const active = isHarnessActive(filter, a.harness);
+          const next: EmphasisFilter = active ? null : { kind: 'harness', harness: a.harness };
           return (
-            <span className="wd-deck-harness" key={a.id} style={{ '--harness': t.color } as CSSProperties}>
-              <span className="wd-deck-glyph" aria-hidden="true">{t.glyph}</span>
-              {t.label}
-            </span>
+            <button
+              type="button"
+              key={a.harness}
+              className={`wd-chip wd-chip-harness${active ? ' is-active' : ''}`}
+              aria-pressed={active}
+              aria-label={`${active ? 'Clear' : 'Show only'} ${t.label} agents`}
+              title={`${t.label}${active ? ' (active — click to clear)' : ''}`}
+              onClick={() => onFilter(next)}
+              style={{ '--chip': t.color } as CSSProperties}
+            >
+              <span className="wd-chip-swatch" aria-hidden="true" />
+              <span className="wd-chip-glyph" aria-hidden="true">{t.glyph}</span>
+              <span className="wd-chip-label">{t.label}</span>
+            </button>
           );
         })}
       </div>
-      <span className="wd-deck-div" aria-hidden="true" />
+    </div>
+  );
+}
+
+// ── breadcrumb: the radar focus path (Overview › agent › …) ──────────────────
+// Renders from WarRoom's `focusStack` (agent ids). "Overview" clears focus;
+// each crumb pops focus to that depth. Renders nothing when the stack is empty
+// (Overview is implicit then). Labels are looked up from the live scene model
+// so the trail reads as agent names, not raw ids.
+function Breadcrumb({
+  focusStack,
+  model,
+  onPopFocus,
+  onClearFocus,
+}: {
+  focusStack: string[];
+  model: OrbSceneModel;
+  onPopFocus: (index: number) => void;
+  onClearFocus: () => void;
+}) {
+  if (focusStack.length === 0) return null;
+  const labelFor = (id: string) => model.agents.find((a) => a.id === id)?.label ?? id;
+  return (
+    <nav className="wd-breadcrumb" aria-label="Focus path">
+      <button type="button" className="wd-crumb wd-crumb-root" onClick={onClearFocus} title="Back to overview">
+        Overview
+      </button>
+      {focusStack.map((id, i) => {
+        const last = i === focusStack.length - 1;
+        return (
+          <Fragment key={`${id}-${i}`}>
+            <span className="wd-crumb-sep" aria-hidden="true">›</span>
+            <button
+              type="button"
+              className={`wd-crumb${last ? ' is-current' : ''}`}
+              aria-current={last ? 'location' : undefined}
+              onClick={() => onPopFocus(i)}
+              title={`Focus ${labelFor(id)}`}
+            >
+              {labelFor(id)}
+            </button>
+          </Fragment>
+        );
+      })}
+    </nav>
+  );
+}
+
+// ── bottom status deck: a READ-ONLY instrument readout ───────────────────────
+// Harnesses present · live telemetry (habits/agents/sessions/events/findings) ·
+// a "watching" pulse. The severity/harness key it used to carry is now the
+// interactive `Legend` (rendered separately). There are no inputs here — the
+// conversational "ask WARDEN" surface is a separate chat interface, added later.
+// pointer-events are off in CSS so the deck never intercepts the orbit camera.
+// Honest-viz: every figure is a real field (counts fall back to "—").
+function StatusDeck({ scene, model }: { scene: SceneState; model: OrbSceneModel }) {
+  const p = scene.profile;
+  const habits = model.issues.length;
+  const phaseLabel = scene.running ? 'scanning' : scene.phase === 'reveal' ? 'diagnosis ready' : 'watching';
+  return (
+    <div className="wd-deck" role="status" aria-label="WARDEN status">
       <div className="wd-deck-group wd-deck-stats">
         <DeckStat value={String(habits)} label={habits === 1 ? 'habit' : 'habits'} />
         <DeckStat value={String(model.agents.length)} label={model.agents.length === 1 ? 'agent' : 'agents'} />
         <DeckStat value={fmtCount(p?.sessions)} label="sessions" />
         <DeckStat value={fmtCount(p?.events)} label="events" />
         <DeckStat value={fmtCount(p?.findings)} label="findings" />
-      </div>
-      <span className="wd-deck-div" aria-hidden="true" />
-      <div className="wd-deck-group wd-deck-ramp" aria-label="severity ramp">
-        <span className="wd-deck-ramp-key">severity</span>
-        {ramp.map(([label, sev]) => (
-          <span className="wd-deck-swatch" key={label} title={label} style={{ background: severityColor(sev) }} />
-        ))}
       </div>
       <span className="wd-deck-div" aria-hidden="true" />
       <div className="wd-deck-group wd-deck-live">
@@ -386,8 +509,11 @@ function EmptyState({ running }: { running: boolean }) {
 export function Chrome({
   scene,
   model,
+  tab,
   hoveredNode,
   selectedNode,
+  emphasisFilter,
+  focusStack,
   running,
   error,
   fixPreview,
@@ -396,11 +522,17 @@ export function Chrome({
   onRequestFix,
   onClearSelection,
   onDismiss,
+  onFilter,
+  onPopFocus,
+  onClearFocus,
 }: {
   scene: SceneState;
   model: OrbSceneModel;
+  tab: ConstellationTab;
   hoveredNode: LayoutNode | null;
   selectedNode: LayoutNode | null;
+  emphasisFilter: EmphasisFilter;
+  focusStack: string[];
   running: boolean;
   error: string | null;
   fixPreview?: FixPreview;
@@ -409,12 +541,28 @@ export function Chrome({
   onRequestFix: (issue: OrbIssue) => void;
   onClearSelection: () => void;
   onDismiss: () => void;
+  onFilter: (f: EmphasisFilter) => void;
+  onPopFocus: (index: number) => void;
+  onClearFocus: () => void;
 }) {
-  // The bottom is a read-only StatusDeck (no inputs). The top HUD + conversational
-  // ask bar are intentionally not rendered yet — Hud/Console/EmptyState stay
-  // defined and wired so the later chat interface drops straight in.
+  // The bottom is a read-only StatusDeck (no inputs) plus the interactive
+  // emphasis Legend. The radar focus trail (Breadcrumb) sits at the top of the
+  // chrome on the Radar tab. The HUD + conversational ask bar are intentionally
+  // not rendered yet — Hud/Console/EmptyState stay defined and wired so the
+  // later chat interface drops straight in.
   return (
     <div className="wd-chrome">
+      {tab === 'radar' && (
+        <Breadcrumb
+          focusStack={focusStack}
+          model={model}
+          onPopFocus={onPopFocus}
+          onClearFocus={onClearFocus}
+        />
+      )}
+
+      <Legend tab={tab} model={model} filter={emphasisFilter} onFilter={onFilter} />
+
       <StatusDeck scene={scene} model={model} />
 
       <div className={`wd-inspector ${selectedNode || hoveredNode ? 'is-open' : ''}`}>
