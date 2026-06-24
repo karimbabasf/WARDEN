@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WARDEN · radar studio (mock)</title>
+    <style>
+      /* Standalone radar-studio: the REAL constellation + detail panel fed a
+         hardcoded mock forest, free camera. Isolated from the live app so it never
+         collides with backend work. The panel pulls its own look from style.css
+         (imported by radarLab.tsx); only the dev picker/HUD is styled here. */
+      :root {
+        --bg: #020403;
+        --green: #76ff9d;
+        --orange: #ff8c42;
+        --violet: #b98cff;
+        --slate: #8fa0b8;
+        --mono: "SF Mono", "WardenMono", Menlo, Consolas, monospace;
+      }
+      html, body { height: 100%; margin: 0; background: var(--bg); overflow: hidden; }
+      #orb-root { position: fixed; inset: 0; }
+      canvas { display: block; touch-action: none; }
+
+      /* ---- dev picker / HUD (left dock) ---- */
+      .radar-lab-picker {
+        position: fixed; top: 18px; left: 18px; z-index: 8;
+        width: 248px; display: flex; flex-direction: column; gap: 10px;
+        font-family: var(--mono); pointer-events: none;
+      }
+      .radar-lab-mark { display: flex; align-items: baseline; gap: 10px; }
+      .radar-lab-mark .sig {
+        font-size: 13px; letter-spacing: 0.42em; text-transform: uppercase;
+        color: var(--green); text-shadow: 0 0 18px rgba(118,255,157,0.55);
+      }
+      .radar-lab-mark .ver { font-size: 10px; letter-spacing: 0.28em; color: #5f8f74; text-transform: uppercase; }
+
+      .radar-lab-list { display: flex; flex-direction: column; gap: 5px; pointer-events: auto; }
+      .radar-lab-chip {
+        appearance: none; cursor: pointer; text-align: left;
+        display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 9px;
+        padding: 7px 11px; border-radius: 9px;
+        background: rgba(4, 18, 11, 0.62);
+        border: 1px solid rgba(118, 255, 157, 0.14);
+        backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        color: #9fcdb2; font-family: inherit; font-size: 11px; letter-spacing: 0.04em;
+        transition: border-color 160ms ease, background 160ms ease, transform 120ms ease;
+      }
+      .radar-lab-chip:hover { transform: translateX(2px); }
+      .radar-lab-chip.is-active {
+        border-color: var(--harness, var(--green));
+        box-shadow: 0 0 18px -4px var(--harness, rgba(118,255,157,0.5));
+        background: rgba(6, 24, 15, 0.82);
+      }
+      .radar-lab-glyph { color: var(--harness, var(--green)); font-size: 12px; text-align: center; }
+      .radar-lab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .radar-lab-fill { color: #6f9d82; font-variant-numeric: tabular-nums; }
+
+      .radar-lab-hint {
+        font-size: 10.5px; letter-spacing: 0.12em; color: #4d7d63;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="orb-root"></div>
+    <script type="module" src="/src/viz/preview/radarLab.tsx"></script>
+  </body>
+</html>
