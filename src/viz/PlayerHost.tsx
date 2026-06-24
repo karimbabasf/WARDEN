@@ -5,19 +5,22 @@
 // React.lazy(), so Remotion never lands in the main bundle and never runs on the
 // ⌘⇧Space summon hot path (risk R-Bundle / R-Rem). It mounts ABOVE the R3F
 // canvas inside #war-room-root and plays:
-//   • Intro  — once, on first summon (branded boot, played live = no renderer)
 //   • Reveal — on phase==='reveal', driven by the REAL findings handed in
 //
-// Both play LIVE through <Player> (autoPlay, no controls), which needs no render
-// backend — equivalent to a pre-render from the user's seat. The 'ended' event
-// is wired via the PlayerRef (Remotion has no onEnded prop) so the host can
-// notify the parent when a clip finishes (e.g. drop the intro overlay).
+// (The branded boot intro is no longer a Remotion clip: WarRoom now plays the
+// pre-rendered MOBIUS-intro.mp4 via <IntroVideo>. The Intro composition is kept
+// for the render-intro pre-render stub, so PlayerHost is reveal-only.)
+//
+// Reveal plays LIVE through <Player> (autoPlay, no controls), which needs no
+// render backend — equivalent to a pre-render from the user's seat. The 'ended'
+// event is wired via the PlayerRef (Remotion has no onEnded prop) so the host
+// can notify the parent when the clip finishes.
 
 import { useEffect, useMemo, useRef } from 'react';
 import { Player, type PlayerRef } from '@remotion/player';
-import { Intro, INTRO_DURATION, Reveal, revealDuration, FPS, type RevealFinding } from './compositions';
+import { Reveal, revealDuration, FPS, type RevealFinding } from './compositions';
 
-export type PlayerKind = 'intro' | 'reveal';
+export type PlayerKind = 'reveal';
 
 export type PlayerHostProps = {
   kind: PlayerKind;
@@ -43,18 +46,17 @@ const playerStyle: React.CSSProperties = {
 };
 
 export default function PlayerHost({ kind, findings, diagnosisId, onEnded }: PlayerHostProps) {
-  const isReveal = kind === 'reveal';
   const ref = useRef<PlayerRef>(null);
 
   const durationInFrames = useMemo(
-    () => (isReveal ? revealDuration(findings.length) : INTRO_DURATION),
-    [isReveal, findings.length],
+    () => revealDuration(findings.length),
+    [findings.length],
   );
 
   // Memoise inputProps so <Player> doesn't see a new object every render.
   const inputProps = useMemo(
-    () => (isReveal ? { findings, diagnosisId } : {}),
-    [isReveal, findings, diagnosisId],
+    () => ({ findings, diagnosisId }),
+    [findings, diagnosisId],
   );
 
   // Remotion exposes completion via the 'ended' event on the PlayerRef, not a
@@ -71,7 +73,7 @@ export default function PlayerHost({ kind, findings, diagnosisId, onEnded }: Pla
     <div style={overlayStyle} aria-hidden="false" data-player={kind}>
       <Player
         ref={ref}
-        component={isReveal ? (Reveal as React.FC) : (Intro as React.FC)}
+        component={Reveal as React.FC}
         inputProps={inputProps}
         durationInFrames={durationInFrames}
         compositionWidth={1280}
