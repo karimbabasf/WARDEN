@@ -73,6 +73,11 @@ const SHELL_STEP = 1.15;
 // perfectly flat circle. Kept well under SHELL_STEP so the shell banding (used by
 // camera framing to group a subtree) is never blurred, regardless of shell size.
 const STAGGER_SPAN = 0.18;
+// Reserved angular gap (radians) inserted at each harness-sector boundary so the
+// boundary is always visible regardless of weight distribution. Two barren roots
+// from different harnesses would otherwise sit as close as in-sector neighbours.
+// Kept small (~6°) so a large forest still has ample arc for its sectors.
+const SECTOR_GAP = 0.1;
 
 // Roots ring: enough circumference that planets (plus their moon halos) don't
 // collide. A floor keeps a lone/duo root from sitting on the origin awkwardly.
@@ -92,14 +97,22 @@ function orbitRadius(parentRadius: number, childDepth: number): number {
   return base * shrink;
 }
 
+// Shared tilt plane for the whole constellation (roots AND children).
+// Flattening Y more than Z gives the disk a 3-D read without excessive depth.
+// Both `placeRoot` and `ringPosition` use these factors so no two tiers can
+// drift onto inconsistent planes — change here and everywhere updates.
+// Exported so tests can recover the true polar angle from tilted positions.
+export const TILT_Y = 0.34;
+export const TILT_Z = 0.22;
+
 // Polar placement on a tilted ring (mirrors orbLayout.satellitePosition): start
 // at 12 o'clock, flatten Y a touch and push Z for a 3D read. `angle` is supplied by
 // the caller (sector- or shell-aware) rather than derived from a bare index.
 function ringPosition(center: Vec3, angle: number, ring: number): Vec3 {
   return {
     x: center.x + Math.cos(angle) * ring,
-    y: center.y + Math.sin(angle) * ring * 0.6,
-    z: center.z + Math.sin(angle) * ring * 0.5,
+    y: center.y + Math.sin(angle) * ring * TILT_Y,
+    z: center.z + Math.sin(angle) * ring * TILT_Z,
   };
 }
 
@@ -255,8 +268,8 @@ export function layoutRadarScene(model: RadarSceneModel): OrbLayout {
     const push = ring * (1 + Math.min(0.25, descendantCount(root.id) * 0.02));
     const center: Vec3 = {
       x: Math.cos(angle) * push,
-      y: Math.sin(angle) * push * 0.34,
-      z: Math.sin(angle) * push * 0.22,
+      y: Math.sin(angle) * push * TILT_Y,
+      z: Math.sin(angle) * push * TILT_Z,
     };
     const node = makeNode(root, center);
     nodes.push(node);
@@ -266,11 +279,24 @@ export function layoutRadarScene(model: RadarSceneModel): OrbLayout {
   // Walk the full circle, handing each harness sector an arc proportional to the
   // combined weight of its roots, and each root within it a slice proportional to
   // its own weight. Place every root at the centre of its slice.
+  //
+  // Inter-sector gaps: reserve SECTOR_GAP at each harness boundary so the sector
+  // seam is always visible regardless of weight distribution. The remaining arc
+  // (2π − numSectors·SECTOR_GAP) is distributed proportionally among roots.
+  const numSectors = sectorKeys.length;
+  // Available arc after subtracting all inter-sector gaps (floor at 2π to avoid
+  // negative available arc for absurdly many single-root sectors).
+  const availableArc = Math.max(Math.PI * 2 * 0.5, Math.PI * 2 - numSectors * SECTOR_GAP);
+
   let cursor = -Math.PI / 2; // start at 12 o'clock, sweep clockwise (increasing angle)
-  for (const key of sectorKeys) {
+  for (let si = 0; si < sectorKeys.length; si++) {
+    const key = sectorKeys[si];
+    // Reserve half the inter-sector gap before this sector starts (shared with the
+    // previous sector's trailing edge), giving a symmetric visual gap at the boundary.
+    if (si > 0) cursor += SECTOR_GAP;
     const sectorRoots = sectorMap.get(key)!; // already in id order (roots was sorted)
     for (const root of sectorRoots) {
-      const slice = (rootWeight(root) / Math.max(1, weightSum)) * Math.PI * 2;
+      const slice = (rootWeight(root) / Math.max(1, weightSum)) * availableArc;
       // Place the root at the centre of its slice: a wider slice (busier subtree)
       // therefore leaves more clear air to each neighbouring root.
       placeRoot(root, cursor + slice / 2);
