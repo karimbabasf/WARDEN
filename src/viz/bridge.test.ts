@@ -75,6 +75,65 @@ describe('bridge reducer', () => {
     expect(s.orbScene?.guidance.doItems).toEqual(['Delegate broad search.']);
   });
 
+  it('flows a radar_state payload into SceneState.radarScene (normalized, camelCase)', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('radar_scene_ready', {
+      generatedAt: '2026-06-23T22:50:17Z',
+      agents: [
+        {
+          id: 'root-1',
+          harness: 'claude_code',
+          parentId: null,
+          depth: 0,
+          label: 'warden',
+          status: 'working',
+          contextTokens: 120000,
+          maxTokens: 200000,
+          fillPct: 0.6,
+          composition: { exact: { cacheRead: 90000, fresh: 12000, output: 2620 }, estimated: null },
+          recentActivity: [],
+          childCount: 1,
+          startedAt: '2026-06-23T22:00:00Z',
+          estCostUsd: 0.42,
+        },
+        {
+          id: 'sub-1',
+          harness: 'claude_code',
+          parentId: 'root-1',
+          depth: 1,
+          label: 'Explore · map frontend',
+          status: 'idle',
+          contextTokens: 8000,
+          maxTokens: 200000,
+          fillPct: 0.04,
+          composition: { exact: { cacheRead: 0, fresh: 0, output: 0 }, estimated: null },
+          recentActivity: [],
+          childCount: 0,
+          startedAt: '2026-06-23T22:40:00Z',
+          estCostUsd: null,
+        },
+      ],
+    });
+    const s = snapshot(bridge);
+    expect(s.radarScene?.generatedAt).toBe('2026-06-23T22:50:17Z');
+    expect(s.radarScene?.agents).toHaveLength(2);
+    expect(s.radarScene?.agents[0]).toMatchObject({ id: 'root-1', depth: 0, parentId: null, contextTokens: 120000 });
+    expect(s.radarScene?.agents[0].fillPct).toBeCloseTo(0.6);
+    expect(s.radarScene?.agents[1]).toMatchObject({ id: 'sub-1', depth: 1, parentId: 'root-1' });
+  });
+
+  it('reset preserves the persistent radar scene (live forest, not a run signal)', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('radar_scene_ready', {
+      agents: [{ id: 'r', harness: 'codex', status: 'working', contextTokens: 1000 }],
+    });
+    bridge.ingest('candidates_nominated', { candidates: [candidate('p1')] });
+    bridge.reset();
+    const s = snapshot(bridge);
+    expect(s.candidates).toHaveLength(0);
+    expect(s.radarScene?.agents[0].id).toBe('r');
+  });
+
   it('spawns one node per nominated candidate', () => {
     const bridge = createBridge(noopListen);
     bridge.ingest('candidates_nominated', {

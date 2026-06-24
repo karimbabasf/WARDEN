@@ -115,6 +115,10 @@ listen('diagnosis_ready', (e) => {
 listen('fugu_delta', (e) => bridge.ingest('fugu_delta', e.payload));
 listen('fugu_usage', (e) => bridge.ingest('fugu_usage', e.payload));
 
+// RADAR: the backend's live agent-forest event. Forward verbatim — the bridge
+// reducer normalizes it into SceneState.radarScene for the radar constellation.
+listen('radar_state', (e) => bridge.ingest('radar_scene_ready', e.payload));
+
 listen('warden_hotkey', () => {
   // The packaged app shows the pre-warmed HIDDEN window with a native call that
   // never fires the webview Page Visibility API, so this explicit summon signal —

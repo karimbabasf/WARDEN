@@ -15,6 +15,7 @@
 // exactly. `harness` is always snake_case ("claude_code" | "codex" | "unknown").
 
 import type { OrbSceneModel } from './orbTypes';
+import { normalizeRadarState, type RadarSceneModel } from './radarTypes';
 
 export type ScenePhase = 'idle' | 'war' | 'reveal';
 
@@ -71,6 +72,9 @@ export type SceneState = {
   diagnosisId?: string;
   /** Persistent C1 orb mind-map model. It is separate from live per-run signals. */
   orbScene?: OrbSceneModel;
+  /** Live RADAR forest (open agents/subagents), from the `radar_state` event. Like
+   *  `orbScene` it is persistent live state, not part of a single diagnosis run. */
+  radarScene?: RadarSceneModel;
   /** True while the daemon has the overlay summoned. The packaged app shows the
    *  pre-warmed HIDDEN window with a native call that does NOT fire the webview
    *  Page Visibility API, so this explicit signal — routed from the `warden_hotkey`
@@ -189,6 +193,11 @@ export function reduce(state: SceneState, name: string, payload: any): SceneStat
   switch (name) {
     case 'orb_scene_ready':
       return { ...state, orbScene: normalizeOrbScene(payload) };
+
+    case 'radar_scene_ready':
+      // The live agent forest (backend `radar_state`). Normalized through the one
+      // honest seam so schema drift can never throw or invent a globe.
+      return { ...state, radarScene: normalizeRadarState(payload) };
 
     case 'candidates_nominated': {
       const raw = Array.isArray(payload?.candidates) ? payload.candidates : [];
@@ -366,10 +375,10 @@ export function createBridge(
       }
     },
     reset() {
-      // Live run signals clear; the persistent memory (orb scene, profile) and the
-      // summon state survive — they are not part of a single diagnosis run.
-      const { orbScene, summoned, profile } = state;
-      state = { ...emptyState(), orbScene, summoned, profile };
+      // Live run signals clear; the persistent memory (orb scene, radar forest,
+      // profile) and the summon state survive — none is part of a single run.
+      const { orbScene, radarScene, summoned, profile } = state;
+      state = { ...emptyState(), orbScene, radarScene, summoned, profile };
       emit();
     },
   };
