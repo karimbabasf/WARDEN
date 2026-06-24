@@ -134,3 +134,29 @@ export function pruneGone(map: LifecycleMap): LifecycleMap {
 export function crossfadeFactor(current: number, target: 0 | 1, dt: number): number {
   return dampValue(current, target, CROSSFADE_LAMBDA, dt);
 }
+
+/** Snapshot overlay should unmount once the incoming scene is essentially in. */
+const OVERLAY_DONE_AT = 0.985;
+
+export type CrossfadeOverlay = {
+  /** Opacity of the OUTGOING frozen snapshot, faded over the live incoming scene. */
+  opacity: number;
+  /** Keep the snapshot layer mounted? Drops it once the fade is essentially done. */
+  mounted: boolean;
+};
+
+/**
+ * Map a tab-transition `progress` (0 = just switched, 1 = incoming fully faded in;
+ * drive it with `crossfadeFactor`) to the OUTGOING snapshot overlay's render state.
+ *
+ * The live <Canvas> swaps to the incoming constellation IMMEDIATELY on a tab change
+ * (single warm mount, never remounted); a frozen frame of the outgoing scene is held
+ * as a DOM layer ON TOP at full opacity, then dissolved away as `progress` climbs —
+ * so the eye sees the old constellation cross-fade into the new one, never a hard cut
+ * (spec §8). Opacity is the complement of progress, clamped so a noisy/NaN input can
+ * never yield a stuck or invalid overlay. Pure ⇒ unit-tested without WebGL.
+ */
+export function crossfadeOverlay(progress: number): CrossfadeOverlay {
+  const p = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
+  return { opacity: 1 - p, mounted: p < OVERLAY_DONE_AT };
+}

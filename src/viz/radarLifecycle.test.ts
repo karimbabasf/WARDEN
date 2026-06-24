@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   reconcileLifecycle,
   crossfadeFactor,
+  crossfadeOverlay,
   isVisible,
   pruneGone,
   type LifecycleMap,
@@ -170,5 +171,31 @@ describe('crossfadeFactor — tab switch', () => {
     let f = 1;
     f = crossfadeFactor(f, 0, DT);
     expect(f).toBeLessThan(1);
+  });
+});
+
+describe('crossfadeOverlay — outgoing-snapshot fade', () => {
+  it('is fully opaque + mounted at the start of the transition (progress 0)', () => {
+    const o = crossfadeOverlay(0);
+    expect(o.opacity).toBe(1);
+    expect(o.mounted).toBe(true);
+  });
+
+  it('fades the snapshot opacity down as the incoming scene fades in', () => {
+    expect(crossfadeOverlay(0.25).opacity).toBeGreaterThan(crossfadeOverlay(0.75).opacity);
+    // opacity is the complement of progress (incoming in ⇒ outgoing out)
+    expect(crossfadeOverlay(0.4).opacity).toBeCloseTo(0.6, 5);
+  });
+
+  it('unmounts the snapshot once the fade is essentially complete (no lingering layer)', () => {
+    expect(crossfadeOverlay(1).mounted).toBe(false);
+    expect(crossfadeOverlay(0.999).mounted).toBe(false); // within epsilon → dropped
+    expect(crossfadeOverlay(0.9).mounted).toBe(true); // still mid-fade → kept
+  });
+
+  it('clamps a noisy progress value into a valid [0,1] opacity', () => {
+    expect(crossfadeOverlay(-0.5).opacity).toBe(1);
+    expect(crossfadeOverlay(1.5).opacity).toBe(0);
+    expect(crossfadeOverlay(Number.NaN).opacity).toBe(1); // defensive: never NaN opacity
   });
 });

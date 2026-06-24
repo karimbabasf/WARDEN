@@ -13,7 +13,7 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
-import { Sparkles, Stars, Environment, Lightformer, Html, Billboard } from '@react-three/drei';
+import { Environment, Lightformer, Html, Billboard } from '@react-three/drei';
 import * as THREE from 'three';
 import { invoke } from '@tauri-apps/api/core';
 import type { Bridge, SceneState } from './bridge';
@@ -21,6 +21,7 @@ import { harnessTheme } from './harnessTheme';
 import { layoutOrbScene } from './orbLayout';
 import type { LayoutNode, OrbIssue, OrbLayout, OrbSceneModel } from './orbTypes';
 import { Orb } from './Orb';
+import { StarCatalog } from './StarCatalog';
 import { CameraRig } from './CameraRig';
 import { Chrome, type FixPreview } from './chrome';
 import type { RevealFinding } from './compositions/Reveal';
@@ -28,6 +29,7 @@ import { NavBar, type ConstellationTab } from './NavBar';
 import { RadarSceneBody } from './RadarConstellation';
 import { RadarDetailPanel } from './RadarDetailPanel';
 import { layoutRadarScene, isFlatAgent } from './radarLayout';
+import { crossfadeFactor, crossfadeOverlay } from './radarLifecycle';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 
 const PlayerHost = lazy(() => import('./PlayerHost'));
@@ -302,10 +304,9 @@ function Scene({
         <Lightformer form="ring" intensity={1.2} color="#cfe9d8" position={[2, 4, 2]} scale={[2, 2, 1]} />
       </Environment>
 
-      {/* Real starfield (pulled in close + dense so it actually reads as a sky)
-          plus a few slow near motes for parallax depth. */}
-      <Stars radius={34} depth={46} count={4200} factor={5} saturation={0} fade speed={0.1} />
-      <Sparkles count={45} scale={[26, 15, 24]} size={1.5} speed={0.05} opacity={0.26} color="#bfeaff" />
+      {/* Deep multi-layer star catalog — fine, dense, glacially drifting, and
+          deliberately subordinate so the data reads first (see StarCatalog.tsx). */}
+      <StarCatalog />
 
       <CameraRig selected={selected} />
 
@@ -358,6 +359,18 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const active = activeFor(scene.summoned, visHidden);
   const introPlayed = useRef(!document.hidden);
   const [showIntro, setShowIntro] = useState(false);
+
+  // ── tab cross-fade (I-2 / spec §8) ─────────────────────────────────────────
+  // The single warm <Canvas> never remounts; on a Habits↔Radar switch its CONTENT
+  // swaps instantly, but a frozen frame of the OUTGOING constellation is held as a
+  // DOM layer on top and dissolved away (driven by the pure `crossfadeFactor` →
+  // `crossfadeOverlay`) so the eye sees a cross-fade, never a hard cut. Capturing a
+  // last frame needs the drawing buffer preserved (set on the Canvas `gl` below).
+  const glRef = useRef<THREE.WebGLRenderer | null>(null);
+  const [snapshot, setSnapshot] = useState<string | null>(null);
+  const [snapshotOpacity, setSnapshotOpacity] = useState(0);
+  const fadeRaf = useRef<number | null>(null);
+  const fadeProgress = useRef(1);
 
   useEffect(() => bridge.subscribe(setScene), [bridge]);
 
@@ -419,16 +432,64 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // onto that globe (selectedId → selectedNode → focus) and re-points the panel.
   const onRadarJump = useCallback((id: string) => setSelectedId(id), []);
 
+  // Capture the current Canvas frame as a still, mount it as the cross-fade overlay
+  // at full opacity, then dissolve it to 0 over ~0.5s via the pure `crossfadeFactor`
+  // ramp. The Canvas content has already swapped to the incoming tab, so the still
+  // sits over the live new scene — a true cross-fade on one warm Canvas (spec §8).
+  const beginCrossfade = useCallback(() => {
+    const gl = glRef.current;
+    if (!gl) return;
+    let frame: string | null = null;
+    try {
+      // preserveDrawingBuffer is on, so the last rendered frame is still readable.
+      frame = gl.domElement.toDataURL('image/png');
+    } catch {
+      frame = null; // tainted/again-unavailable buffer → skip the fade, swap is instant
+    }
+    if (!frame) return;
+
+    if (fadeRaf.current != null) cancelAnimationFrame(fadeRaf.current);
+    setSnapshot(frame);
+    setSnapshotOpacity(1);
+    fadeProgress.current = 0;
+
+    let last = performance.now();
+    const tick = (nowMs: number) => {
+      const dt = Math.min(0.05, Math.max(0, (nowMs - last) / 1000));
+      last = nowMs;
+      fadeProgress.current = crossfadeFactor(fadeProgress.current, 1, dt);
+      const overlay = crossfadeOverlay(fadeProgress.current);
+      setSnapshotOpacity(overlay.opacity);
+      if (overlay.mounted) {
+        fadeRaf.current = requestAnimationFrame(tick);
+      } else {
+        fadeRaf.current = null;
+        setSnapshot(null); // fully faded ⇒ drop the layer (no lingering still)
+      }
+    };
+    fadeRaf.current = requestAnimationFrame(tick);
+  }, []);
+
   // Switching constellations clears the per-scene hover/selection (the two scenes
-  // have disjoint node-id spaces) so the inspector never points at a stale node.
-  const onTab = useCallback((next: ConstellationTab) => {
-    setTab((cur) => {
-      if (cur === next) return cur;
-      setSelectedId(null);
-      setHoveredId(null);
-      setFixPreview(undefined);
-      return next;
-    });
+  // have disjoint node-id spaces) so the inspector never points at a stale node,
+  // and kicks off the cross-fade from the outgoing scene's last frame.
+  const onTab = useCallback(
+    (next: ConstellationTab) => {
+      setTab((cur) => {
+        if (cur === next) return cur;
+        setSelectedId(null);
+        setHoveredId(null);
+        setFixPreview(undefined);
+        beginCrossfade();
+        return next;
+      });
+    },
+    [beginCrossfade],
+  );
+
+  // Cancel any in-flight fade loop on unmount (no rAF leak across overlay teardown).
+  useEffect(() => () => {
+    if (fadeRaf.current != null) cancelAnimationFrame(fadeRaf.current);
   }, []);
 
   const onAsk = useCallback(
@@ -483,7 +544,12 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       <Canvas
         dpr={[1, 2]}
         frameloop={frameloopFor(!active)}
-        gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
+        // preserveDrawingBuffer lets the tab cross-fade read the outgoing scene's
+        // last frame (gl.domElement.toDataURL) — the snapshot it dissolves away.
+        gl={{ antialias: true, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: true }}
+        onCreated={({ gl }) => {
+          glRef.current = gl;
+        }}
         camera={{ position: [3.6, 2.4, 8.8], fov: 46, near: 0.1, far: 120 }}
       >
         {tab === 'radar' ? (
@@ -509,6 +575,28 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           />
         )}
       </Canvas>
+
+      {/* Outgoing-constellation still, dissolving over the live incoming scene on a
+          tab switch (driven by the rAF cross-fade loop). pointer-events:none so it
+          never blocks the new scene; unmounted by the loop once fully faded. */}
+      {snapshot ? (
+        <img
+          className="wd-tab-crossfade"
+          src={snapshot}
+          alt=""
+          aria-hidden
+          style={{
+            position: 'fixed',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            pointerEvents: 'none',
+            zIndex: 2,
+            opacity: snapshotOpacity,
+          }}
+        />
+      ) : null}
 
       <NavBar tab={tab} onTab={onTab} />
 
