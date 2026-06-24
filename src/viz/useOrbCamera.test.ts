@@ -3,6 +3,7 @@ import {
   cameraTargetForFocus,
   cameraTargetForOverview,
   cameraTargetForRadarOverview,
+  radarCanvasCamera,
   damp3,
 } from './useOrbCamera';
 
@@ -27,6 +28,19 @@ describe('useOrbCamera helpers', () => {
     expect(radar.position.z).toBeGreaterThan(0);
     // the radar forest spreads wider than a single habits cluster → pull back more
     expect(radar.position.z).toBeGreaterThanOrEqual(cameraTargetForOverview().position.z);
+  });
+
+  it('derives the radar standalone-canvas camera prop from the radar overview pose', () => {
+    // The radar scene flies via the CameraRig (OrbitControls), but its standalone
+    // <Canvas> still needs a sane INITIAL pose. We anchor that on the same
+    // `cameraTargetForRadarOverview` pose so there is a single source of truth for
+    // "where the radar opens" — wiring the overview export into the render path
+    // instead of leaving it dead. The derived prop must sit at the overview z.
+    const overview = cameraTargetForRadarOverview();
+    const cam = radarCanvasCamera();
+    expect(cam.position).toEqual([overview.position.x, overview.position.y, overview.position.z]);
+    expect(cam.fov).toBeGreaterThan(0);
+    expect(cam.far).toBeGreaterThan(cam.near);
   });
 
   it('damps vector components without overshooting', () => {

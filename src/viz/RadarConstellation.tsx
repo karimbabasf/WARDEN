@@ -26,6 +26,7 @@ import { CameraRig } from './CameraRig';
 import { frameloopFor } from './WarRoom';
 import { reconcileLifecycle, pruneGone, isVisible, type LifecycleMap, type LiveId } from './radarLifecycle';
 import { RadarHoverCard } from './RadarHoverCard';
+import { radarCanvasCamera } from './useOrbCamera';
 
 const BG = '#020403';
 const WHITE = new THREE.Color('#ffffff');
@@ -617,7 +618,9 @@ export function RadarConstellation(props: RadarConstellationProps & { active?: b
       dpr={[1, 2]}
       frameloop={frameloopFor(!active)}
       gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
-      camera={{ position: [0, 1.4, 11.5], fov: 46, near: 0.1, far: 140 }}
+      // Opening pose anchored on the shared radar overview (useOrbCamera); the
+      // CameraRig takes over for free-orbit + the click-to-focus dive.
+      camera={radarCanvasCamera()}
     >
       <RadarSceneBody {...props} />
     </Canvas>

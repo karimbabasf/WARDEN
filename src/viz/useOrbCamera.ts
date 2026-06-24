@@ -39,6 +39,27 @@ export function cameraTargetForRadarOverview(): CameraTarget {
   };
 }
 
+/** The `<Canvas camera>` prop for the standalone radar scene. */
+export type CanvasCameraProps = {
+  position: [number, number, number];
+  fov: number;
+  near: number;
+  far: number;
+};
+
+/**
+ * Initial camera for the radar's standalone <Canvas> (the dev harness; in the live
+ * app the radar body shares WarRoom's Canvas). The radar then FLIES via the
+ * CameraRig (drei OrbitControls + damped focus-dive onto the selected globe), but
+ * its opening pose is anchored here on the SAME `cameraTargetForRadarOverview`
+ * pose, so "where the radar opens" has one source of truth and that overview export
+ * is wired into the render path rather than left dead.
+ */
+export function radarCanvasCamera(): CanvasCameraProps {
+  const { position } = cameraTargetForRadarOverview();
+  return { position: [position.x, position.y, position.z], fov: 46, near: 0.1, far: 140 };
+}
+
 export function cameraTargetForFocus(position: Vec3, radius: number): CameraTarget {
   const distance = 2.2 + Math.max(0.8, radius) * 2.1;
   return {
