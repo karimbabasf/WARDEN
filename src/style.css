@@ -481,6 +481,56 @@ html, body {
   white-space: pre;
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   RADAR — live agent forest overlays (Phase 3). Hover quick-glance card +
+   detail panel. Tinted by the RADAR palette via a per-instance `--harness` var
+   (Claude orange / Codex violet), colour ALWAYS paired with a glyph + label.
+   Self-contained glass (no `wd-preview` reuse) so the hover card can stay fully
+   pointer-transparent — it floats over the globe and must never capture events.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* hover quick-glance card — node-anchored via drei <Html>, constant pixel size */
+.wd-radar-card {
+  pointer-events: none;
+  user-select: none;
+  width: 208px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--harness, var(--green)) 50%, transparent);
+  background: linear-gradient(150deg, color-mix(in srgb, var(--harness, var(--green)) 13%, transparent), rgba(2, 9, 6, 0.9));
+  box-shadow: 0 0 26px color-mix(in srgb, var(--harness, var(--green)) 22%, transparent);
+  backdrop-filter: blur(11px);
+  -webkit-backdrop-filter: blur(11px);
+  color: var(--ink);
+  animation: wd-bloom 150ms ease-out both;
+}
+.wd-radar-card-role { color: var(--ink-faint); text-transform: none; letter-spacing: 0; }
+.wd-radar-card .wd-card-main { font-size: 14px; letter-spacing: 0.02em; }
+
+.wd-radar-card-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  margin: 10px 0 0;
+}
+.wd-radar-card-stats > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wd-radar-card-stats dt {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.wd-radar-card-stats dd {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wd-radar-status.is-working { color: var(--acid); }
+.wd-radar-status.is-idle { color: var(--ink-faint); }
+.wd-radar-status.is-closed { color: var(--amber); }
+
 /* ── empty state (center invite) ───────────────────────────────────────────*/
 .wd-empty {
   position: absolute;

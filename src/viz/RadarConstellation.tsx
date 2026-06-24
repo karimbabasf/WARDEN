@@ -13,10 +13,10 @@
 // palette, so Radar uses its OWN heat-coloured globe + link mesh here rather than
 // mutating those — but mirrors their lattice look so the two constellations match.
 
-import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
-import { Sparkles, Stars, Environment, Lightformer, Wireframe } from '@react-three/drei';
+import { Sparkles, Stars, Environment, Lightformer, Wireframe, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode, OrbLayout } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
@@ -25,6 +25,7 @@ import { radarHarness, heatColor } from './radarTheme';
 import { CameraRig } from './CameraRig';
 import { frameloopFor } from './WarRoom';
 import { reconcileLifecycle, pruneGone, isVisible, type LifecycleMap, type LiveId } from './radarLifecycle';
+import { RadarHoverCard } from './RadarHoverCard';
 
 const BG = '#020403';
 const WHITE = new THREE.Color('#ffffff');
@@ -462,6 +463,30 @@ function LifecycleDriver({
   return null;
 }
 
+// Screen-space hover quick-glance card, pinned to the hovered globe via drei
+// <Html> (the same node-anchored, constant-pixel-size overlay pattern WarRoom uses
+// for its hub labels). Sits a touch above the globe and never captures pointer
+// events, so the orbit camera and the globe's own hit-sphere stay fully reachable.
+// Hidden while that same globe is the active selection — the detail panel owns the
+// readout then, and a card stacked over the dimmed globe would just be noise.
+function RadarHoverLayer({ node, suppressed }: { node: LayoutNode | null; suppressed: boolean }) {
+  if (!node || suppressed) return null;
+  const agent = node.radarAgent;
+  if (!agent) return null;
+  // lift the card above the globe by its layout radius so it clears the lattice.
+  const lift = Math.max(0.6, node.radius) + 0.5;
+  return (
+    <Html
+      position={[node.position.x, node.position.y + lift, node.position.z]}
+      center
+      zIndexRange={[8, 0]}
+      style={{ pointerEvents: 'none' } as CSSProperties}
+    >
+      <RadarHoverCard agent={agent} />
+    </Html>
+  );
+}
+
 // The scene body (lights + space + nodes). Pulled out so it can sit inside the
 // shared <Canvas> in WarRoom OR a standalone <Canvas> in the dev harness.
 export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
@@ -521,6 +546,12 @@ export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave,
     [layout, ghostNodes, renderTick],
   );
   const selectedNode = useMemo(() => layout.nodes.find((n) => n.id === selectedId) ?? null, [layout, selectedId]);
+  // Pin the hover card to whichever globe is currently rendered (live or a
+  // still-imploding ghost) so it tracks the node even mid-lifecycle.
+  const hoveredNode = useMemo(
+    () => renderNodes.find((n) => n.id === hoveredId) ?? null,
+    [renderNodes, hoveredId],
+  );
 
   return (
     <>
@@ -564,6 +595,8 @@ export function RadarSceneBody({ model, hoveredId, selectedId, onHover, onLeave,
           />
         ))}
       </group>
+
+      <RadarHoverLayer node={hoveredNode} suppressed={Boolean(hoveredId && hoveredId === selectedId)} />
 
       <EffectComposer multisampling={4}>
         <Bloom intensity={0.95} luminanceThreshold={0.26} luminanceSmoothing={0.95} mipmapBlur radius={0.74} />

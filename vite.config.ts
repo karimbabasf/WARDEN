@@ -17,9 +17,13 @@ export default defineConfig({
     sourcemap: true
   },
   test: {
-    // The bridge is pure logic; node is enough and keeps the unit suite fast.
-    // (3D render output is verified live, never asserted here.)
+    // The bridge + layout cores are pure logic; node is enough and keeps that
+    // suite fast (3D render output is verified live, never asserted here).
+    // Phase-3 panel/card COMPONENT tests render real DOM, so they live in
+    // `*.test.tsx` files that each opt into jsdom via a `// @vitest-environment
+    // jsdom` pragma (same pattern as mount.test.ts). The default env stays node;
+    // broadening `include` to also match `.test.tsx` is all that is needed.
     environment: 'node',
-    include: ['src/**/*.test.ts']
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx']
   }
 });
