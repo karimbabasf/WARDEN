@@ -24,6 +24,7 @@ import { Orb } from './Orb';
 import { CameraRig } from './CameraRig';
 import { Chrome, type FixPreview } from './chrome';
 import type { RevealFinding } from './compositions/Reveal';
+import { NavBar, type ConstellationTab } from './NavBar';
 
 const PlayerHost = lazy(() => import('./PlayerHost'));
 
@@ -344,6 +345,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     clustered: 0,
   }));
   const [visHidden, setVisHidden] = useState(() => document.hidden);
+  const [tab, setTab] = useState<ConstellationTab>('habits');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [fixPreview, setFixPreview] = useState<FixPreview | undefined>();
@@ -386,6 +388,18 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const onClear = useCallback(() => {
     setSelectedId(null);
     setFixPreview(undefined);
+  }, []);
+
+  // Switching constellations clears the per-scene hover/selection (the two scenes
+  // have disjoint node-id spaces) so the inspector never points at a stale node.
+  const onTab = useCallback((next: ConstellationTab) => {
+    setTab((cur) => {
+      if (cur === next) return cur;
+      setSelectedId(null);
+      setHoveredId(null);
+      setFixPreview(undefined);
+      return next;
+    });
   }, []);
 
   const onAsk = useCallback(
@@ -454,6 +468,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           onClear={onClear}
         />
       </Canvas>
+
+      <NavBar tab={tab} onTab={onTab} />
 
       <Chrome
         scene={scene}
