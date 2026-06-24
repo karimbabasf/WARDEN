@@ -12,6 +12,7 @@
 
 import type { LayoutNode, OrbLayout, OrbLink, Vec3 } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
+import { radarHarness, RADAR_NEUTRAL } from './radarTheme';
 
 // Depth boost: a main planet is biggest; each level down is meaningfully smaller.
 // (Index past the table clamps to the last, deepest value.)
@@ -20,6 +21,25 @@ const DEPTH_BOOST = [0.62, 0.3, 0.16, 0.1];
 function depthBoost(depth: number): number {
   const d = Math.max(0, Math.floor(depth));
   return DEPTH_BOOST[Math.min(d, DEPTH_BOOST.length - 1)];
+}
+
+/**
+ * Honest-viz flat-globe guard (spec §4.4 / §5). Some agents CANNOT have children,
+ * by the nature of their data source:
+ *
+ *   • VS Code Codex (`origin === 'codex_vscode'`) — that integration spawns no
+ *     subagents; the rollout files carry no `parent_thread_id` tree.
+ *   • Unknown / empty harness — a schema-drift globe we render neutrally; we have
+ *     no hierarchy signal for it, so we never invent one.
+ *
+ * Such an agent is a FLAT solo globe: even if a malformed payload hands us a child
+ * whose `parentId` points at it, the layout refuses to orbit that child under it.
+ * Pure + exported so the guarantee is unit-tested directly. (A Codex Desktop agent
+ * — `origin: 'Codex Desktop'` or unset — is NOT flat: it legitimately has children.)
+ */
+export function isFlatAgent(agent: RadarAgent): boolean {
+  if (agent.origin === 'codex_vscode') return true;
+  return radarHarness(agent.harness) === RADAR_NEUTRAL;
 }
 
 /**
@@ -93,21 +113,33 @@ function makeNode(agent: RadarAgent, position: Vec3): LayoutNode {
 export function layoutRadarScene(model: RadarSceneModel): OrbLayout {
   const agents = model.agents;
   const byId = new Map(agents.map((a) => [a.id, a]));
+
+  // A parentId only RESOLVES if the parent is present AND not flat. A flat parent
+  // (VS Code Codex / unknown harness) cannot own children, so a child pointing at
+  // one is treated exactly like an orphan: no orbit, no link, promoted to a solo
+  // root below. One predicate so the linkage and the roots filter never disagree.
+  const resolvesParent = (a: RadarAgent): boolean => {
+    const pid = a.parentId;
+    if (!pid) return false;
+    const parent = byId.get(pid);
+    return Boolean(parent) && !isFlatAgent(parent!);
+  };
+
   const childrenOf = new Map<string, RadarAgent[]>();
   for (const a of agents) {
-    const pid = a.parentId;
-    if (pid && byId.has(pid)) {
-      const list = childrenOf.get(pid) ?? [];
+    if (resolvesParent(a)) {
+      const list = childrenOf.get(a.parentId!) ?? [];
       list.push(a);
-      childrenOf.set(pid, list);
+      childrenOf.set(a.parentId!, list);
     }
   }
   for (const list of childrenOf.values()) list.sort((x, y) => x.id.localeCompare(y.id));
 
-  // Roots: depth 0, OR any agent whose declared parent is absent (orphan promoted
-  // to a solo root so it still renders — honest, never dropped).
+  // Roots: depth 0, OR any agent whose declared parent does not resolve (absent OR
+  // flat) — promoted to a solo root so it still renders (honest, never dropped),
+  // but never fabricated as a moon under a globe that cannot have one.
   const roots = agents
-    .filter((a) => a.depth === 0 || !a.parentId || !byId.has(a.parentId))
+    .filter((a) => a.depth === 0 || !resolvesParent(a))
     .sort((x, y) => x.id.localeCompare(y.id));
 
   const maxRootR = roots.reduce((m, r) => Math.max(m, radarRadius(r.contextTokens, 0)), 0.34);

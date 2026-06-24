@@ -27,7 +27,7 @@ import type { RevealFinding } from './compositions/Reveal';
 import { NavBar, type ConstellationTab } from './NavBar';
 import { RadarSceneBody } from './RadarConstellation';
 import { RadarDetailPanel } from './RadarDetailPanel';
-import { layoutRadarScene } from './radarLayout';
+import { layoutRadarScene, isFlatAgent } from './radarLayout';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 
 const PlayerHost = lazy(() => import('./PlayerHost'));
@@ -393,8 +393,14 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     () => (tab === 'radar' && selectedId ? radarModel.agents.find((a) => a.id === selectedId) ?? null : null),
     [tab, selectedId, radarModel],
   );
+  // A flat agent (VS Code Codex / unknown harness) yields [] even if a drifted
+  // payload pointed a stray child at it — the roster mirrors the layout's flat-globe
+  // guard so the panel never fabricates a child the constellation refused to orbit.
   const selectedRadarChildren = useMemo<RadarAgent[]>(
-    () => (selectedRadarAgent ? radarModel.agents.filter((a) => a.parentId === selectedRadarAgent.id) : []),
+    () =>
+      selectedRadarAgent && !isFlatAgent(selectedRadarAgent)
+        ? radarModel.agents.filter((a) => a.parentId === selectedRadarAgent.id)
+        : [],
     [selectedRadarAgent, radarModel],
   );
 
