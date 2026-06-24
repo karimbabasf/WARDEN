@@ -85,6 +85,19 @@ pub fn radar_working_ms() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(15000)
 }
+/// RADAR: seconds after which a non-archived Codex rollout is treated as abandoned
+/// and dropped from the live forest (hybrid stale policy). Codex has no
+/// process/termination signal (unlike Claude's PID), so a rollout the user never
+/// archived would otherwise linger forever. `WARDEN_RADAR_CODEX_STALE_HRS` overrides
+/// (hours, default 6); `0` disables the cutoff. Claude is unaffected — its PID is the
+/// hard liveness signal.
+pub fn radar_codex_stale_secs() -> u64 {
+    std::env::var("WARDEN_RADAR_CODEX_STALE_HRS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(6)
+        * 3600
+}
 pub fn default_codex_archived_sessions() -> PathBuf {
     std::env::var("WARDEN_CODEX_ARCHIVED_SESSIONS")
         .map(|s| expand_tilde(&s))

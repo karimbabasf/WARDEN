@@ -238,10 +238,12 @@ pub fn recompute_and_emit_radar(
     store: &Store,
     sessions_dir: &std::path::Path,
     app: &tauri::AppHandle,
-) {
+) -> usize {
     use tauri::Emitter;
     let state = crate::radar::recompute_radar_state(store, sessions_dir);
+    let agent_count = state.agents.len();
     let _ = app.emit("radar_state", &state);
+    agent_count
 }
 
 /// A cheap, thread-safe "the live forest changed" signal shared between the FS
@@ -349,6 +351,49 @@ where
     })
 }
 
+/// Heartbeat interval (ms) for the radar liveness tick — see [`spawn_radar_tick`].
+/// `WARDEN_RADAR_TICK_MS` overrides (default 2000); `0` disables the heartbeat.
+fn radar_tick_ms() -> u64 {
+    std::env::var("WARDEN_RADAR_TICK_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(2000)
+}
+
+/// Spawn the radar liveness heartbeat: every `interval`, IF the last recomputed forest
+/// had at least one agent (`agent_count > 0`), mark the forest dirty so the single
+/// recompute worker re-derives liveness.
+///
+/// Why: most transitions are driven by FS events (a registry status flip, a rollout
+/// write, an archive move). But an agent that goes quiet writes nothing more, so a
+/// purely event-driven radar can leave a globe stuck "working" (mtime-fallback agents:
+/// older Claude / Codex) or fail to drop a terminated agent if FSEvents coalesces away
+/// its removal. The heartbeat closes both gaps within one interval.
+///
+/// CPU-safe (the 800%→1-core invariant holds): when the forest is EMPTY this only
+/// sleeps + loads an atomic — ZERO recomputes; when agents are open it raises at most
+/// ONE coalesced recompute per interval (the worker still serializes + debounces).
+/// `interval == 0` disables the heartbeat entirely.
+pub fn spawn_radar_tick(
+    signal: RadarDirtySignal,
+    agent_count: Arc<std::sync::atomic::AtomicUsize>,
+    interval: Duration,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        if interval.is_zero() {
+            return; // heartbeat disabled
+        }
+        loop {
+            tokio::time::sleep(interval).await;
+            // Gate on a non-empty forest: an idle machine only sleeps + loads an atomic,
+            // never recomputes. A live forest raises ONE coalesced recompute per tick.
+            if agent_count.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                signal.mark_dirty();
+            }
+        }
+    })
+}
+
 /// Spawn the RADAR liveness watchers: the Claude `~/.claude/sessions` registry
 /// (create/delete ⇒ globe bloom/implode) plus the Codex live + archived roots
 /// (archive-move ⇒ done). On any change we recompute the whole forest from files
@@ -369,6 +414,7 @@ pub fn spawn_radar_watcher(
 ) -> Result<(
     Vec<notify::RecommendedWatcher>,
     tauri::async_runtime::JoinHandle<()>,
+    tauri::async_runtime::JoinHandle<()>,
 )> {
     use notify::{EventKind, RecursiveMode, Watcher};
 
@@ -382,15 +428,28 @@ pub fn spawn_radar_watcher(
     // The single dirty signal shared by every watcher, drained by one worker that
     // recomputes + emits at most once per debounce window.
     let signal = RadarDirtySignal::new();
+    // Last forest size — written by the worker after each recompute, read by the
+    // liveness heartbeat so it only ticks while at least one agent is open.
+    let agent_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let worker = {
         let store = store.clone();
         let app = app.clone();
         let sessions_dir = sessions_dir.clone();
         let signal = signal.clone();
+        let agent_count = agent_count.clone();
         spawn_radar_recompute_worker(signal, debounce(), move || {
-            recompute_and_emit_radar(&store, &sessions_dir, &app);
+            let n = recompute_and_emit_radar(&store, &sessions_dir, &app);
+            agent_count.store(n, std::sync::atomic::Ordering::SeqCst);
         })
     };
+    // Liveness heartbeat: re-derive liveness every tick WHILE agents are open (settles a
+    // stuck "working" globe / drops a termination FSEvents may have coalesced away);
+    // zero recomputes when the forest is empty.
+    let tick = spawn_radar_tick(
+        signal.clone(),
+        agent_count,
+        Duration::from_millis(radar_tick_ms()),
+    );
 
     let mut watchers = Vec::new();
     for root in roots {
@@ -430,7 +489,7 @@ pub fn spawn_radar_watcher(
         tracing::info!(root=%root.display(), "watching for live agents (radar)");
         watchers.push(watcher);
     }
-    Ok((watchers, worker))
+    Ok((watchers, worker, tick))
 }
 
 #[cfg(test)]
@@ -539,6 +598,54 @@ mod tests {
             "a signal during a run yields exactly one follow-up recompute, got {total}"
         );
         worker.abort();
+    }
+
+    /// B2 — the liveness heartbeat: while at least one agent is open the tick raises a
+    /// periodic recompute (so a stuck "working" globe settles and a missed termination
+    /// still drops), and while the forest is EMPTY it raises NONE (the CPU invariant —
+    /// an idle machine does zero recomputes).
+    #[tokio::test]
+    async fn radar_tick_signals_only_while_agents_present() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let agent_count = Arc::new(AtomicUsize::new(0));
+        let signal = RadarDirtySignal::new();
+        let worker = {
+            let runs = runs.clone();
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let tick = spawn_radar_tick(signal.clone(), agent_count.clone(), Duration::from_millis(20));
+
+        // Empty forest → the heartbeat must NOT fire any recompute.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "no heartbeat recomputes while the forest is empty"
+        );
+
+        // Agents present → the heartbeat drives periodic recomputes.
+        agent_count.store(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let active = runs.load(Ordering::SeqCst);
+        assert!(
+            active >= 2,
+            "heartbeat should recompute while agents are open, got {active}"
+        );
+
+        // Forest empties again → ticking stops (count plateaus, allowing one in-flight).
+        agent_count.store(0, Ordering::SeqCst);
+        let frozen = runs.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let after = runs.load(Ordering::SeqCst);
+        assert!(
+            after <= frozen + 1,
+            "no heartbeat after the forest empties ({frozen} -> {after})"
+        );
+
+        worker.abort();
+        tick.abort();
     }
 
     /// Build a registry over a single Codex adapter rooted at `root` (its archived

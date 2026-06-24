@@ -27,6 +27,8 @@ struct RadarWatcherGuard {
     watchers: std::sync::Mutex<Vec<notify::RecommendedWatcher>>,
     #[allow(dead_code)]
     worker: tauri::async_runtime::JoinHandle<()>,
+    #[allow(dead_code)]
+    tick: tauri::async_runtime::JoinHandle<()>,
 }
 use tauri::tray::TrayIconBuilder;
 use tauri::{ActivationPolicy, Emitter, Manager};
@@ -40,13 +42,13 @@ fn summon_overlay(app: &tauri::AppHandle) {
         let _ = w.set_focus();
         let _ = app.emit(
             "warden_hotkey",
-            serde_json::json!({"hotkey":"cmd+shift+space"}),
+            serde_json::json!({"hotkey":"cmd+option+control+m"}),
         );
     }
 }
 
 /// Hide the overlay window. The daemon keeps running and the window is
-/// re-summonable via the ⌘⇧Space hotkey or the tray menu. Drives the hotkey
+/// re-summonable via the ⌘⌥⌃M hotkey or the tray menu. Drives the hotkey
 /// toggle.
 fn dismiss_overlay(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("overlay") {
@@ -103,10 +105,11 @@ pub fn run() {
                 radar_roots,
                 app.handle().clone(),
             ) {
-                Ok((watchers, worker)) => {
+                Ok((watchers, worker, tick)) => {
                     app.manage(RadarWatcherGuard {
                         watchers: std::sync::Mutex::new(watchers),
                         worker,
+                        tick,
                     });
                 }
                 Err(e) => {
@@ -214,10 +217,13 @@ pub fn run() {
             //    hotkey. Dismissal is now explicit (tray, hotkey, or the
             //    minimize_window / hide_window commands).
 
-            // 6) Global hotkey ⌘⇧Space, replacing the old Alt+Space. Guard with
+            // 6) Global hotkey ⌘⌥⌃M, replacing the old ⌘⇧Space. Guard with
             //    is_registered so a hot-reload / re-setup does not double-register.
             let handle = app.handle().clone();
-            let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
+            let shortcut = Shortcut::new(
+                Some(Modifiers::SUPER | Modifiers::ALT | Modifiers::CONTROL),
+                Code::KeyM,
+            );
             let gs = app.global_shortcut();
             if !gs.is_registered(shortcut) {
                 gs.on_shortcut(shortcut, move |_app, _shortcut, event| {

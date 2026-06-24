@@ -271,7 +271,15 @@ pub fn max_window_for_model(model: &str) -> u64 {
     if m.contains("opus") || m.contains("sonnet") || m.contains("haiku") || m.contains("claude") {
         return 200_000;
     }
-    if m.contains("codex") || m.contains("gpt-5") || m.contains("gpt5") || m.contains("o200k") {
+    // `openai` is the Codex Desktop *provider* id (`session_meta.model_provider`),
+    // which `build_agent` passes here for Codex sessions — map it to the Codex/GPT-5
+    // class window so the live Codex globe gets a real context bar instead of 0.
+    if m.contains("codex")
+        || m.contains("gpt-5")
+        || m.contains("gpt5")
+        || m.contains("o200k")
+        || m.contains("openai")
+    {
         return 258_400;
     }
     0
@@ -347,6 +355,18 @@ mod tests {
         assert_eq!(max_window_for_model("claude-3-5-haiku"), 200_000);
         assert_eq!(max_window_for_model("claude-sonnet-4-5"), 200_000);
         assert_eq!(max_window_for_model("gpt-5-codex"), 258_400);
+    }
+
+    /// The Codex provider id (`openai`, from `session_meta.model_provider`) maps to
+    /// the Codex / GPT-5-class window. `build_agent` passes the *provider* id (not a
+    /// per-turn model name) to `max_window_for_model` for Codex, so without an
+    /// `openai` entry the live Codex globe reports a 0 window and shows no context
+    /// bar. The on-disk `model_context_window` equals this value (258_400) today, so
+    /// the table stays the single honest window source for every harness.
+    #[test]
+    fn max_window_codex_openai_provider_is_gpt5_class() {
+        assert_eq!(max_window_for_model("openai"), 258_400);
+        assert_eq!(max_window_for_model("OpenAI"), 258_400, "case-insensitive");
     }
 
     /// The 1M-context Sonnet window matches ONLY the two explicit advertised forms

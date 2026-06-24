@@ -586,10 +586,93 @@ fn path_basename(p: &str) -> String {
 fn first_task(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> Option<String> {
     events.iter().find_map(|(_, e)| match &e.event {
         Event::UserPrompt { text, is_meta, .. } if !is_meta && !text.trim().is_empty() => {
-            Some(crate::util::truncate_chars(text.trim(), 64))
+            let name = clean_task_label(text);
+            (!name.is_empty()).then_some(name)
         }
         _ => None,
     })
+}
+
+/// Clean a raw user prompt into a globe-sized agent name: collapse ALL whitespace
+/// (a multi-line prompt becomes one line), drop a leading `@file`/URL token when real
+/// text follows (so the name is WHAT the agent is doing, not an attachment path), and
+/// truncate to a name-sized length. Returns "" only for empty/whitespace input.
+fn clean_task_label(raw: &str) -> String {
+    // Collapse newlines/tabs/runs-of-spaces into single spaces so a multi-line prompt
+    // renders as one clean name.
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return String::new();
+    }
+    // Drop a leading attachment/URL token when real text follows it, so the name is
+    // the task — not a pasted path or link. Only the first token, only if text remains.
+    let cleaned = match collapsed.split_once(' ') {
+        Some((head, rest)) if is_noise_token(head) && !rest.trim().is_empty() => rest.trim(),
+        _ => collapsed.as_str(),
+    };
+    crate::util::truncate_chars(cleaned, 60)
+}
+
+/// A leading prompt token that is an attachment path (`@…`) or a bare URL — noise to
+/// drop from an agent name when the real prompt text follows it.
+fn is_noise_token(tok: &str) -> bool {
+    tok.starts_with('@') || tok.starts_with("http://") || tok.starts_with("https://")
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::clean_task_label;
+
+    #[test]
+    fn collapses_internal_whitespace_and_newlines() {
+        assert_eq!(clean_task_label("  fix   the\n\nradar  glow "), "fix the radar glow");
+    }
+
+    #[test]
+    fn strips_leading_at_file_mention() {
+        assert_eq!(
+            clean_task_label("@/Users/k/Desktop/MOBIUS-intro.mp4 turn this into a launch video"),
+            "turn this into a launch video"
+        );
+    }
+
+    #[test]
+    fn strips_leading_quoted_at_file_mention() {
+        assert_eq!(
+            clean_task_label("@\"/Users/k/clip.mp4\" This video needs captions"),
+            "This video needs captions"
+        );
+    }
+
+    #[test]
+    fn strips_leading_bare_url() {
+        assert_eq!(
+            clean_task_label("https://github.com/foo/bar Can you review this repo"),
+            "Can you review this repo"
+        );
+    }
+
+    #[test]
+    fn keeps_leading_token_when_it_is_the_whole_prompt() {
+        // Nothing meaningful follows → keep the original rather than an empty name.
+        assert_eq!(
+            clean_task_label("@/Users/k/only-a-path.txt"),
+            "@/Users/k/only-a-path.txt"
+        );
+    }
+
+    #[test]
+    fn truncates_to_name_size_with_ellipsis() {
+        let long = "design a comprehensive multi agent orchestration radar with glow and tethers and side panels";
+        let out = clean_task_label(long);
+        assert!(out.chars().count() <= 60, "got {} chars: {out:?}", out.chars().count());
+        assert!(out.ends_with('…'), "long label should be ellipsized: {out:?}");
+    }
+
+    #[test]
+    fn empty_or_whitespace_is_empty() {
+        assert_eq!(clean_task_label("   \n  "), "");
+    }
 }
 
 /// Identity quad: `(label, nickname, role, origin)`.
@@ -729,6 +812,38 @@ pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> RadarState {
     )
 }
 
+/// Whether a non-archived Codex rollout is recent enough to still count as "present"
+/// on the radar (hybrid stale policy). Codex has no process/termination signal, so a
+/// rollout the user never archived would linger forever; we hide one idle longer than
+/// `stale_secs` (`WARDEN_RADAR_CODEX_STALE_HRS`, default 6h). `stale_secs == 0`
+/// disables the cutoff; an unknown mtime is KEPT (never drop on a missing stat).
+fn codex_fresh(mtime_secs_ago: Option<u64>, stale_secs: u64) -> bool {
+    if stale_secs == 0 {
+        return true; // cutoff disabled
+    }
+    match mtime_secs_ago {
+        Some(secs) => secs <= stale_secs,
+        None => true, // unknown mtime → keep (never drop on a missing stat)
+    }
+}
+
+#[cfg(test)]
+mod codex_stale_tests {
+    use super::codex_fresh;
+
+    #[test]
+    fn keeps_recent_drops_stale_handles_unknown_and_disabled() {
+        assert!(codex_fresh(Some(60), 21_600), "1m ago within 6h → keep");
+        assert!(!codex_fresh(Some(7 * 3600), 21_600), "7h ago past 6h → drop");
+        assert!(codex_fresh(Some(21_600), 21_600), "exactly at cutoff → keep (<=)");
+        assert!(
+            codex_fresh(None, 21_600),
+            "unknown mtime → keep (never drop on a missing stat)"
+        );
+        assert!(codex_fresh(Some(999_999), 0), "cutoff disabled (0) → keep all");
+    }
+}
+
 /// Scan the two Codex roots and return the set of rollout UUIDs that are currently
 /// OPEN — i.e. present under `sessions_dir` and absent from `archived_dir`. The
 /// archive move is Codex's "done" signal (spec §4.3), so an id in the archive is
@@ -740,30 +855,53 @@ fn live_codex_rollout_ids(
     archived_dir: &Path,
 ) -> std::collections::HashSet<String> {
     use std::collections::HashSet;
-    let scan = |root: &Path| -> HashSet<String> {
-        let mut ids = HashSet::new();
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let p = entry.path();
-            let is_rollout = entry.file_type().is_file()
-                && p.extension().map(|x| x == "jsonl").unwrap_or(false)
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("rollout-"))
-                    .unwrap_or(false);
-            if is_rollout {
-                ids.insert(crate::ingest::codex::external_id_from_filename(p));
-            }
-        }
-        ids
+    let is_rollout = |entry: &walkdir::DirEntry| -> bool {
+        let p = entry.path();
+        entry.file_type().is_file()
+            && p.extension().map(|x| x == "jsonl").unwrap_or(false)
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("rollout-"))
+                .unwrap_or(false)
     };
-    let archived = scan(archived_dir);
-    scan(sessions_dir)
+    // Archived rollouts are closed regardless of age — collect their ids to exclude.
+    let mut archived = HashSet::new();
+    for entry in walkdir::WalkDir::new(archived_dir)
         .into_iter()
-        .filter(|id| !archived.contains(id))
-        .collect()
+        .filter_map(|e| e.ok())
+    {
+        if is_rollout(&entry) {
+            archived.insert(crate::ingest::codex::external_id_from_filename(entry.path()));
+        }
+    }
+    // Live rollouts: under sessions/, not archived, and not stale. The freshness
+    // cutoff (hybrid policy) drops a rollout the user abandoned without archiving —
+    // Codex has no PID/termination signal, so mtime age is the only "still active" cue.
+    let stale_secs = crate::util::radar_codex_stale_secs();
+    let now = std::time::SystemTime::now();
+    let mut out = HashSet::new();
+    for entry in walkdir::WalkDir::new(sessions_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !is_rollout(&entry) {
+            continue;
+        }
+        let id = crate::ingest::codex::external_id_from_filename(entry.path());
+        if archived.contains(&id) {
+            continue;
+        }
+        let mtime_secs_ago = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|mt| now.duration_since(mt).ok())
+            .map(|d| d.as_secs());
+        if codex_fresh(mtime_secs_ago, stale_secs) {
+            out.insert(id);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
