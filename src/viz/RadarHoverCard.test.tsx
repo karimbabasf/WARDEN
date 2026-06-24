@@ -68,7 +68,7 @@ describe('RadarHoverCard — quick-glance fields', () => {
     expect(text).toContain('72%'); // fillPct → percent
     expect(text).toContain('2 children'); // childCount, pluralised
     expect(text).toMatch(/working/i); // status
-    expect(text).toContain('◆'); // codex harness glyph (radarTheme)
+    expect(text).toContain('▣'); // codex harness glyph (radarTheme)
     expect(text).toContain('Codex'); // harness label paired with glyph (a11y)
   });
 
@@ -79,7 +79,7 @@ describe('RadarHoverCard — quick-glance fields', () => {
     const text = el.textContent ?? '';
     expect(text).toContain('1 child');
     expect(text).not.toContain('1 children');
-    expect(text).toContain('●'); // claude glyph
+    expect(text).toContain('◆'); // claude glyph
     expect(text).toContain('Claude');
   });
 

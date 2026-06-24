@@ -278,17 +278,17 @@ describe('bridge reducer', () => {
 });
 
 describe('harnessTheme', () => {
-  it('maps codex to its electric aqua mark', () => {
-    expect(harnessTheme('codex').color).toBe('#2de2c0');
-    expect(harnessTheme('codex').glyph).toBe('▲');
+  it('maps codex to its electric violet mark', () => {
+    expect(harnessTheme('codex').color).toBe('#b98cff');
+    expect(harnessTheme('codex').glyph).toBe('▣');
   });
 
-  it('maps claude_code to its luminous coral brand colour', () => {
-    expect(harnessTheme('claude_code').color).toBe('#ff7d50');
+  it('maps claude_code to its coral-orange brand colour', () => {
+    expect(harnessTheme('claude_code').color).toBe('#ff8c42');
   });
 
   it('falls back to a neutral theme for unknown harnesses', () => {
     expect(harnessTheme('gemini').label).toBe('Unknown');
-    expect(harnessTheme('gemini').color).toBe('#9aa7a2');
+    expect(harnessTheme('gemini').color).toBe('#8fa0b8');
   });
 });
