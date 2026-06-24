@@ -48,6 +48,7 @@ export type RadarAgent = {
   depth: number; // 0 = root, 1 = subagent, …
   label: string;
   nickname: string | null;
+  cwd: string | null; // project-folder basename (root only), for the "folder · model" subtitle
   role: string | null;
   model: string | null;
   status: RadarStatus;
@@ -66,6 +67,30 @@ export type RadarSceneModel = {
   agents: RadarAgent[];
   generatedAt: string;
 };
+
+/** Collapse a full model id to a glanceable family name (claude-opus-4-8 → opus). */
+export function shortModel(m: string | null): string | null {
+  if (!m) return null;
+  const s = m.toLowerCase();
+  if (s.includes('opus')) return 'opus';
+  if (s.includes('sonnet')) return 'sonnet';
+  if (s.includes('haiku')) return 'haiku';
+  if (s.includes('gpt-5')) return 'gpt-5';
+  return m;
+}
+
+/**
+ * The secondary "folder · model" identity line shown under an agent's name. Only
+ * meaningful when the folder ADDS information beyond the label — i.e. the label is
+ * the agent's task (Claude roots), not the folder itself (Codex). Returns null when
+ * there's nothing useful to add, so the UI renders no empty subtitle.
+ */
+export function radarSubtitle(agent: Pick<RadarAgent, 'label' | 'cwd' | 'model'>): string | null {
+  const folder = agent.cwd && agent.cwd !== (agent.label || '') ? agent.cwd : null;
+  if (!folder) return null;
+  const m = shortModel(agent.model);
+  return m ? `${folder} · ${m}` : folder;
+}
 
 // ── coercion helpers (shared shape with bridge.ts; kept local so radarTypes has
 // no import cycle and can be unit-tested in isolation) ─────────────────────────
@@ -135,6 +160,7 @@ function normalizeAgent(a: any): RadarAgent {
     depth: Math.max(0, Math.round(num(a?.depth))),
     label: str(a?.label),
     nickname: strOrNull(a?.nickname),
+    cwd: strOrNull(a?.cwd),
     role: strOrNull(a?.role),
     model: strOrNull(a?.model),
     status: status(a?.status),

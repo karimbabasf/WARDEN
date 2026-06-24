@@ -17,6 +17,7 @@
 
 import type { CSSProperties } from 'react';
 import type { RadarAgent } from './radarTypes';
+import { radarSubtitle } from './radarTypes';
 import { radarHarness, heatColor } from './radarTheme';
 
 // ── small pure formatters ──────────────────────────────────────────────────────
@@ -322,6 +323,7 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
   const theme = radarHarness(agent.harness);
   const heat = heatColor(theme.color, agent.fillPct);
   const title = agent.label || agent.nickname || agent.id;
+  const subtitle = radarSubtitle(agent);
 
   return (
     <aside
@@ -339,6 +341,7 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
             <span className={`wd-radar-status is-${agent.status}`}> · {STATUS_LABEL[agent.status]}</span>
           </div>
           <h2 className="wd-detail-title">{title}</h2>
+          {subtitle ? <div className="wd-detail-sub">{subtitle}</div> : null}
         </div>
         {onClose ? (
           <button className="wd-detail-close" type="button" onClick={onClose} aria-label="Close detail">

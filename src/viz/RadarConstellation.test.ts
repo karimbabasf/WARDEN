@@ -21,6 +21,7 @@ function agent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id' | 'harness' 
     depth: 0,
     label: partial.id,
     nickname: null,
+    cwd: null,
     role: null,
     model: null,
     status: 'working',

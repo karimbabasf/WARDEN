@@ -5,6 +5,7 @@
 //!   cp ~/.warden/warden.db /tmp/warden_probe.db
 //!   WARDEN_DB_PATH=/tmp/warden_probe.db cargo run --example radar_probe
 
+use warden_lib::radar::liveness::{pid_alive, read_claude_registry};
 use warden_lib::radar::recompute_radar_state;
 use warden_lib::store::Store;
 use warden_lib::util::{default_claude_sessions_dir, default_db_path};
@@ -19,6 +20,18 @@ fn main() {
     let total_sessions = store.sessions().map(|s| s.len()).unwrap_or(0);
     eprintln!("store sessions (all) = {total_sessions}");
 
+    // ── Raw registry ground truth (what liveness actually reads) ────────────────
+    let registry = read_claude_registry(&reg);
+    println!("\n=== CLAUDE REGISTRY ({} entries) ===", registry.len());
+    for (pid, v) in &registry {
+        let alive = pid_alive(*pid);
+        let sid = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("?");
+        let cwd = v.get("cwd").and_then(|x| x.as_str()).unwrap_or("?");
+        let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("<none>");
+        let ver = v.get("version").and_then(|x| x.as_str()).unwrap_or("?");
+        println!("  pid={pid} alive={alive} reg_status={status} ver={ver} sid={sid} cwd={cwd}");
+    }
+
     let state = recompute_radar_state(&store, &reg);
 
     // Dump the EXACT bytes the `get_radar_state` IPC command returns, so a throwaway
@@ -28,9 +41,16 @@ fn main() {
     std::fs::write(out, &json).expect("write realRadar.json");
     eprintln!("wrote {} ({} bytes)", out, json.len());
 
-    println!("generated_at = {}", state.generated_at);
+    println!("\ngenerated_at = {}", state.generated_at);
     println!("RADAR AGENTS (globes) = {}", state.agents.len());
+    let (mut working, mut idle, mut closed) = (0, 0, 0);
     for a in &state.agents {
+        match a.status.as_str() {
+            "working" => working += 1,
+            "idle" => idle += 1,
+            "closed" => closed += 1,
+            _ => {}
+        }
         let indent = "  ".repeat(a.depth as usize + 1);
         println!(
             "{indent}[{}] {} | status={} depth={} fill={:.1} ctx={}/{} kids={} model={:?} role={:?} parent={:?}",
@@ -46,5 +66,14 @@ fn main() {
             a.role,
             a.parent_id,
         );
+        // The "what is it doing" signal — files touched / commands run / messages.
+        if a.recent_activity.is_empty() {
+            println!("{indent}    activity: <none>");
+        } else {
+            for act in a.recent_activity.iter().take(6) {
+                println!("{indent}    · [{}] {}", act.kind, act.label);
+            }
+        }
     }
+    println!("\nSUMMARY: working={working} idle={idle} closed={closed}");
 }

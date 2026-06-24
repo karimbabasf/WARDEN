@@ -392,6 +392,7 @@ html, body {
 
 .wd-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .wd-detail-title { margin: 6px 0 0; font-size: 17px; line-height: 1.15; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink); }
+.wd-detail-sub { margin: 4px 0 0; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
 .wd-detail-close {
   flex: none;
   width: 26px; height: 26px;
@@ -505,6 +506,7 @@ html, body {
 }
 .wd-radar-card-role { color: var(--ink-faint); text-transform: none; letter-spacing: 0; }
 .wd-radar-card .wd-card-main { font-size: 14px; letter-spacing: 0.02em; }
+.wd-card-sub { margin-top: 3px; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-faint); }
 
 .wd-radar-card-stats {
   display: grid;

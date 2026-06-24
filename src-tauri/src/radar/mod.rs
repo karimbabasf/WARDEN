@@ -41,6 +41,10 @@ pub struct RadarAgent {
     pub depth: u32,
     pub label: String,
     pub nickname: Option<String>,
+    /// The agent's project-folder basename (root only), e.g. `WARDEN`. Carried
+    /// separately from `label` so the FACE can render a "folder · model" subtitle
+    /// even when `label` is the agent's task. `None` when there is no project cwd.
+    pub cwd: Option<String>,
     pub role: Option<String>,
     pub model: Option<String>,
     pub status: String,
@@ -375,7 +379,13 @@ fn build_agent(
 
     let recent_activity = recent_activity(&events);
     let est_cost_usd = est_cost_usd(&model, &exact);
-    let (label, nickname, role, origin) = identity(s);
+    let task = first_task(&events);
+    let (label, nickname, role, origin) = identity(s, task);
+    let cwd = s
+        .project
+        .as_ref()
+        .and_then(|p| p.cwd.file_name())
+        .map(|n| n.to_string_lossy().to_string());
 
     RadarAgent {
         id: s.id.clone(),
@@ -385,6 +395,7 @@ fn build_agent(
         depth,
         label,
         nickname,
+        cwd,
         role,
         model,
         status: status.as_str().to_string(),
@@ -509,11 +520,14 @@ fn recent_activity(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> Vec<
     let mut out: Vec<RadarActivity> = Vec::new();
     for (_, e) in events.iter().rev() {
         let (kind, label) = match &e.event {
-            Event::ToolCall { tool, .. } => ("tool", tool.clone()),
-            Event::ToolResult { call_id, .. } => ("tool", format!("result {call_id}")),
+            // The "what is it doing" signal: name the file touched / command run, not
+            // just the bare tool name.
+            Event::ToolCall { tool, input, .. } => ("tool", tool_activity_label(tool, input)),
             Event::AssistantText { text } => ("message", crate::util::truncate_chars(text, 80)),
             Event::UserPrompt { text, .. } => ("message", crate::util::truncate_chars(text, 80)),
             Event::Thinking { .. } => ("thinking", "thinking".to_string()),
+            // ToolResult (and the rest) is not a distinct action — its bare
+            // `result <call_id>` row was pure noise, so it is dropped here.
             _ => continue,
         };
         out.push(RadarActivity {
@@ -528,12 +542,67 @@ fn recent_activity(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> Vec<
     out
 }
 
+/// A target-rich activity label for a tool call: the file it touches or the command
+/// it runs, prefixed by a compact tool name — e.g. `Read orbLayout.ts`,
+/// `Bash cargo test`, `exec_command cargo build`. Falls back to the tool name alone
+/// when the input carries no obvious target. Mirrors the real `Event::ToolCall.input`
+/// shapes for Claude (`file_path`/`command`/`pattern`) and Codex (`cmd`).
+fn tool_activity_label(tool: &str, input: &serde_json::Value) -> String {
+    let s = |k: &str| input.get(k).and_then(|v| v.as_str());
+    let short = short_tool_name(tool);
+    let target = if let Some(f) = s("file_path").or_else(|| s("path")).or_else(|| s("notebook_path")) {
+        Some(path_basename(f))
+    } else if let Some(c) = s("command").or_else(|| s("cmd")) {
+        Some(crate::util::truncate_chars(c.trim(), 64))
+    } else if let Some(p) = s("pattern") {
+        Some(crate::util::truncate_chars(p, 48))
+    } else {
+        None
+    };
+    match target {
+        Some(t) if !t.is_empty() => format!("{short} {t}"),
+        _ => short,
+    }
+}
+
+/// A compact tool name: an MCP tool (`mcp__server__tool`) collapses to its final
+/// segment (`tool`); everything else passes through unchanged.
+fn short_tool_name(tool: &str) -> String {
+    tool.rsplit("__").next().unwrap_or(tool).to_string()
+}
+
+/// The last component of a slash/backslash path (keeps the filename, drops the long
+/// directory prefix). Returns the input unchanged when it has no separators.
+fn path_basename(p: &str) -> String {
+    p.rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(p)
+        .to_string()
+}
+
+/// The agent's originating task: its first non-meta user prompt, truncated to a
+/// name-sized string. `None` when the session has no real user prompt yet (so the
+/// label falls back to the folder). Skips `is_meta` prompts (system/tool-injected).
+fn first_task(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> Option<String> {
+    events.iter().find_map(|(_, e)| match &e.event {
+        Event::UserPrompt { text, is_meta, .. } if !is_meta && !text.trim().is_empty() => {
+            Some(crate::util::truncate_chars(text.trim(), 64))
+        }
+        _ => None,
+    })
+}
+
 /// Identity quad: `(label, nickname, role, origin)`.
 /// * Claude subagent → label = its sidecar `description`, role = its `agentType`
 ///   (persisted onto the child `meta` when the parent linkage is recorded);
+/// * Claude root → label = its originating `task` (so several live sessions in the
+///   same repo are differentiated by WHAT each is doing), falling back to cwd basename;
 /// * Codex → nickname/role/origin from `session_meta`; label = nickname when set;
-/// * otherwise label = cwd basename (root), falling back to the external id.
-fn identity(s: &Session) -> (String, Option<String>, Option<String>, Option<String>) {
+/// * final fallback for any harness = cwd basename → nickname → external id.
+fn identity(
+    s: &Session,
+    task: Option<String>,
+) -> (String, Option<String>, Option<String>, Option<String>) {
     let nickname = s
         .meta
         .get("agent_nickname")
@@ -569,9 +638,20 @@ fn identity(s: &Session) -> (String, Option<String>, Option<String>, Option<Stri
             .map(str::to_string)
     });
 
-    // Label precedence: Claude subagent description → cwd basename (root) → Codex
-    // nickname → external id.
+    // Task-first naming for Claude: a session in a shared repo is named by WHAT it
+    // is doing (its originating prompt), not just the folder — so several live
+    // sessions in the same cwd are differentiated. Codex keeps its existing
+    // nickname/cwd naming (its sessions already carry good `session_meta` names).
+    let task_label = if matches!(s.harness, Harness::Codex) {
+        None
+    } else {
+        task
+    };
+
+    // Label precedence: Claude subagent description → Claude root task → cwd basename
+    // → Codex nickname → external id.
     let label = claude_description
+        .or(task_label)
         .or_else(|| {
             s.project
                 .as_ref()
@@ -918,7 +998,15 @@ mod tests {
         assert_eq!(root.depth, 0);
         assert_eq!(root.parent_id, None);
         assert_eq!(root.child_count, 1, "root has one linked child");
-        assert_eq!(root.label, "MyRepo", "label is the cwd basename");
+        assert_eq!(
+            root.label, "do the thing",
+            "a Claude root is labeled by its originating task"
+        );
+        assert_eq!(
+            root.cwd.as_deref(),
+            Some("MyRepo"),
+            "the cwd basename is still exposed for the folder subtitle"
+        );
         assert_eq!(root.context_tokens, 345_007, "2+13761+331244");
         assert!((root.fill_pct - 1.0).abs() < 1e-9, "clamped to 1.0");
         assert_eq!(root.composition.exact.cache_read, 331_244);
@@ -1037,6 +1125,130 @@ mod tests {
         assert_eq!(parent.child_count, 1, "parent shows one child");
     }
 
+    /// The "what is it doing" signal: a tool call's recent-activity label names its
+    /// TARGET (file path basename / command), not just the bare tool name, and the
+    /// opaque `result <call_id>` rows are dropped (they were pure noise). Built from
+    /// the real `Event::ToolCall.input` shapes for Claude (`file_path`/`command`) and
+    /// Codex (`cmd`).
+    #[test]
+    fn recent_activity_names_tool_targets_and_drops_result_rows() {
+        let now = Utc::now();
+        let turn = Turn {
+            id: "t".into(),
+            session_id: "s".into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let mk = |i: u64, event: Event| {
+            (
+                turn.clone(),
+                EventRecord {
+                    id: format!("e{i}"),
+                    turn_id: "t".into(),
+                    session_id: "s".into(),
+                    ts: now,
+                    event,
+                    raw_ref: RawRef {
+                        source_path: PathBuf::from("/x.jsonl"),
+                        offset: i,
+                        line: i as u32,
+                    },
+                },
+            )
+        };
+        let events = vec![
+            mk(
+                1,
+                Event::ToolCall {
+                    tool: "Read".into(),
+                    input: serde_json::json!({"file_path":"/Users/k/WARDEN/src/viz/orbLayout.ts"}),
+                    call_id: "c1".into(),
+                    kind: ToolKind::Builtin,
+                },
+            ),
+            mk(
+                2,
+                Event::ToolResult {
+                    call_id: "c1".into(),
+                    status: ToolStatus::Ok,
+                    bytes: 10,
+                    summary: None,
+                },
+            ),
+            mk(
+                3,
+                Event::ToolCall {
+                    tool: "Bash".into(),
+                    input: serde_json::json!({"command":"cargo test radar"}),
+                    call_id: "c2".into(),
+                    kind: ToolKind::Builtin,
+                },
+            ),
+            mk(
+                4,
+                Event::ToolCall {
+                    tool: "exec_command".into(),
+                    input: serde_json::json!({"cmd":"cargo build","workdir":"/Users/k/WARDEN"}),
+                    call_id: "c3".into(),
+                    kind: ToolKind::Builtin,
+                },
+            ),
+        ];
+        let acts = recent_activity(&events);
+        assert!(
+            acts.iter().all(|a| !a.label.starts_with("result ")),
+            "opaque `result <id>` rows must be dropped, got {acts:?}"
+        );
+        assert!(
+            acts.iter()
+                .any(|a| a.kind == "tool" && a.label.contains("orbLayout.ts")),
+            "a Read must name the file it touches, got {acts:?}"
+        );
+        assert!(
+            acts.iter()
+                .any(|a| a.kind == "tool" && a.label.contains("cargo test radar")),
+            "a Bash must name the command it runs, got {acts:?}"
+        );
+        assert!(
+            acts.iter()
+                .any(|a| a.kind == "tool" && a.label.contains("cargo build")),
+            "a Codex exec_command must name the command it runs, got {acts:?}"
+        );
+    }
+
+    /// Naming: a Claude ROOT agent is named by its originating task (its first
+    /// non-meta user prompt), not merely the cwd basename — so several live sessions
+    /// in the same repo are differentiated by what each is doing. The folder basename
+    /// is still exposed (as `cwd`) for the secondary "folder · model" subtitle.
+    #[test]
+    fn claude_root_label_is_its_task_with_cwd_exposed() {
+        let store = Store::memory().unwrap();
+        seed(
+            &store,
+            "r",
+            "r-ext",
+            Harness::ClaudeCode,
+            Some("/Users/k/Developer/WARDEN"),
+            Some((2, 100, 1000, 50, "claude-opus-4-8")),
+        );
+        let reg = claude_registry(&[(100, "r-ext")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let a = state.agents.iter().find(|a| a.id == "r").expect("root present");
+        assert_eq!(
+            a.label, "do the thing",
+            "a Claude root is named by its originating task, not the cwd basename"
+        );
+        assert_eq!(
+            a.cwd.as_deref(),
+            Some("WARDEN"),
+            "the folder basename is exposed as `cwd` for the subtitle"
+        );
+    }
+
     /// Finding 1: a linked Claude subagent surfaces its sidecar `description` as the
     /// `label` and its `agentType` as the `role` (the frozen `radar_state` contract),
     /// instead of falling back to the external id with a null role.
@@ -1093,9 +1305,10 @@ mod tests {
             "Claude subagent role is its agentType"
         );
 
-        // Root label is NOT regressed (still the cwd basename).
+        // Root is labeled by its task; its folder is still exposed as `cwd`.
         let p = state.agents.iter().find(|a| a.id == "p-sid").unwrap();
-        assert_eq!(p.label, "MyRepo", "root label stays the cwd basename");
+        assert_eq!(p.label, "do the thing", "root label is its originating task");
+        assert_eq!(p.cwd.as_deref(), Some("MyRepo"), "root still exposes its cwd");
     }
 
     /// `est_cost_usd` bills cache reads ~10× cheaper than fresh input: for opus

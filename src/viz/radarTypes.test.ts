@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeRadarState } from './radarTypes';
+import { normalizeRadarState, radarSubtitle } from './radarTypes';
 
 // The backend emits the frozen `radar_state` contract (camelCase). The frontend
 // must survive missing optionals + out-of-range numbers without throwing, so
@@ -48,6 +48,13 @@ describe('normalizeRadarState', () => {
     expect(a.composition.estimated).toEqual({ preamble: 7000, conversation: 3000, toolOutput: 1500, thinking: 200 });
     expect(a.recentActivity[0]).toEqual({ ts: '2026-06-23T22:50:00Z', kind: 'tool', label: 'Read' });
     expect(a.estCostUsd).toBeCloseTo(0.42);
+  });
+
+  it('carries the cwd (folder subtitle) through and defaults it to null when missing', () => {
+    const withCwd = normalizeRadarState({ agents: [{ ...fullAgent(), cwd: 'WARDEN' }] });
+    expect(withCwd.agents[0].cwd).toBe('WARDEN');
+    const without = normalizeRadarState({ agents: [{ id: 'a', harness: 'codex', status: 'idle' }] });
+    expect(without.agents[0].cwd).toBeNull();
   });
 
   it('defaults missing optionals (nickname/role/origin → null, estimated → null, estCostUsd → null)', () => {
@@ -100,6 +107,19 @@ describe('normalizeRadarState', () => {
     expect(normalizeRadarState(null).agents).toEqual([]);
     expect(normalizeRadarState({ agents: 'nope' }).agents).toEqual([]);
     expect(normalizeRadarState({}).generatedAt).toBe('');
+  });
+
+  it('builds a "folder · model" subtitle only when the folder adds info beyond the label', () => {
+    // Claude root: label is the task, so the folder + short model is useful context.
+    expect(radarSubtitle({ label: 'Polish the M3 radar fixes', cwd: 'WARDEN', model: 'claude-opus-4-8' })).toBe(
+      'WARDEN · opus',
+    );
+    // Codex: label already IS the folder → no redundant subtitle.
+    expect(radarSubtitle({ label: 'github project', cwd: 'github project', model: 'openai' })).toBeNull();
+    // No folder → no subtitle.
+    expect(radarSubtitle({ label: 'x', cwd: null, model: 'claude-haiku-4-5-20251001' })).toBeNull();
+    // Folder present but model unknown → folder alone.
+    expect(radarSubtitle({ label: 'do a thing', cwd: 'MOBIUS', model: null })).toBe('MOBIUS');
   });
 
   it('drops only the estimated lens when malformed but keeps exact', () => {
