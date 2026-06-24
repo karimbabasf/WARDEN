@@ -29,14 +29,13 @@ struct RadarWatcherGuard {
     worker: tauri::async_runtime::JoinHandle<()>,
 }
 use tauri::tray::TrayIconBuilder;
-use tauri::{ActivationPolicy, Emitter, Manager, WindowEvent};
+use tauri::{ActivationPolicy, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-/// Reveal the pre-warmed overlay: disable click-through, show, focus, and signal
-/// the frontend to animate in. Idempotent — safe to call when already visible.
+/// Reveal the persistent overlay window: show, focus, and signal the frontend to
+/// animate in. Idempotent — safe to call when already visible.
 fn summon_overlay(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.set_ignore_cursor_events(false);
         let _ = w.show();
         let _ = w.set_focus();
         let _ = app.emit(
@@ -46,12 +45,12 @@ fn summon_overlay(app: &tauri::AppHandle) {
     }
 }
 
-/// Hide the overlay and restore desktop click-through (idle state). Shared by the
-/// hotkey toggle and the `tauri://blur` dismissal.
+/// Hide the overlay window. The daemon keeps running and the window is
+/// re-summonable via the ⌘⇧Space hotkey or the tray menu. Drives the hotkey
+/// toggle.
 fn dismiss_overlay(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.hide();
-        let _ = w.set_ignore_cursor_events(true);
     }
 }
 
@@ -64,11 +63,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            // 1) Become a menubar-only agent BEFORE any window is shown, else macOS
-            //    flashes a Dock icon for the pre-warmed overlay. Paired with
-            //    LSUIElement in Info.plist for the bundled .app.
+            // 1) Persistent app: show a Dock icon so Minimize has a home and the
+            //    window behaves like a regular macOS app. The overlay is still
+            //    created hidden (tauri.conf.json visible:false) and summoned via
+            //    the hotkey/tray; the daemon stays alive when the window is hidden.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(ActivationPolicy::Accessory);
+            app.set_activation_policy(ActivationPolicy::Regular);
 
             let state = AppState::init().map_err(|e| format!("state init: {e}"))?;
 
@@ -207,18 +207,12 @@ pub fn run() {
             }
             tray.build(app)?;
 
-            // 5) Pre-warm the overlay: it is created hidden (tauri.conf.json
-            //    visible:false). Start it click-through so the desktop stays
-            //    interactive until summoned, and hide-on-blur to dismiss.
-            if let Some(overlay) = app.get_webview_window("overlay") {
-                let _ = overlay.set_ignore_cursor_events(true);
-                let handle = app.handle().clone();
-                overlay.on_window_event(move |event| {
-                    if let WindowEvent::Focused(false) = event {
-                        dismiss_overlay(&handle);
-                    }
-                });
-            }
+            // 5) The overlay is a persistent app window, created hidden
+            //    (tauri.conf.json visible:false) and revealed on summon. It is no
+            //    longer click-through and no longer dismisses on blur/focus-loss —
+            //    it stays put until the user minimizes/hides it or toggles the
+            //    hotkey. Dismissal is now explicit (tray, hotkey, or the
+            //    minimize_window / hide_window commands).
 
             // 6) Global hotkey ⌘⇧Space, replacing the old Alt+Space. Guard with
             //    is_registered so a hot-reload / re-setup does not double-register.
@@ -253,6 +247,8 @@ pub fn run() {
             run_diagnosis,
             ask,
             hide_overlay,
+            minimize_window,
+            hide_window,
             get_fix_preview,
             get_orb_fix_preview,
             resolve_evidence,

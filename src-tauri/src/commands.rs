@@ -368,6 +368,27 @@ pub async fn hide_overlay(app: tauri::AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
+/// Minimize the persistent overlay window to the Dock (macOS). Best-effort: a
+/// missing window must not error the frontend, so failures are swallowed.
+#[tauri::command]
+pub async fn minimize_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.minimize();
+    }
+    Ok(())
+}
+/// Hide the persistent overlay window. The daemon keeps running and the window
+/// stays re-summonable via the tray menu or the ⌘⇧Space hotkey. Best-effort: a
+/// missing window must not error the frontend, so failures are swallowed.
+#[tauri::command]
+pub async fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.hide();
+    }
+    Ok(())
+}
 #[tauri::command]
 pub async fn apply_artifact(_id: String) -> Result<(), String> {
     Err(not_in_slice("Forge artifact apply"))
