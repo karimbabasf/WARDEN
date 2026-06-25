@@ -29,6 +29,9 @@ pub struct AppState {
     /// `run_lock` (which only guards `run_diagnosis`).
     pub forge_lock: Arc<Mutex<()>>,
     pub radar_state: crate::scheduler::RadarStateCache,
+    /// Living-Habits heartbeat (Piece 2): the selected window + last-scan stamp +
+    /// per-window expensive-run clocks, shared with the background heartbeat tick.
+    pub habits: crate::scheduler::HabitsHeartbeat,
 }
 impl AppState {
     pub fn init() -> Result<Self> {
@@ -42,6 +45,9 @@ impl AppState {
             run_lock: Arc::new(Mutex::new(())),
             forge_lock: Arc::new(Mutex::new(())),
             radar_state: crate::scheduler::new_radar_state_cache(),
+            habits: crate::scheduler::HabitsHeartbeat::new(
+                crate::scheduler::RadarDirtySignal::new(),
+            ),
         }
     }
 
@@ -98,6 +104,22 @@ pub struct OrbIssue {
     pub finding_id: Option<String>,
     pub verifier_verdict: Option<String>,
     pub status: Option<String>,
+    // --- Living-Habits Piece 3: time-gated clean-streak progress (the FACE draws a
+    // progress arc from credits/streak_k and an implode state from `fixed`). All
+    // additive + `#[serde(default)]` so older payloads/consumers stay compatible.
+    /// Counted clean credits earned toward `streak_k` in the active window.
+    #[serde(default)]
+    pub credits: u32,
+    /// `K` — clean credits required to implode (resolve) this habit in the window.
+    #[serde(default)]
+    pub streak_k: u32,
+    /// True once `credits >= streak_k`: the habit has earned its spaced-out proof
+    /// (and, at the AllTime window, its guardrail has been durably erased).
+    #[serde(default)]
+    pub fixed: bool,
+    /// ISO-8601 (RFC3339) of the most recent counted credit, or `None`.
+    #[serde(default)]
+    pub last_credit_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +285,12 @@ pub(crate) fn build_orb_scene(store: &Store) -> Result<OrbScenePayload> {
                 finding_id: persisted.map(|f| f.id.clone()),
                 verifier_verdict: persisted.and_then(|f| f.verifier_verdict.clone()),
                 status: persisted.map(|f| f.status.clone()),
+                // The legacy (non-windowed) orb scene has no streak context; the
+                // windowed habits feed (`nominate_window_issues`) is what carries it.
+                credits: 0,
+                streak_k: 0,
+                fixed: false,
+                last_credit_at: None,
             });
         }
     }
@@ -297,6 +325,142 @@ pub async fn get_diagnosis(state: tauri::State<'_, AppState>) -> Result<Option<D
 pub async fn get_findings(state: tauri::State<'_, AppState>) -> Result<Vec<Finding>, String> {
     let p = state.store.profile().map_err(|e| e.to_string())?;
     crate::detectors::nominate(&state.store, &p).map_err(|e| e.to_string())
+}
+
+/// Time-windowed findings as `OrbIssue`s (the FACE "Time Machine" feed). Parses
+/// the wire `window` string (`"today"|"7d"|"30d"|"6mo"|"all"`; unknown →
+/// all-time, never panics), turns it into a `since` cutoff relative to
+/// `Utc::now()`, nominates over only the in-window features, and projects each
+/// `Finding` to the same `OrbIssue` shape `get_orb_scene` emits so the existing
+/// FACE consumers render it unchanged. All-time (`"all"`) considers every
+/// feature, identical to the unwindowed nominate.
+#[tauri::command]
+pub async fn get_findings_windowed(
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<Vec<OrbIssue>, String> {
+    let w = crate::window::Window::from_str(&window);
+    nominate_window_issues(&state.store, w, Utc::now()).map_err(|e| e.to_string())
+}
+
+/// Nominate windowed findings for `window` (cutoff relative to `now`) and project
+/// each to the `OrbIssue` shape — the shared core of [`get_findings_windowed`] and
+/// the heartbeat's cheap scan ([`crate::scheduler::run_cheap_scan`]). `now` is
+/// passed in (not read from the clock) so a caller can pin the window deterministically.
+pub fn nominate_window_issues(
+    store: &Store,
+    window: crate::window::Window,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<OrbIssue>> {
+    let since = window.since(now);
+    let profile = store.profile()?;
+    let findings = crate::detectors::nominate_windowed(store, &profile, since)?;
+    let sessions_by_id = store
+        .sessions()?
+        .into_iter()
+        .map(|s| (s.id.clone(), s))
+        .collect::<HashMap<_, _>>();
+    let mut issues: Vec<OrbIssue> = findings
+        .into_iter()
+        .map(|f| orb_issue_from_finding(f, &sessions_by_id))
+        .collect();
+    // Living-Habits Piece 3: attach each habit's time-gated clean-streak progress,
+    // scaled to `window`. The series is labeled from the SAME in-window features the
+    // detectors saw (via `session_trips_pattern`), so credits/fixed cannot drift.
+    let features = store.features_since(since)?;
+    crate::habits::attach_streak_progress(&mut issues, &features, window);
+    Ok(issues)
+}
+
+/// Living-Habits (Piece 2): select the habits window. Stores it as active, runs
+/// ONE cheap `nominate_windowed` scan immediately, stamps `last_scanned_at`, and
+/// emits `habits_refreshed` (windowed `OrbIssue`s + ISO-8601 stamp + window) so
+/// the FACE updates the instant the dial moves — no waiting for the next tick.
+/// Then, if the new window's expensive (GLM) tier is due (or Today is armed), it
+/// kicks the coalesced heartbeat worker so the paid pass runs serialized in the
+/// background. The cheap scan is synchronous (fast, on-device); the expensive
+/// pass is never inline.
+#[tauri::command]
+pub async fn set_habits_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<(), String> {
+    let w = crate::window::Window::from_str(&window);
+    state.habits.set_window(w);
+
+    // One immediate cheap scan so the dial feels live.
+    let now = Utc::now();
+    let (issues, pattern_ids) =
+        crate::scheduler::run_cheap_scan(&state.store, now, w).map_err(|e| e.to_string())?;
+    let stamp = state.habits.record_cheap_scan(now, pattern_ids.clone());
+    crate::scheduler::emit_habits_refreshed(&app, w, &issues, stamp);
+
+    // Living-Habits Piece 3: reconcile the durable resolution ledger with this scan.
+    // Hold `forge_lock` so a durable erase never interleaves with a concurrent
+    // apply/revert on the same CLAUDE.md (the same lost-update guard `apply_artifact`
+    // uses). Both steps are best-effort: a write hiccup is logged, never fatal to the
+    // window select.
+    {
+        let _guard = state.forge_lock.lock().await;
+        // A pattern raised again (a slip) is no longer resolved → drop its ledger row
+        // so the normal apply flow re-adds the guardrail.
+        if let Err(e) = crate::habits::clear_resolutions_for_active(&state.store, &pattern_ids) {
+            tracing::warn!(error = ?e, "clearing re-flagged habit resolutions failed");
+        }
+        // A habit that is `fixed` at the STRONG-proof window (AllTime by default,
+        // env-tunable) earns a durable guardrail erase — idempotent, fires once.
+        // Short-window fixes are visual-only implodes and erase nothing here.
+        crate::habits::durable_erase_fixed(&state.store, w, &issues, now);
+    }
+
+    // For Today (event-driven), or any window whose expensive clock is due, kick
+    // the worker — it runs the GLM pass coalesced + serialized, never inline here.
+    if state.habits.expensive_due(Utc::now()) {
+        state.habits.kick();
+    }
+    Ok(())
+}
+
+/// Project a single `Finding` onto the `OrbIssue` shape, mirroring the field
+/// mapping `build_orb_scene` uses (harness resolved from the finding's first
+/// evidence session, `id` = `harness:pattern_id`, evidence session ids, the
+/// finding already persisted/verified so `finding_id`/`status`/`verifier_verdict`
+/// are carried through). `count` is the number of distinct evidence sessions.
+fn orb_issue_from_finding(f: Finding, sessions_by_id: &HashMap<String, Session>) -> OrbIssue {
+    let harness = finding_harness(&f, sessions_by_id);
+    let mut session_ids: Vec<String> = Vec::new();
+    for e in &f.evidence {
+        if !session_ids.contains(&e.session_id) {
+            session_ids.push(e.session_id.clone());
+        }
+    }
+    OrbIssue {
+        id: format!("{harness}:{}", f.pattern_id),
+        agent_id: harness.clone(),
+        harness,
+        pattern_id: f.pattern_id,
+        title: f.title,
+        count: session_ids.len() as u32,
+        severity: f.severity,
+        rationale: f.rationale,
+        est_cost_tokens: f.est_cost_tokens,
+        est_cost_minutes: f.est_cost_minutes,
+        frequency: f.frequency,
+        confidence: f.confidence,
+        session_ids,
+        finding_id: Some(f.id),
+        verifier_verdict: f.verifier_verdict,
+        status: Some(f.status),
+        evidence: f.evidence,
+        // Streak progress is attached separately (see `nominate_window_issues`),
+        // since it is windowed and reads the full in-window feature history, not
+        // just this finding. Default to "no progress yet" here.
+        credits: 0,
+        streak_k: 0,
+        fixed: false,
+        last_credit_at: None,
+    }
 }
 #[tauri::command]
 pub async fn get_orb_scene(state: tauri::State<'_, AppState>) -> Result<OrbScenePayload, String> {
@@ -1397,5 +1561,56 @@ mod tests {
                 "re-apply must keep the ORIGINAL pre_image_sha256"
             );
         });
+    }
+
+    /// Integration: the windowed habits feed (`nominate_window_issues`) attaches
+    /// time-gated streak progress onto each `OrbIssue`, scaled to the window, and it
+    /// agrees with the pure streak core over the SAME in-window features. Proves the
+    /// Piece-3 wiring end-to-end (store → detectors → streak attach), not just the
+    /// pure unit in `habits.rs`.
+    #[test]
+    fn windowed_habits_feed_attaches_streak_progress() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+
+        // Three CONTEXT_BLOAT-tripping sessions (search_in_main_context>=8), spaced
+        // 4/2/0 days ago — all SLIPS for CONTEXT_BLOAT, all inside the 7d window.
+        let stamps = [
+            now - chrono::Duration::days(4),
+            now - chrono::Duration::days(2),
+            now,
+        ];
+        for (i, ts) in stamps.iter().enumerate() {
+            let id = format!("blo{i}");
+            seed_session(&store, &id, Harness::ClaudeCode, 1);
+            let mut fv = context_feature(&id); // trips CONTEXT_BLOAT
+            fv.started_at = Some(*ts);
+            store.save_feature(&fv, "test").unwrap();
+        }
+
+        let window = crate::window::Window::D7;
+        let issues = nominate_window_issues(&store, window, now).unwrap();
+        let blo = issues
+            .iter()
+            .find(|i| i.pattern_id == "CONTEXT_BLOAT")
+            .expect("CONTEXT_BLOAT must be raised by the in-window slips");
+
+        // K for the 7d window is 3 (the FACE arc denominator) — proves window scaling
+        // flows through the windowed feed, not a hardcoded constant.
+        assert_eq!(blo.streak_k, 3, "7d window streak target K must be 3");
+
+        // The attached progress must equal the pure core over the same in-window
+        // features (no drift between the feed and `habits::streak_progress_for`).
+        let features = store.features_since(window.since(now)).unwrap();
+        let expected = crate::habits::streak_progress_for(&features, "CONTEXT_BLOAT", window);
+        assert_eq!(blo.credits, expected.credits);
+        assert_eq!(blo.fixed, expected.fixed);
+        assert_eq!(blo.last_credit_at, expected.last_credit_at);
+
+        // All three in-window sessions are slips → the streak is wiped → 0 credits,
+        // not fixed, no anchor. (A slip resets; durability needs a clean run.)
+        assert_eq!(blo.credits, 0, "three consecutive slips leave zero credits");
+        assert!(!blo.fixed, "an all-slip habit is never fixed");
+        assert_eq!(blo.last_credit_at, None);
     }
 }

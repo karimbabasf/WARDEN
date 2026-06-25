@@ -4,6 +4,7 @@ pub mod config;
 pub mod detectors;
 pub mod featurizer;
 pub mod forge;
+pub mod habits;
 pub mod harness_theme;
 pub mod ingest;
 pub mod ir;
@@ -13,6 +14,7 @@ pub mod scaffold;
 pub mod scheduler;
 pub mod store;
 pub mod util;
+pub mod window;
 
 use commands::*;
 use tauri::menu::MenuBuilder;
@@ -33,6 +35,18 @@ struct RadarWatcherGuard {
     /// the watcher (e.g. once startup backfill has populated the store).
     #[allow(dead_code)]
     radar_signal: scheduler::RadarDirtySignal,
+}
+
+/// Parks the Living-Habits heartbeat worker + periodic tick (Piece 2) so they
+/// outlive `setup()` for the app's lifetime. Its own managed-state slot (Tauri keys
+/// managed state by type) — the single coalesced worker drains the heartbeat's
+/// dirty signal and runs habit scans strictly one-at-a-time, the tick re-evaluates
+/// cadence on `WARDEN_HABITS_TICK_MS`.
+struct HabitsHeartbeatGuard {
+    #[allow(dead_code)]
+    worker: tauri::async_runtime::JoinHandle<()>,
+    #[allow(dead_code)]
+    tick: tauri::async_runtime::JoinHandle<()>,
 }
 use tauri::tray::TrayIconBuilder;
 use tauri::{ActivationPolicy, Emitter, Manager};
@@ -210,6 +224,25 @@ pub fn run() {
                 });
             }
 
+            // 3b) Living-Habits heartbeat (Piece 2): one coalesced worker that drains
+            //     the heartbeat dirty signal (cheap `nominate_windowed` scan + GLM pass,
+            //     strictly serialized), plus a periodic tick that re-evaluates the
+            //     active window's cadence and only wakes the worker when a tier is due.
+            //     Best-effort; both handles are parked so they live for the app's life.
+            {
+                let worker = scheduler::spawn_habits_worker(
+                    state.habits.clone(),
+                    state.store.clone(),
+                    app.handle().clone(),
+                    scheduler::habits_recompute_debounce(),
+                );
+                let tick = scheduler::spawn_habits_tick(
+                    state.habits.clone(),
+                    std::time::Duration::from_millis(scheduler::habits_tick_ms()),
+                );
+                app.manage(HabitsHeartbeatGuard { worker, tick });
+            }
+
             app.manage(state);
 
             // 4) Tray icon + menu (Summon / Status / Quit). The menu ids are matched
@@ -280,6 +313,8 @@ pub fn run() {
             query_profile,
             get_orb_scene,
             get_findings,
+            get_findings_windowed,
+            set_habits_window,
             get_diagnosis,
             run_diagnosis,
             ask,

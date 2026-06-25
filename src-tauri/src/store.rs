@@ -94,6 +94,7 @@ impl Store {
         CREATE TABLE IF NOT EXISTS fugu_runs(id TEXT PRIMARY KEY,stage TEXT NOT NULL,model TEXT NOT NULL,effort TEXT NOT NULL,req_hash TEXT NOT NULL,input_tokens INTEGER NOT NULL,output_tokens INTEGER NOT NULL,orchestration_input_tokens INTEGER NOT NULL,orchestration_output_tokens INTEGER NOT NULL,latency_ms INTEGER NOT NULL,cost_usd REAL NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS interjections(id TEXT PRIMARY KEY,ts TEXT NOT NULL,pattern_id TEXT NOT NULL,session_id TEXT,shown INTEGER NOT NULL,dismissed INTEGER NOT NULL,muted INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS radar_token_cache(session_id TEXT PRIMARY KEY,change_key INTEGER NOT NULL,turn1_total INTEGER NOT NULL,first_user_tokens INTEGER NOT NULL,conversation INTEGER NOT NULL,tool_output INTEGER NOT NULL,thinking INTEGER NOT NULL,updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS habit_resolutions(pattern_id TEXT PRIMARY KEY,fixed_at TEXT NOT NULL,target_path TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_events_session_kind ON events(session_id, kind);
         CREATE INDEX IF NOT EXISTS idx_turns_session_idx ON turns(session_id, idx);
         INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','1');
@@ -294,15 +295,15 @@ impl Store {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         if let Some(expected) = claude_subagent_external_id_from_path(path) {
-            if let Some((_, _, hash, _)) = rows
-                .iter()
-                .find(|(harness, external_id, _, _)| {
-                    harness == "claude_code" && external_id == &expected
-                })
-            {
+            if let Some((_, _, hash, _)) = rows.iter().find(|(harness, external_id, _, _)| {
+                harness == "claude_code" && external_id == &expected
+            }) {
                 return Ok(Some(*hash));
             }
-            if rows.iter().any(|(harness, _, _, _)| harness == "claude_code") {
+            if rows
+                .iter()
+                .any(|(harness, _, _, _)| harness == "claude_code")
+            {
                 return Ok(None);
             }
         }
@@ -382,7 +383,7 @@ impl Store {
     }
     pub fn session_events(&self, sid: &str) -> Result<Vec<(Turn, EventRecord)>> {
         let c = self.conn();
-        let mut st=c.prepare("SELECT t.id,t.session_id,t.parent_id,t.role,t.idx,t.started_at,t.duration_ms,t.is_sidechain,e.id,e.ts,e.payload_json,e.raw_ref FROM events e JOIN turns t ON e.turn_id=t.id WHERE e.session_id=? ORDER BY t.idx,e.ts,e.id")?;
+        let mut st=c.prepare("SELECT t.id,t.session_id,t.parent_id,t.role,t.idx,t.started_at,t.duration_ms,t.is_sidechain,e.id,e.ts,e.payload_json,e.raw_ref FROM events e JOIN turns t ON e.turn_id=t.id WHERE e.session_id=? ORDER BY e.ts, CAST(json_extract(e.raw_ref,'$.offset') AS INTEGER), e.id")?;
         let rows = st.query_map([sid], |r| {
             let role = parse_role(r.get::<_, String>(3)?.as_str());
             let turn = Turn {
@@ -447,6 +448,25 @@ impl Store {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// Time-windowed `all_features`: the FeatureVectors whose session
+    /// `started_at` is at-or-after `since`. `None` = no filter (all-time), so
+    /// this is a generalization of `all_features` (passing `None` is byte-for-byte
+    /// `all_features`). The `started_at` lives inside the serialized vector (the
+    /// `features` table has no dedicated timestamp column), so the filter is
+    /// applied after deserialization. A FeatureVector with `started_at == None`
+    /// is undated and is excluded from any bounded window (it survives only
+    /// all-time), so a missing timestamp can never masquerade as in-window.
+    pub fn features_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<FeatureVector>> {
+        let all = self.all_features()?;
+        Ok(match since {
+            None => all,
+            Some(cutoff) => all
+                .into_iter()
+                .filter(|f| f.started_at.is_some_and(|t| t >= cutoff))
+                .collect(),
+        })
     }
     pub fn save_feature(&self, f: &FeatureVector, version: &str) -> Result<()> {
         self.conn().execute("INSERT OR REPLACE INTO features(session_id,vector_json,computed_at,featurizer_version) VALUES(?,?,?,?)", params![f.session_id, serde_json::to_string(f)?, Utc::now().to_rfc3339(), version])?;
@@ -559,11 +579,17 @@ impl Store {
     }
 
     pub fn all_findings(&self) -> Result<Vec<Finding>> {
-        let c = self.conn();
-        let mut st = c.prepare(
-            "SELECT id,pattern_id,title,severity,frequency,est_cost_tokens,est_cost_minutes,confidence,rationale,evidence_json,status,verifier_verdict FROM findings ORDER BY created_at DESC",
-        )?;
-        let rows = st.query_map([], |r| {
+        self.findings_since(None)
+    }
+
+    /// Time-windowed `all_findings`: the persisted findings whose `created_at`
+    /// column is at-or-after `since`, newest first. `None` = no filter
+    /// (all-time), which `all_findings` delegates to. The cutoff is compared as
+    /// an RFC3339 string, which is the same lexicographic-equals-chronological
+    /// ordering `created_at` is written in (`Utc::now().to_rfc3339()` in
+    /// `save_findings`), so a plain `>=` on the text column is correct.
+    pub fn findings_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<Finding>> {
+        let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Finding> {
             Ok(Finding {
                 id: r.get(0)?,
                 pattern_id: r.get(1)?,
@@ -578,9 +604,24 @@ impl Store {
                 status: r.get(10)?,
                 verifier_verdict: r.get(11)?,
             })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        };
+        const COLS: &str = "id,pattern_id,title,severity,frequency,est_cost_tokens,est_cost_minutes,confidence,rationale,evidence_json,status,verifier_verdict";
+        let c = self.conn();
+        match since {
+            None => {
+                let mut st =
+                    c.prepare(&format!("SELECT {COLS} FROM findings ORDER BY created_at DESC"))?;
+                let rows = st.query_map([], map_row)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+            }
+            Some(cutoff) => {
+                let mut st = c.prepare(&format!(
+                    "SELECT {COLS} FROM findings WHERE created_at >= ? ORDER BY created_at DESC"
+                ))?;
+                let rows = st.query_map([cutoff.to_rfc3339()], map_row)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+            }
+        }
     }
 
     pub fn save_findings(&self, findings: &[Finding]) -> Result<()> {
@@ -709,6 +750,66 @@ impl Store {
         )?;
         Ok(())
     }
+
+    // ---- Living-Habits Piece 3: durable habit-resolution ledger ----
+    // A NEW additive table (`habit_resolutions`) recording each pattern that was
+    // durably resolved (its guardrail erased) so the AllTime erase fires ONCE and
+    // the UI can mark the habit "resolved". A later slip clears the row so the
+    // normal apply flow re-adds the guardrail.
+
+    /// Record (or refresh) that `pattern_id` was durably resolved at `fixed_at`, with
+    /// the `target_path` whose guardrail was erased. Upsert (REPLACE) so a re-resolve
+    /// after a clear is clean and idempotent.
+    pub fn record_habit_resolution(
+        &self,
+        pattern_id: &str,
+        fixed_at: DateTime<Utc>,
+        target_path: &str,
+    ) -> Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO habit_resolutions(pattern_id,fixed_at,target_path) VALUES(?,?,?)",
+            params![pattern_id, fixed_at.to_rfc3339(), target_path],
+        )?;
+        Ok(())
+    }
+
+    /// The recorded resolution for `pattern_id` as `(fixed_at, target_path)`, or
+    /// `None` if it has not been durably resolved. Used to make the erase idempotent.
+    pub fn habit_resolution(
+        &self,
+        pattern_id: &str,
+    ) -> Result<Option<(DateTime<Utc>, String)>> {
+        let c = self.conn();
+        let row = c
+            .prepare("SELECT fixed_at,target_path FROM habit_resolutions WHERE pattern_id=? LIMIT 1")?
+            .query_row(params![pattern_id], |r| {
+                let fixed_at: String = r.get(0)?;
+                let target_path: String = r.get(1)?;
+                Ok((fixed_at, target_path))
+            })
+            .optional()?;
+        Ok(row.map(|(ts, path)| (parse_dt(&ts), path)))
+    }
+
+    /// All durably-resolved pattern ids (the resolved set the UI greys out).
+    pub fn all_habit_resolutions(&self) -> Result<Vec<String>> {
+        let c = self.conn();
+        let mut stmt = c.prepare("SELECT pattern_id FROM habit_resolutions")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Drop the resolution for `pattern_id` (a slip re-flagged it → no longer
+    /// resolved). No-op if absent.
+    pub fn clear_habit_resolution(&self, pattern_id: &str) -> Result<()> {
+        self.conn()
+            .execute("DELETE FROM habit_resolutions WHERE pattern_id=?", params![pattern_id])?;
+        Ok(())
+    }
 }
 
 const ARTIFACT_SELECT_BY_ID: &str = "SELECT id,finding_id,kind,target_path,diff,status,applied_at,backup_path,block,pre_image_sha256,post_image_sha256 FROM artifacts WHERE id=? LIMIT 1";
@@ -761,9 +862,10 @@ fn merged_meta_for_upsert(
     let Some(existing) = existing else {
         return incoming.clone();
     };
-    let existing_value =
-        serde_json::from_str::<serde_json::Value>(existing).unwrap_or_else(|_| serde_json::json!({}));
-    let (Some(existing_obj), Some(incoming_obj)) = (existing_value.as_object(), incoming.as_object())
+    let existing_value = serde_json::from_str::<serde_json::Value>(existing)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let (Some(existing_obj), Some(incoming_obj)) =
+        (existing_value.as_object(), incoming.as_object())
     else {
         return if incoming.is_null() {
             existing_value
@@ -784,7 +886,8 @@ fn merged_meta_for_upsert(
             merge_ignored_record_types(&mut merged, value);
             continue;
         }
-        if value.as_str() == Some("") && merged.get(key).and_then(serde_json::Value::as_str) != Some("")
+        if value.as_str() == Some("")
+            && merged.get(key).and_then(serde_json::Value::as_str) != Some("")
         {
             continue;
         }
@@ -821,7 +924,10 @@ fn merge_ignored_record_types(
             .get(key)
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        target.insert(key.clone(), serde_json::json!(existing_count.max(incoming_count)));
+        target.insert(
+            key.clone(),
+            serde_json::json!(existing_count.max(incoming_count)),
+        );
     }
 }
 
@@ -843,9 +949,14 @@ fn codex_meta_has_identity(meta_json: &str) -> bool {
     let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) else {
         return false;
     };
-    ["thread_source", "parent_thread_id", "originator", "agent_nickname"]
-        .iter()
-        .any(|key| meta.get(*key).is_some_and(|v| !v.is_null()))
+    [
+        "thread_source",
+        "parent_thread_id",
+        "originator",
+        "agent_nickname",
+    ]
+    .iter()
+    .any(|key| meta.get(*key).is_some_and(|v| !v.is_null()))
 }
 
 fn codex_rollout_has_session_identity(path: &Path) -> bool {
@@ -869,9 +980,14 @@ fn codex_rollout_has_session_identity(path: &Path) -> bool {
         return false;
     };
     v.get("type").and_then(serde_json::Value::as_str) == Some("session_meta")
-        && ["thread_source", "parent_thread_id", "originator", "agent_nickname"]
-            .iter()
-            .any(|key| v.pointer(&format!("/payload/{key}")).is_some())
+        && [
+            "thread_source",
+            "parent_thread_id",
+            "originator",
+            "agent_nickname",
+        ]
+        .iter()
+        .any(|key| v.pointer(&format!("/payload/{key}")).is_some())
 }
 
 fn row_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
@@ -1149,7 +1265,9 @@ mod tests {
             .find(|s| s.id == "child")
             .unwrap();
         assert_eq!(
-            got.meta.get("thread_source").and_then(serde_json::Value::as_str),
+            got.meta
+                .get("thread_source")
+                .and_then(serde_json::Value::as_str),
             Some("subagent"),
             "tail parses must not erase Codex subagent identity metadata"
         );
@@ -1173,9 +1291,8 @@ mod tests {
     fn source_raw_hash_for_claude_subagent_requires_agent_identity() {
         let store = Store::memory().unwrap();
         let now = Utc::now();
-        let source_path = PathBuf::from(
-            "/tmp/root-session/subagents/workflows/wf_123/agent-child123.jsonl",
-        );
+        let source_path =
+            PathBuf::from("/tmp/root-session/subagents/workflows/wf_123/agent-child123.jsonl");
         let stale = Session {
             id: "stale-child".into(),
             harness: Harness::ClaudeCode,
@@ -1277,7 +1394,10 @@ mod tests {
         seed_session(&store, "parent", Harness::ClaudeCode, 0);
         seed_session(&store, "child", Harness::ClaudeCode, 0);
         store.link_child_session("child", "parent").unwrap();
-        assert_eq!(store.parent_of("child").unwrap(), Some("parent".to_string()));
+        assert_eq!(
+            store.parent_of("child").unwrap(),
+            Some("parent".to_string())
+        );
         assert_eq!(store.parent_of("parent").unwrap(), None);
     }
 
@@ -1357,9 +1477,15 @@ mod tests {
     #[test]
     fn artifacts_for_finding_filters_by_finding_id() {
         let store = Store::memory().unwrap();
-        store.save_artifact(&pending_artifact("a1", Some("f1"))).unwrap();
-        store.save_artifact(&pending_artifact("a2", Some("f1"))).unwrap();
-        store.save_artifact(&pending_artifact("a3", Some("f2"))).unwrap();
+        store
+            .save_artifact(&pending_artifact("a1", Some("f1")))
+            .unwrap();
+        store
+            .save_artifact(&pending_artifact("a2", Some("f1")))
+            .unwrap();
+        store
+            .save_artifact(&pending_artifact("a3", Some("f2")))
+            .unwrap();
         store.save_artifact(&pending_artifact("a4", None)).unwrap();
 
         assert_eq!(store.artifacts_for_finding("f1").unwrap().len(), 2);
@@ -1378,7 +1504,9 @@ mod tests {
         // A fresh in-memory store already ran migrate(); the new columns must be
         // usable, which save_artifact (writing block + pre_image_sha256) proves.
         let store = Store::memory().unwrap();
-        store.save_artifact(&pending_artifact("fresh", None)).unwrap();
+        store
+            .save_artifact(&pending_artifact("fresh", None))
+            .unwrap();
         let got = store.artifact_by_id("fresh").unwrap().unwrap();
         assert_eq!(got.block, pending_artifact("fresh", None).block);
     }
@@ -1412,8 +1540,148 @@ mod tests {
         assert!(old.pre_image_sha256.is_none());
         assert!(old.post_image_sha256.is_none());
         // New writes use the new columns.
-        store.save_artifact(&pending_artifact("new", Some("f"))).unwrap();
+        store
+            .save_artifact(&pending_artifact("new", Some("f")))
+            .unwrap();
         let new = store.artifact_by_id("new").unwrap().unwrap();
         assert!(!new.block.is_empty());
+    }
+
+    // ── Time Machine: windowed queries ────────────────────────────────────────
+
+    use crate::window::Window;
+
+    /// Insert a finding row directly with an explicit `created_at` (the public
+    /// `save_findings` hardcodes `Utc::now()`, so a test that needs controlled
+    /// finding timestamps writes the row via the same column list). One synthetic
+    /// evidence ref keeps `evidence_json` non-empty/round-trippable.
+    fn seed_finding_at(store: &Store, id: &str, created_at: DateTime<Utc>) {
+        let evidence = serde_json::to_string(&vec![EvidenceRef {
+            session_id: "s".into(),
+            turn_id: None,
+            event_id: None,
+            quote: None,
+            source_path: None,
+        }])
+        .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO findings(id,pattern_id,session_ids_json,severity,frequency,est_cost_tokens,est_cost_minutes,confidence,evidence_json,status,created_at,rationale,title,verifier_verdict) \
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    id,
+                    "CONTEXT_BLOAT",
+                    "[]",
+                    4i64,
+                    0.5f64,
+                    10i64,
+                    5i64,
+                    0.8f64,
+                    evidence,
+                    "confirmed",
+                    created_at.to_rfc3339(),
+                    "r",
+                    "Context bloat",
+                    Option::<String>::None
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn findings_since_filters_by_created_at_window() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        seed_finding_at(&store, "recent", now - chrono::Duration::hours(1));
+        seed_finding_at(&store, "mid", now - chrono::Duration::days(5));
+        seed_finding_at(&store, "old", now - chrono::Duration::days(100));
+
+        let ids = |since: Option<DateTime<Utc>>| -> Vec<String> {
+            let mut v: Vec<String> = store
+                .findings_since(since)
+                .unwrap()
+                .into_iter()
+                .map(|f| f.id)
+                .collect();
+            v.sort();
+            v
+        };
+
+        // Today (now - 24h): only the 1h-ago row.
+        assert_eq!(ids(Window::Today.since(now)), vec!["recent".to_string()]);
+        // D7 (now - 7d): 1h-ago + 5d-ago, not the 100d-ago.
+        assert_eq!(
+            ids(Window::D7.since(now)),
+            vec!["mid".to_string(), "recent".to_string()]
+        );
+        // D30 (now - 30d): still excludes the 100d-ago row.
+        assert_eq!(
+            ids(Window::D30.since(now)),
+            vec!["mid".to_string(), "recent".to_string()]
+        );
+        // AllTime (None): all three.
+        assert_eq!(
+            ids(Window::AllTime.since(now)),
+            vec!["mid".to_string(), "old".to_string(), "recent".to_string()]
+        );
+        // all_findings() is byte-identical to the all-time windowed path.
+        let mut all: Vec<String> = store.all_findings().unwrap().into_iter().map(|f| f.id).collect();
+        all.sort();
+        assert_eq!(all, ids(Window::AllTime.since(now)));
+    }
+
+    /// Seed a session and a FeatureVector whose `started_at` is `started`
+    /// (`None` = an undated feature). The session row satisfies the features→
+    /// sessions FK; `started_at` inside the vector is what `features_since`
+    /// filters on.
+    fn seed_feature_at(store: &Store, id: &str, started: Option<DateTime<Utc>>) {
+        seed_session(store, id, Harness::ClaudeCode, 0);
+        let f = FeatureVector {
+            session_id: id.into(),
+            started_at: started,
+            ..Default::default()
+        };
+        store.save_feature(&f, "test").unwrap();
+    }
+
+    #[test]
+    fn features_since_filters_by_started_at_window() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        seed_feature_at(&store, "recent", Some(now - chrono::Duration::hours(1)));
+        seed_feature_at(&store, "mid", Some(now - chrono::Duration::days(5)));
+        seed_feature_at(&store, "old", Some(now - chrono::Duration::days(100)));
+        // An undated feature must never count as in-window for a bounded window.
+        seed_feature_at(&store, "undated", None);
+
+        let ids = |since: Option<DateTime<Utc>>| -> Vec<String> {
+            let mut v: Vec<String> = store
+                .features_since(since)
+                .unwrap()
+                .into_iter()
+                .map(|f| f.session_id)
+                .collect();
+            v.sort();
+            v
+        };
+
+        assert_eq!(ids(Window::Today.since(now)), vec!["recent".to_string()]);
+        assert_eq!(
+            ids(Window::D7.since(now)),
+            vec!["mid".to_string(), "recent".to_string()]
+        );
+        // AllTime returns every feature, including the undated one.
+        assert_eq!(
+            ids(Window::AllTime.since(now)),
+            vec![
+                "mid".to_string(),
+                "old".to_string(),
+                "recent".to_string(),
+                "undated".to_string()
+            ]
+        );
+        // Undated feature is excluded from any bounded window.
+        assert!(!ids(Window::D30.since(now)).contains(&"undated".to_string()));
     }
 }

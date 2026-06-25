@@ -109,18 +109,199 @@ fn fix_for_pattern(pattern_id: &str) -> PatternFix {
     }
 }
 
-/// Append `block` to `current` unless an identical block is already present.
-/// Idempotent: previewing an already-applied fix yields no change (empty diff).
-fn ensure_block(current: &str, block: &str) -> String {
-    if current.contains(block.trim()) {
-        return current.to_string();
+/// Resolve the real target file a `pattern_id`'s guardrail lives in, reusing the
+/// SAME `fix_for_pattern(...).target_path()` resolution the preview + apply paths
+/// use (env-overridable `~/.claude/CLAUDE.md`). Exposed so Living-Habits Piece 3's
+/// durable erase erases from the exact file apply wrote to — never a hardcoded path.
+pub fn target_for_pattern(pattern_id: &str) -> PathBuf {
+    fix_for_pattern(pattern_id).target_path()
+}
+
+/// The literal header prefix that marks a WARDEN guardrail section. The full
+/// header line is `## WARDEN guardrail — {pattern_id}`.
+const GUARDRAIL_HEADER_PREFIX: &str = "## WARDEN guardrail — ";
+
+/// Build the exact header line for a pattern's guardrail section.
+fn guardrail_header(pattern_id: &str) -> String {
+    format!("{GUARDRAIL_HEADER_PREFIX}{pattern_id}")
+}
+
+/// Extract the `pattern_id` from a guardrail `block` by reading its header line
+/// (`## WARDEN guardrail — {pattern_id}`). Returns `None` for a block that is not a
+/// guardrail block (no such header), so callers can fall back to append-only.
+fn pattern_id_of_block(block: &str) -> Option<String> {
+    block.lines().find_map(|l| {
+        l.trim_end()
+            .strip_prefix(GUARDRAIL_HEADER_PREFIX)
+            .map(|id| id.trim().to_string())
+    })
+}
+
+/// `true` when `line` opens a top-level markdown section (`## ` heading). Used as
+/// the section boundary when upserting/removing a guardrail block: a section runs
+/// from its `## ` header up to (but not including) the next `## ` header or EOF.
+/// (Deeper `###`/`####` headings are NOT boundaries — they nest inside a section.)
+fn is_section_header(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("## ") && !t.starts_with("### ")
+}
+
+/// Idempotent UPSERT of a guardrail `block` keyed by its header `## WARDEN guardrail
+/// — {pattern_id}`. This is the anti-bloat core: today's appender leaves a stale
+/// block on disk whenever a guardrail's text changes, so the file grows a second
+/// copy. Instead we REPLACE the existing section in place (header line → up to but
+/// not including the next `## ` header or EOF), or INSERT at the end when absent.
+///
+/// Guarantees:
+///  - Exactly one `## WARDEN guardrail — {pattern_id}` header survives (never two).
+///  - An identical block re-applied is byte-identical (true idempotency).
+///  - OTHER patterns' guardrail blocks and the user's surrounding prose are left
+///    intact; only this pattern's section is rewritten.
+///  - Surrounding blank lines are normalized so repeated upserts don't accumulate
+///    blank lines (no slow whitespace bloat).
+///
+/// `block` is the canonical `\n## WARDEN guardrail — {pattern_id}\n{rule}\n` shape;
+/// it is normalized to start/end on a single newline boundary before splicing.
+fn upsert_block(current: &str, pattern_id: &str, block: &str) -> String {
+    let header = guardrail_header(pattern_id);
+    // The block's own body, trimmed of its leading/trailing blank lines so we
+    // control the surrounding spacing ourselves (one blank line before, newline
+    // after) — this is what makes repeated upserts converge to a fixed point.
+    let block_core = block.trim_matches('\n');
+
+    let lines: Vec<&str> = current.lines().collect();
+    // Find this pattern's section: the line whose trimmed-end equals the header.
+    let start = lines
+        .iter()
+        .position(|l| l.trim_end() == header);
+
+    match start {
+        Some(start) => {
+            // Section end = next `## ` header after `start`, else EOF.
+            let end = lines[start + 1..]
+                .iter()
+                .position(|l| is_section_header(l))
+                .map(|rel| start + 1 + rel)
+                .unwrap_or(lines.len());
+
+            // Stitch: [before the section] + [new block] + [after the section].
+            let before = &lines[..start];
+            let after = &lines[end..];
+
+            let mut out = String::new();
+            // Preamble (everything before this section), trimmed of trailing blank
+            // lines so we re-impose exactly one blank-line separator.
+            let mut before_joined = before.join("\n");
+            while before_joined.ends_with('\n') {
+                before_joined.pop();
+            }
+            let before_trimmed = before_joined.trim_end_matches('\n');
+            if !before_trimmed.is_empty() {
+                out.push_str(before_trimmed);
+                out.push_str("\n\n");
+            }
+            out.push_str(block_core);
+            out.push('\n');
+
+            // Trailing content (the next section onward), with its own leading blank
+            // lines collapsed so we don't stack blanks between sections.
+            let after_joined = after.join("\n");
+            let after_trimmed = after_joined.trim_start_matches('\n');
+            if !after_trimmed.is_empty() {
+                out.push('\n');
+                out.push_str(after_trimmed);
+                // Preserve a single trailing newline if the original had any text.
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            out
+        }
+        None => {
+            // Absent → append at the end. Preserve the user's content verbatim and
+            // separate the new section with a single blank line.
+            let mut out = current.to_string();
+            // Normalize the seam: strip trailing newlines, then add exactly one
+            // blank-line separator before the block (unless the file is empty).
+            while out.ends_with('\n') {
+                out.pop();
+            }
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(block_core);
+            out.push('\n');
+            out
+        }
     }
-    let mut out = current.to_string();
+}
+
+/// Remove a guardrail section keyed by `pattern_id` (header line → up to but not
+/// including the next `## ` header or EOF), leaving surrounding content and OTHER
+/// patterns' blocks intact and tidy. Absent pattern → returns `current` unchanged
+/// (a no-op). This is the implode counterpart to `upsert_block`.
+fn remove_block(current: &str, pattern_id: &str) -> String {
+    let header = guardrail_header(pattern_id);
+    let lines: Vec<&str> = current.lines().collect();
+    let Some(start) = lines.iter().position(|l| l.trim_end() == header) else {
+        // Absent → exact no-op (byte-identical return).
+        return current.to_string();
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| is_section_header(l))
+        .map(|rel| start + 1 + rel)
+        .unwrap_or(lines.len());
+
+    let before = &lines[..start];
+    let after = &lines[end..];
+
+    let mut before_joined = before.join("\n");
+    while before_joined.ends_with('\n') {
+        before_joined.pop();
+    }
+    let before_trimmed = before_joined.trim_end_matches('\n');
+    let after_joined = after.join("\n");
+    let after_trimmed = after_joined.trim_start_matches('\n');
+
+    let mut out = String::new();
+    out.push_str(before_trimmed);
+    if !before_trimmed.is_empty() && !after_trimmed.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(after_trimmed);
+    // Restore a single trailing newline if anything remains (matches the canonical
+    // "file ends in newline" shape upsert produces). Empty result → empty string.
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(block);
     out
+}
+
+/// Idempotently ensure `block` is present in `current`, REPLACING any prior copy of
+/// the same guardrail (keyed by its `## WARDEN guardrail — {pattern_id}` header)
+/// rather than appending a duplicate. Thin shim over `upsert_block`: it parses the
+/// pattern_id out of the block's header so the two existing call sites (preview +
+/// apply) keep their `(current, block)` signature unchanged. A block with no
+/// guardrail header (defensive: should never happen for WARDEN fixes) falls back to
+/// the legacy append-if-absent behavior.
+fn ensure_block(current: &str, block: &str) -> String {
+    match pattern_id_of_block(block) {
+        Some(pattern_id) => upsert_block(current, &pattern_id, block),
+        None => {
+            // No recognizable header → legacy append-if-absent (never duplicates an
+            // identical block; preserves old behavior for non-guardrail blocks).
+            if current.contains(block.trim()) {
+                return current.to_string();
+            }
+            let mut out = current.to_string();
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(block);
+            out
+        }
+    }
 }
 
 /// The literal guardrail block a given finding implies — the same per-pattern
@@ -166,37 +347,72 @@ pub struct ApplyOutcome {
 /// `rename` it over the target (atomic on the same filesystem) so a crash
 /// mid-write never leaves a half-file. Parent dirs are created as needed.
 pub fn apply_block(target: &Path, block: &str, backup_path: &Path) -> Result<ApplyOutcome> {
-    // SAFE-REFUSAL (data-loss fix): read the target as RAW BYTES, not via
-    // `read_to_string(...).unwrap_or_default()`. The old path silently collapsed a
-    // file holding invalid UTF-8 (binary / wrong-encoding content) to "", then
-    // recorded an empty pre-image, wrote a 0-byte backup, and atomic-wrote
-    // block-only content over the original — DESTROYING it irrecoverably (a later
-    // revert would restore 0 bytes). A line-oriented Markdown guardrail has no
-    // meaning against non-text content, so if the bytes are not valid UTF-8 we
-    // REFUSE: write nothing, create no backup, do not touch the target. A missing
-    // file is still a fresh apply (pre-image = ""). A UTF-8 BOM is valid UTF-8 and
-    // flows through unchanged.
-    let current = match std::fs::read(target) {
+    let current = read_target_utf8(target)?;
+    let proposed = ensure_block(&current, block);
+    commit_proposed(target, &current, proposed, backup_path)
+}
+
+/// Remove the guardrail section for `pattern_id` from `target` (the "implode"
+/// counterpart to `apply_block`), through the SAME backup + sha256 + atomic-write
+/// machinery — so a removal is exactly as reversible as a write. If the section is
+/// absent the content is unchanged → `changed:false`, no backup written. Otherwise
+/// the pre-image is backed up FIRST (never overwriting an existing backup), then the
+/// section-stripped content is atomic-written. `revert_block` restores the backed-up
+/// pre-image, putting the block right back — identical reversibility to apply.
+pub fn remove_block_from_target(
+    target: &Path,
+    pattern_id: &str,
+    backup_path: &Path,
+) -> Result<ApplyOutcome> {
+    let current = read_target_utf8(target)?;
+    let proposed = remove_block(&current, pattern_id);
+    commit_proposed(target, &current, proposed, backup_path)
+}
+
+/// Safe, data-loss-proof read of a guardrail target as a UTF-8 string.
+///
+/// SAFE-REFUSAL (data-loss fix): read the target as RAW BYTES, not via
+/// `read_to_string(...).unwrap_or_default()`. The old path silently collapsed a
+/// file holding invalid UTF-8 (binary / wrong-encoding content) to "", then
+/// recorded an empty pre-image, wrote a 0-byte backup, and atomic-wrote
+/// block-only content over the original — DESTROYING it irrecoverably (a later
+/// revert would restore 0 bytes). A line-oriented Markdown guardrail has no
+/// meaning against non-text content, so if the bytes are not valid UTF-8 we
+/// REFUSE. A missing file is a fresh apply (pre-image = ""). A UTF-8 BOM is valid
+/// UTF-8 and flows through unchanged.
+fn read_target_utf8(target: &Path) -> Result<String> {
+    match std::fs::read(target) {
         Ok(bytes) => match std::str::from_utf8(&bytes) {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                return Err(anyhow!(
-                    "target {} is not valid UTF-8; refusing to rewrite to avoid \
-                     clobbering non-text content",
-                    target.display()
-                ))
-            }
+            Ok(s) => Ok(s.to_string()),
+            Err(_) => Err(anyhow!(
+                "target {} is not valid UTF-8; refusing to rewrite to avoid \
+                 clobbering non-text content",
+                target.display()
+            )),
         },
         // Missing file → fresh apply with an empty pre-image (matches prior behavior).
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(anyhow!("read target {}: {e}", target.display())),
-    };
-    let proposed = ensure_block(&current, block);
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(anyhow!("read target {}: {e}", target.display())),
+    }
+}
+
+/// Shared write core for both apply (upsert) and implode (remove): given the
+/// `current` bytes and the `proposed` rewrite, back up the pre-image and
+/// atomic-write the proposal — or no-op when nothing changed. This is the single
+/// source of truth for the backup/integrity/atomic-write behavior, so a removal is
+/// just as reversible as a write.
+fn commit_proposed(
+    target: &Path,
+    current: &str,
+    proposed: String,
+    backup_path: &Path,
+) -> Result<ApplyOutcome> {
     let pre_image_sha256 = sha256_hex(current.as_bytes());
     let post_image_sha256 = sha256_hex(proposed.as_bytes());
 
-    if proposed == current {
-        // Already present (or out-of-band applied) → no write, no backup.
+    if proposed == *current {
+        // No change (already present, already absent, or out-of-band applied) → no
+        // write, no backup.
         return Ok(ApplyOutcome {
             changed: false,
             backup_path: None,
@@ -393,6 +609,157 @@ mod tests {
             "idempotent: re-previewing an applied fix is a no-op; got:\n{}",
             preview.diff
         );
+    }
+
+    // ── Piece 4: Clean Writes — pure upsert_block / remove_block (anti-bloat) ──
+
+    /// Helper: count how many times a pattern's guardrail HEADER appears.
+    fn header_count(s: &str, pattern_id: &str) -> usize {
+        let header = guardrail_header(pattern_id);
+        s.lines().filter(|l| l.trim_end() == header).count()
+    }
+
+    fn block_for(pattern_id: &str, rule: &str) -> String {
+        format!("\n## WARDEN guardrail — {pattern_id}\n{rule}\n")
+    }
+
+    #[test]
+    fn upsert_inserts_when_absent_header_appears_once() {
+        let current = "# Project\n\nuser line\n";
+        let block = block_for("UNVERIFIED_COMPLETION", "- rule one.");
+        let out = upsert_block(current, "UNVERIFIED_COMPLETION", &block);
+
+        // The user's content is preserved verbatim at the head.
+        assert!(out.starts_with("# Project\n\nuser line\n"), "user content preserved; got:\n{out}");
+        assert!(out.contains("## WARDEN guardrail — UNVERIFIED_COMPLETION"));
+        assert!(out.contains("- rule one."));
+        assert_eq!(
+            header_count(&out, "UNVERIFIED_COMPLETION"),
+            1,
+            "exactly one header when inserting a fresh block; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn upsert_into_empty_string_inserts_block() {
+        let block = block_for("CONTEXT_BLOAT", "- rule.");
+        let out = upsert_block("", "CONTEXT_BLOAT", &block);
+        assert!(out.contains("## WARDEN guardrail — CONTEXT_BLOAT"));
+        assert!(out.contains("- rule."));
+        assert_eq!(header_count(&out, "CONTEXT_BLOAT"), 1);
+        // No leading blank line accumulated against an empty file.
+        assert!(out.starts_with("## WARDEN guardrail — CONTEXT_BLOAT"), "got:\n{out}");
+    }
+
+    // THE ANTI-BLOAT CORE TEST: same pattern_id, DIFFERENT body → REPLACE in place.
+    #[test]
+    fn upsert_same_pattern_different_body_replaces_in_place_no_duplicate() {
+        let current = "# Guide\n\nbase line\n";
+        let v1 = block_for("UNVERIFIED_COMPLETION", "- OLD body text v1.");
+        let after_v1 = upsert_block(current, "UNVERIFIED_COMPLETION", &v1);
+        assert!(after_v1.contains("- OLD body text v1."));
+        assert_eq!(header_count(&after_v1, "UNVERIFIED_COMPLETION"), 1);
+
+        // Now upsert the SAME pattern with a DIFFERENT body.
+        let v2 = block_for("UNVERIFIED_COMPLETION", "- NEW body text v2.");
+        let after_v2 = upsert_block(&after_v1, "UNVERIFIED_COMPLETION", &v2);
+
+        // The old body is GONE.
+        assert!(
+            !after_v2.contains("- OLD body text v1."),
+            "stale body must be replaced, not left behind; got:\n{after_v2}"
+        );
+        // The new body is PRESENT.
+        assert!(after_v2.contains("- NEW body text v2."), "new body must be present; got:\n{after_v2}");
+        // The file did NOT grow a duplicate header — this is the whole point.
+        assert_eq!(
+            header_count(&after_v2, "UNVERIFIED_COMPLETION"),
+            1,
+            "exactly ONE header after replacing the body (no bloat); got:\n{after_v2}"
+        );
+        // The user's surrounding content survives.
+        assert!(after_v2.contains("# Guide") && after_v2.contains("base line"));
+    }
+
+    #[test]
+    fn upsert_is_idempotent_byte_identical_on_second_apply() {
+        let current = "# Guide\n\nbase\n";
+        let block = block_for("CACHE_COLD_RESTARTS", "- reuse a warm session.");
+        let first = upsert_block(current, "CACHE_COLD_RESTARTS", &block);
+        let second = upsert_block(&first, "CACHE_COLD_RESTARTS", &block);
+        assert_eq!(first, second, "an identical upsert must be byte-identical (true idempotency)");
+        // And a third pass still converges.
+        let third = upsert_block(&second, "CACHE_COLD_RESTARTS", &block);
+        assert_eq!(second, third, "repeated upserts must reach a fixed point (no blank-line bloat)");
+    }
+
+    #[test]
+    fn upsert_leaves_other_patterns_and_surrounding_content_untouched() {
+        let mut s = "# Guide\n\nintro paragraph\n".to_string();
+        let a = block_for("UNVERIFIED_COMPLETION", "- verify before done.");
+        let b = block_for("NO_DELEGATION", "- delegate discovery.");
+        s = upsert_block(&s, "UNVERIFIED_COMPLETION", &a);
+        s = upsert_block(&s, "NO_DELEGATION", &b);
+        assert_eq!(header_count(&s, "UNVERIFIED_COMPLETION"), 1);
+        assert_eq!(header_count(&s, "NO_DELEGATION"), 1);
+
+        // Re-upsert A with a new body; B and the prose must be byte-stable.
+        let a2 = block_for("UNVERIFIED_COMPLETION", "- verify with REAL output.");
+        let s2 = upsert_block(&s, "UNVERIFIED_COMPLETION", &a2);
+        assert!(s2.contains("- verify with REAL output."));
+        assert!(!s2.contains("- verify before done."), "A's old body must be gone");
+        // B's block is intact (header + body unchanged).
+        assert!(s2.contains("## WARDEN guardrail — NO_DELEGATION"));
+        assert!(s2.contains("- delegate discovery."), "B's body must be untouched");
+        assert_eq!(header_count(&s2, "NO_DELEGATION"), 1);
+        // The user's intro prose survives.
+        assert!(s2.contains("# Guide") && s2.contains("intro paragraph"));
+    }
+
+    #[test]
+    fn remove_deletes_section_and_leaves_rest_intact() {
+        let mut s = "# Guide\n\nbase\n".to_string();
+        let a = block_for("UNVERIFIED_COMPLETION", "- a rule.");
+        let b = block_for("NO_DELEGATION", "- b rule.");
+        s = upsert_block(&s, "UNVERIFIED_COMPLETION", &a);
+        s = upsert_block(&s, "NO_DELEGATION", &b);
+
+        let out = remove_block(&s, "UNVERIFIED_COMPLETION");
+        assert_eq!(
+            header_count(&out, "UNVERIFIED_COMPLETION"),
+            0,
+            "removed pattern's header must be gone; got:\n{out}"
+        );
+        assert!(!out.contains("- a rule."), "removed pattern's body must be gone; got:\n{out}");
+        // The other pattern and the user's prose survive, tidy.
+        assert!(out.contains("## WARDEN guardrail — NO_DELEGATION"));
+        assert!(out.contains("- b rule."));
+        assert!(out.contains("# Guide") && out.contains("base"));
+        assert!(out.ends_with('\n'), "result should keep the canonical trailing newline; got:\n{out}");
+    }
+
+    #[test]
+    fn remove_when_absent_is_a_noop() {
+        let current = "# Guide\n\nbase line\n\n## Some user section\ncontent\n";
+        let out = remove_block(current, "UNVERIFIED_COMPLETION");
+        assert_eq!(out, current, "removing an absent pattern must be a byte-identical no-op");
+    }
+
+    #[test]
+    fn upsert_then_remove_round_trips_other_content() {
+        // A user block before and a user block after the guardrail must both survive
+        // an upsert followed by a remove (the guardrail leaves no residue).
+        let current = "# Guide\n\nbefore section\n\n## User Heading\nuser body\n";
+        let block = block_for("WHACK_A_MOLE", "- stop patching symptoms.");
+        let upserted = upsert_block(current, "WHACK_A_MOLE", &block);
+        assert_eq!(header_count(&upserted, "WHACK_A_MOLE"), 1);
+        assert!(upserted.contains("## User Heading") && upserted.contains("user body"));
+
+        let removed = remove_block(&upserted, "WHACK_A_MOLE");
+        assert_eq!(header_count(&removed, "WHACK_A_MOLE"), 0);
+        // Both user sections survive the round trip.
+        assert!(removed.contains("# Guide") && removed.contains("before section"));
+        assert!(removed.contains("## User Heading") && removed.contains("user body"));
     }
 
     // ── M4 Forge apply / revert core (all temp-path targets — NEVER real config) ──
@@ -674,6 +1041,133 @@ mod tests {
             std::fs::read(&target).unwrap(),
             original_bytes,
             "revert must restore the BOM file BYTE-IDENTICAL"
+        );
+    }
+
+    // ── Piece 4: removal apply-path (implode) goes through the SAME backup/sha/revert ──
+
+    /// The pattern_id that TEST_BLOCK carries (its header is
+    /// `## WARDEN guardrail — UNVERIFIED_COMPLETION`).
+    const TEST_PATTERN: &str = "UNVERIFIED_COMPLETION";
+
+    #[test]
+    fn remove_block_from_target_strips_section_and_backs_up_pre_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("CLAUDE.md");
+        let original = "# Project\n\nexisting line\n";
+        std::fs::write(&target, original).unwrap();
+
+        // Apply the block first (so there is something to implode).
+        let apply_backup = dir.path().join(".warden-bak/apply.bak");
+        let applied = apply_block(&target, TEST_BLOCK, &apply_backup).unwrap();
+        assert!(applied.changed);
+        let after_apply = std::fs::read_to_string(&target).unwrap();
+        assert!(after_apply.contains(TEST_BLOCK.trim()), "block present after apply");
+
+        // Implode (remove) the block through the removal apply-path.
+        let remove_backup = dir.path().join(".warden-bak/remove.bak");
+        let removed = remove_block_from_target(&target, TEST_PATTERN, &remove_backup).unwrap();
+        assert!(removed.changed, "removing a present block must change the file");
+        assert!(removed.backup_written, "removal must back up its pre-image");
+        // The block is gone; the user's content survives.
+        let on_disk = std::fs::read_to_string(&target).unwrap();
+        assert!(!on_disk.contains(TEST_BLOCK.trim()), "block must be gone after implode");
+        assert!(on_disk.contains("existing line"), "user content must survive implode");
+        // The removal backup holds the pre-removal image (the file WITH the block).
+        assert_eq!(
+            std::fs::read_to_string(&remove_backup).unwrap(),
+            after_apply,
+            "removal backup must hold the exact pre-image (the applied content)"
+        );
+        // The recorded pre-image sha matches that backup → revert is exact.
+        assert_eq!(
+            removed.pre_image_sha256,
+            crate::util::sha256_hex(after_apply.as_bytes())
+        );
+    }
+
+    #[test]
+    fn remove_block_from_target_is_a_noop_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("CLAUDE.md");
+        let original = "# Project\n\nno guardrail here\n";
+        std::fs::write(&target, original).unwrap();
+        let backup = dir.path().join(".warden-bak/none.bak");
+
+        let outcome = remove_block_from_target(&target, TEST_PATTERN, &backup).unwrap();
+        assert!(!outcome.changed, "removing an absent block must be a no-op");
+        assert!(!outcome.backup_written, "no-op removal must not write a backup");
+        assert!(!backup.exists(), "no-op removal must not create a backup file");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            original,
+            "no-op removal must leave the file untouched"
+        );
+    }
+
+    #[test]
+    fn remove_then_revert_restores_the_block_same_reversibility_as_apply() {
+        // A removal must be exactly as reversible as a write: revert_block restores
+        // the backed-up pre-image, putting the imploded block right back.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("CLAUDE.md");
+        std::fs::write(&target, "# Project\n\nbody\n").unwrap();
+
+        let apply_backup = dir.path().join(".warden-bak/apply.bak");
+        apply_block(&target, TEST_BLOCK, &apply_backup).unwrap();
+        let with_block = std::fs::read_to_string(&target).unwrap();
+
+        // Implode.
+        let remove_backup = dir.path().join(".warden-bak/remove.bak");
+        let removed = remove_block_from_target(&target, TEST_PATTERN, &remove_backup).unwrap();
+        assert!(!std::fs::read_to_string(&target).unwrap().contains(TEST_BLOCK.trim()));
+
+        // Revert the removal → the block is back, byte-for-byte.
+        revert_block(&target, &remove_backup, &removed.pre_image_sha256).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            with_block,
+            "reverting a removal must restore the block exactly (same reversibility as apply)"
+        );
+    }
+
+    #[test]
+    fn remove_block_from_target_refuses_invalid_utf8_and_preserves_bytes() {
+        // The removal apply-path shares apply's SAFE-REFUSAL: a non-UTF8 target must
+        // make removal REFUSE, leave the file byte-identical, and write NO backup.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("CLAUDE.md");
+        let binary: &[u8] = &[0xff, 0xfe, b'h', b'i', 0x00, 0x80];
+        std::fs::write(&target, binary).unwrap();
+        let backup = dir.path().join(".warden-bak/bin.bak");
+
+        let err = remove_block_from_target(&target, TEST_PATTERN, &backup)
+            .expect_err("removal must REFUSE a non-UTF8 target");
+        assert!(err.to_string().contains("not valid UTF-8"), "got: {err}");
+        assert_eq!(std::fs::read(&target).unwrap(), binary, "non-text target must be byte-identical");
+        assert!(!backup.exists(), "a refused removal must create NO backup");
+    }
+
+    #[test]
+    fn apply_revert_round_trip_restores_original_bytes_exactly() {
+        // M4 integrity preserved under the upsert change: a full apply→revert cycle
+        // restores the ORIGINAL bytes verbatim (not just "block gone").
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("CLAUDE.md");
+        let original = "# Project\n\nline A\nline B\n\n## Existing user section\nkeep me\n";
+        std::fs::write(&target, original).unwrap();
+        let original_bytes = std::fs::read(&target).unwrap();
+        let backup = dir.path().join(".warden-bak/roundtrip.bak");
+
+        let out = apply_block(&target, TEST_BLOCK, &backup).unwrap();
+        assert!(out.changed);
+        assert!(std::fs::read_to_string(&target).unwrap().contains(TEST_BLOCK.trim()));
+
+        revert_block(&target, &backup, &out.pre_image_sha256).unwrap();
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            original_bytes,
+            "apply→revert must restore the ORIGINAL file BYTE-IDENTICAL (M4 integrity)"
         );
     }
 
