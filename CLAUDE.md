@@ -2,19 +2,23 @@
 
 WARDEN is "the agent that watches your agents": a macOS **Tauri v2** daemon that ingests local
 AI-coding transcripts (`~/.claude/projects`, `~/.codex/sessions`), diagnoses agentic-workflow
-anti-patterns through the Sakana **Fugu** reasoning pipeline, and renders a cinematic war-room +
+anti-patterns through a Diagnostician→Coach→Verifier reasoning pipeline (**GLM-5.2** via **NEAR AI**), and renders a cinematic war-room +
 evidence-cited diagnosis overlay summoned by a global hotkey.
 
 ## Milestones (7 total)
 - **M0 — Spine** ✅ IR + Claude adapter + rusqlite/FTS5 store + featurizer (commit `d87497d`).
-- **M1 — Brain** ✅ Fugu Diagnostician→Coach→Verifier pipeline + detectors (commit `7ac9b10`).
+- **M1 — Brain** ✅ Diagnostician→Coach→Verifier pipeline (GLM-5.2 via NEAR AI, OpenAI-compatible) + detectors (commit `7ac9b10`).
 - **M2 — Face** ✅ verified. Always-on daemon, ⌘⇧Space hotkey, pre-warmed overlay, R3F/Remotion
   war-room, diagnosis/evidence/fix-preview, **Codex adapter**, live FSEvents tailing, env-swappable
   engine, harness differentiation.
   - Spec: `docs/superpowers/specs/2026-06-22-m2-face-design.md`
   - Plan: `docs/superpowers/plans/2026-06-22-m2-face.md`
-- **M3 — RADAR** ⬅️ next. M4 Forge(apply) · M5 Live · M6 Voice · M7 Adapters — future; **stubbed** via
-  `scaffold::not_in_slice()`. Do NOT implement these.
+- **M3 — RADAR** ✅ built & merged to `dev`. **M4 — Forge(apply)** ⬅️ next (in design 2026-06-24).
+  M5 Live · M6 Voice · M7 Adapters — future; **stubbed** via `scaffold::not_in_slice()`. Do NOT implement M5–M7.
+- **DOSSIER ("Profile by Proof")** 💡 idea captured 2026-06-24, no spec yet. Longitudinal, evidence-cited
+  profile of how the operator drives agents (orchestration/patterns/holes/strengths/where-they-lose/
+  project-archetypes/trajectory) + all-time·6mo·3mo·30d·2wk window toggle; GLM-5.2 over BRAIN+RADAR.
+  Milestone number unresolved (Karim said "M4" → collides with Forge). Capture: `docs/ideas/2026-06-24-dossier-profile-by-proof.md`. Do NOT implement until spec'd.
 
 ## How we work in this repo
 - **Delegate discovery.** Broad file search / multi-file reads → dispatch Explore or general-purpose
@@ -36,7 +40,7 @@ evidence-cited diagnosis overlay summoned by a global hotkey.
 | Full app (real e2e gate, slow) | `pnpm tauri build` |
 | Dev run | `pnpm tauri dev` |
 
-Env: `WARDEN_DB_PATH` (db override) · `SAKANA_API_KEY` (Fugu key) · M2 adds `WARDEN_BRAIN_*` (see plan §4).
+Env: `WARDEN_DB_PATH` (db override) · engine via `WARDEN_BRAIN_BASE_URL` + `WARDEN_BRAIN_API_KEY` (`OPENAI_*` fallback) + `WARDEN_BRAIN_DIAGNOSE_MODEL`/`_VERIFY_MODEL` (default `z-ai/glm-5.2`); see `.env.example`.
 
 ## Repo map
 **Rust `src-tauri/src/`**
@@ -49,7 +53,7 @@ Env: `WARDEN_DB_PATH` (db override) · `SAKANA_API_KEY` (Fugu key) · M2 adds `W
 - `store.rs` — rusqlite + FTS5, 14 tables; `upsert_session_batch`, `counts`, `save_findings/diagnosis`,
   `latest_diagnosis`, `profile`, `source_raw_hash`; watermarks keyed by `source_path` with byte `offset`.
 - `featurizer.rs` — FeatureVector + CompetenceProfile. `detectors.rs` — `nominate(store,profile)->Vec<Finding>`.
-- `brain.rs` — Fugu client: `run_pipeline`, `diagnose/coach/verify`; emits `fugu_delta`,`fugu_usage`.
+- `brain.rs` — engine client (GLM-5.2 via NEAR AI, OpenAI-compatible Chat Completions): `run_pipeline`, `diagnose/coach/verify`; emits legacy-named `fugu_delta`,`fugu_usage`.
   *(M2: env-config the base URL/models/key/effort; emit `candidates_nominated`,`finding_verdict`.)*
 - `commands.rs` — `#[tauri::command]`s. Real: `query_profile`,`get_diagnosis`,`get_findings`,
   `run_diagnosis`,`ask`,`hide_overlay`,`get_fix_preview`,`resolve_evidence`,`set_config`.
@@ -85,7 +89,7 @@ Env: `WARDEN_DB_PATH` (db override) · `SAKANA_API_KEY` (Fugu key) · M2 adds `W
 - **Watermarks are byte-offset.** FSEvents coalesces rapid writes — on each event, seek to the saved
   offset and read all bytes to EOF; do not trust event counts.
 - **Honest viz**: war-room nodes/flares map to *real* signals (candidate count, token deltas, verdicts).
-  Off-Fugu engines lack `orchestration_*` tokens → degrade to delta pulses + plain weight, never fake.
+  Engines without `orchestration_*` tokens (the current GLM-5.2/NEAR AI brain) → degrade to delta pulses + plain weight, never fake.
 
 ## External transcript layouts (confirmed on this machine)
 - Claude: `~/.claude/projects/**/*.jsonl`.

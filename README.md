@@ -22,6 +22,7 @@ The value is not a UI wrapped around an LLM. WARDEN’s value is the chain:
 - M2 Face: complete and verified.
 - M3 RADAR: next, not started.
 - M4 Forge apply, M5 Live, M6 Voice, M7 Adapters: future and stubbed through `scaffold::not_in_slice()`.
+- DOSSIER ("Profile by Proof"): captured idea, no spec yet — a longitudinal, evidence-backed profile of how the operator drives their agents (orchestration style, patterns, holes, strengths, where they lose, project archetypes, trajectory) with an all-time/6mo/3mo/30d/2wk window toggle, powered by GLM-5.2 over BRAIN + RADAR. Milestone number TBD (Karim called it "M4" — collides with Forge). See `docs/ideas/2026-06-24-dossier-profile-by-proof.md`.
 
 ## What is in M2
 
