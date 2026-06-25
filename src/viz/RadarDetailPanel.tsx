@@ -195,8 +195,9 @@ function ContextSection({ agent }: { agent: RadarAgent }) {
 }
 
 // ── Section 2: live activity feed (Task 20) ────────────────────────────────────
-const ACTIVITY_CAP = 8;
-
+// No cap: the backend ships the agent's full action history and we render all of
+// it. ~10 rows are visible at once and the feed scrolls (CSS .wd-radar-feed) so
+// you can scroll back to the very first action.
 function ActivitySection({ agent }: { agent: RadarAgent }) {
   // Newest-first. Sort by parsed ts desc; entries with an unparseable ts keep
   // their original order and sink to the end (stable, never throws on bad data).
@@ -206,8 +207,7 @@ function ActivitySection({ agent }: { agent: RadarAgent }) {
       const xt = Number.isFinite(x.t) ? x.t : -Infinity;
       const yt = Number.isFinite(y.t) ? y.t : -Infinity;
       return yt - xt || x.i - y.i;
-    })
-    .slice(0, ACTIVITY_CAP);
+    });
 
   return (
     <section className="wd-radar-section wd-radar-activity" data-section="activity">

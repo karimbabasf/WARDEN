@@ -20,7 +20,7 @@ import { Environment, Lightformer, Wireframe, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode, OrbLayout } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
-import { layoutRadarScene } from './radarLayout';
+import { layoutRadarScene, type RadarCluster } from './radarLayout';
 import { radarHarness, heatColor } from './radarTheme';
 import { AgentCore } from './AgentCore';
 import { StarCatalog } from './StarCatalog';
@@ -30,7 +30,7 @@ import { frameloopFor } from './WarRoom';
 import { reconcileLifecycle, pruneGone, isVisible, type LifecycleMap, type LiveId } from './radarLifecycle';
 import { RadarHoverCard } from './RadarHoverCard';
 import { radarCanvasCamera } from './useOrbCamera';
-import { targetDim, type EmphasisFilter } from './emphasis';
+import { targetDim, matchesFilter, type EmphasisFilter } from './emphasis';
 
 const BG = '#020403';
 const WHITE = new THREE.Color('#ffffff');
@@ -41,6 +41,34 @@ const WHITE = new THREE.Color('#ffffff');
  */
 export function radarNodeColor(agent: RadarAgent): string {
   return heatColor(radarHarness(agent.harness).color, agent.fillPct);
+}
+
+export function radarGlowTarget({
+  agent,
+  isRoot,
+  emphasis,
+  selected,
+  hovered,
+}: {
+  agent: Pick<RadarAgent, 'fillPct' | 'status'>;
+  isRoot: boolean;
+  emphasis: boolean;
+  selected: boolean;
+  hovered: boolean;
+}): number {
+  const working = agent.status === 'working';
+  const fillGlow = 0.18 + agent.fillPct * 0.45;
+  const liveLift = working ? 3.15 : 0;
+  const idlePenalty = working ? 0 : 0.55;
+  return Math.max(
+    0.08,
+    (isRoot ? 0.5 : 0.4) +
+      fillGlow +
+      liveLift -
+      idlePenalty +
+      (emphasis ? 0.5 : 0) +
+      (selected ? 0.9 : hovered ? 0.35 : 0),
+  );
 }
 
 function damp(current: number, target: number, lambda: number, dt: number): number {
@@ -105,6 +133,7 @@ function RadarGlobe({
   hovered,
   dimmed,
   dimTarget = 0,
+  emphasis = false,
   lifecycleRef,
   onHover,
   onLeave,
@@ -118,6 +147,9 @@ function RadarGlobe({
    *  frame and applied to COLOUR ONLY (never scale/opacity/geometry). Defaults to
    *  0 so the project type-checks before Task 9 wires it. */
   dimTarget?: number;
+  /** This globe MATCHES the active legend harness filter — give it a gentle extra
+   *  glow so the selection POPS, not just dims everything else. */
+  emphasis?: boolean;
   /** Live read of the reconciler's per-id scale (no re-render on tween). */
   lifecycleRef: MutableRefObject<LifecycleMap>;
   onHover: (node: LayoutNode) => void;
@@ -127,6 +159,7 @@ function RadarGlobe({
   const group = useRef<THREE.Group>(null!);
   const innerCage = useRef<THREE.Group>(null!);
   const gem = useRef<THREE.Group>(null!);
+  const halo = useRef<THREE.Sprite>(null!);
   const gemMat = useRef<THREE.MeshPhysicalMaterial>(null!);
   const haloMat = useRef<THREE.SpriteMaterial>(null!);
   const nodeMat = useRef<THREE.PointsMaterial>(null!);
@@ -205,15 +238,11 @@ function RadarGlobe({
     // as `gone`) reads 0, never a one-frame full-scale flash before it unmounts.
     const lifecycleScale = lifecycleRef.current[node.id]?.scale ?? (agent.status === 'closed' ? 0 : 1);
     const targetScale = node.radius * (1 + boost) * Math.max(0, lifecycleScale);
-    const fillGlow = 0.25 + agent.fillPct * 0.65; // fuller = hotter core
-    // Working blazes; idle is crushed HARD on both glow and colour so the contrast
-    // reads instantly. (was idleDim 0.28, colour untouched.)
-    const idleDim = working ? 0 : 0.5;
-    const workingLift = working ? 0.18 : 0;
-    const targetGlow =
-      (isRoot ? 0.8 : 0.55) + fillGlow - idleDim + workingLift + (selected ? 0.9 : hovered ? 0.35 : 0);
+    // Liveness is the DOMINANT brightness signal: a running agent (root OR subagent)
+    // blazes; an idle one falls back to a dim ember. Fill only modulates within that.
+    const targetGlow = radarGlowTarget({ agent, isRoot, emphasis, selected, hovered });
     const targetDim = dimmed ? 1 : 0;
-    const idleColorDim = working ? 0 : 0.5; // idle also DESATURATES, not only loses glow
+    const idleColorDim = working ? 0 : 0.45; // idle also DESATURATES toward a cool ember
     const targetColorDim = Math.max(targetDim, Math.min(1, Math.max(0, dimTarget)), idleColorDim);
 
     // spawn eases in fast; implode collapses fast — both damped (never snap).
@@ -230,6 +259,7 @@ function RadarGlobe({
     group.current.scale.setScalar(s.scale * breathe);
     group.current.position.set(s.pos.x, s.pos.y + Math.sin(t * 0.6 + seed * 6.28) * 0.05, s.pos.z);
     group.current.rotation.y += dt * (isRoot ? 0.08 : 0.14);
+    halo.current.scale.setScalar((isRoot ? 0.74 : 0.58) * (working ? 1.85 + Math.sin(t * 4.8 + seed * 6.28) * 0.1 : 1));
 
     innerCage.current.rotation.y -= dt * 0.18;
     innerCage.current.rotation.x += dt * 0.1;
@@ -239,9 +269,9 @@ function RadarGlobe({
     // dimK (opacity/intensity) stays bound to the boolean-dim track only — the
     // legend colour-dim must NOT change opacity, so it is deliberately excluded.
     const dimK = 1 - s.dim * 0.6;
-    gemMat.current.emissiveIntensity = (0.55 + s.glow * 0.6) * dimK;
-    haloMat.current.opacity = (0.2 + s.glow * 0.28) * dimK;
-    nodeMat.current.opacity = (0.45 + s.glow * 0.32) * dimK;
+    gemMat.current.emissiveIntensity = (0.75 + s.glow * (working ? 1.35 : 0.9)) * dimK;
+    haloMat.current.opacity = Math.min(1, (0.16 + s.glow * 0.34) * (working ? 1.25 : 1) * dimK);
+    nodeMat.current.opacity = Math.min(1, (0.42 + s.glow * 0.34) * (working ? 1.18 : 1) * dimK);
 
     // ── eased legend dim, COLOUR ONLY ───────────────────────────────────────
     // Copy each material's base colour, scale by the eased dim, write it back
@@ -324,7 +354,7 @@ function RadarGlobe({
       </points>
 
       <group ref={gem}>
-        <sprite scale={isRoot ? 0.62 : 0.5}>
+        <sprite ref={halo} scale={isRoot ? 0.74 : 0.58}>
           <spriteMaterial
             ref={haloMat}
             map={glowTex}
@@ -358,7 +388,7 @@ function RadarGlobe({
           orbiting subagent moons, so it wears the same gyro cradle + brand heart as
           its Habits hub. Subagents stay bare lattices. Heat-coloured to match. */}
       {isRoot && (
-        <AgentCore harness={agent.harness} color={color} dimmed={dimmed} active={selected || hovered} />
+        <AgentCore harness={agent.harness} color={color} dimmed={dimmed} active={working || selected || hovered} />
       )}
     </group>
   );
@@ -417,9 +447,10 @@ function RadarLinks({ layout, lifecycleRef }: { layout: OrbLayout; lifecycleRef:
         const tb = (s + 1) / SEG;
         const a = pts[s];
         const b = pts[s + 1];
-        // brightest at the parent anchor, easing toward the child globe.
-        const ca = cParent.clone().lerp(cChild, ta).multiplyScalar(0.72 - 0.3 * ta);
-        const cb = cParent.clone().lerp(cChild, tb).multiplyScalar(0.72 - 0.3 * tb);
+        // brightest at the parent anchor, easing toward the child globe. Kept punchy
+        // so the parent→child strand reads as a real drawn tether (the Habits look).
+        const ca = cParent.clone().lerp(cChild, ta).multiplyScalar(0.92 - 0.3 * ta);
+        const cb = cParent.clone().lerp(cChild, tb).multiplyScalar(0.92 - 0.3 * tb);
         const o = base + s * 6;
         linePos[o] = a.x; linePos[o + 1] = a.y; linePos[o + 2] = a.z;
         linePos[o + 3] = b.x; linePos[o + 4] = b.y; linePos[o + 5] = b.z;
@@ -476,14 +507,14 @@ function RadarLinks({ layout, lifecycleRef }: { layout: OrbLayout; lifecycleRef:
     dotPosAttr.needsUpdate = true;
     lineColAttr.needsUpdate = true;
     dotColAttr.needsUpdate = true;
-    if (lineMat.current) lineMat.current.opacity = 0.4 + Math.sin(t * 1.3) * 0.08;
+    if (lineMat.current) lineMat.current.opacity = 0.52 + Math.sin(t * 1.3) * 0.1;
   });
 
   if (links.length === 0) return null;
   return (
     <group>
       <lineSegments geometry={lineGeo}>
-        <lineBasicMaterial ref={lineMat} vertexColors transparent opacity={0.42} depthWrite={false} toneMapped={false} blending={THREE.AdditiveBlending} />
+        <lineBasicMaterial ref={lineMat} vertexColors transparent opacity={0.55} depthWrite={false} toneMapped={false} blending={THREE.AdditiveBlending} />
       </lineSegments>
       <points geometry={dotGeo}>
         <pointsMaterial
@@ -593,6 +624,37 @@ function RadarHoverLayer({ node, suppressed }: { node: LayoutNode | null; suppre
   );
 }
 
+// Per-FOLDER constellation labels — the explicit "this is the WARDEN folder / the JB
+// Hunting folder" pinned under each cluster, mirroring the Habits hub labels. Colour
+// + glyph come from the cluster's dominant harness (color-blind a11y); the text is the
+// project folder. pointer-events off so it never steals the orbit camera or a globe click.
+function RadarClusterLabels({ clusters }: { clusters: RadarCluster[] }) {
+  return (
+    <>
+      {clusters.map((c) => {
+        const t = radarHarness(c.harness);
+        // sit the label just below the constellation's lowest reach so it never
+        // collides with a globe (clusters are centred on the y=0 plane).
+        const drop = c.radius * 0.62 + 0.7;
+        return (
+          <Html
+            key={`cluster-${c.key}`}
+            position={[c.center.x, c.center.y - drop, c.center.z]}
+            center
+            zIndexRange={[6, 0]}
+            style={{ pointerEvents: 'none' } as CSSProperties}
+          >
+            <div className="wd-hub-label wd-folder-label" style={{ '--harness': t.color } as CSSProperties}>
+              <span className="wd-hub-label-glyph" aria-hidden="true">{t.glyph}</span>
+              {c.label}
+            </div>
+          </Html>
+        );
+      })}
+    </>
+  );
+}
+
 // The DATA forest only — live globes, parent→child links, lifecycle + hover, wrapped
 // in the fold group. It carries NO background/lights/camera/post: those live once in
 // the persistent scene shell (WarRoom's SceneShell), so a Habits↔Radar swap only ever
@@ -685,6 +747,9 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
               // Harness legend filter → colour-only dim (severity is Habits-only, so
               // `radarFilter` is null for a severity chip → every dimTarget 0).
               dimTarget={targetDim({ harness: node.harness }, radarFilter)}
+              // …and a matching globe POPS (gentle extra glow) rather than only the
+              // others dimming, so the selection reads as "these light up".
+              emphasis={radarFilter !== null && matchesFilter({ harness: node.harness }, radarFilter)}
               lifecycleRef={lifecycleRef}
               onHover={onHover}
               onLeave={onLeave}
@@ -692,6 +757,9 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
             />
           ))}
         </group>
+
+        {/* one "this is the WARDEN folder" label under each constellation */}
+        <RadarClusterLabels clusters={layout.clusters} />
 
         <RadarHoverLayer node={hoveredNode} suppressed={Boolean(hoveredId && hoveredId === selectedId)} />
       </FoldGroup>

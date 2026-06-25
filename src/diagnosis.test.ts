@@ -101,7 +101,7 @@ describe('renderDiagnosis', () => {
     expect(b0.textContent).toContain('Claude');
 
     const b1 = holes[1].querySelector('.harness-badge')!;
-    expect(b1.textContent).toContain('▲');
+    expect(b1.textContent).toContain('▣'); // codex glyph — unified source of truth (harnessColors.ts)
     expect(b1.textContent).toContain('Codex');
   });
 

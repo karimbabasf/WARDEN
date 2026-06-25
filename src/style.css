@@ -144,7 +144,10 @@ html, body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
-  padding: 12px 16px;
+  /* Left padding clears the native macOS traffic lights (titleBarStyle: Overlay):
+     the OS draws close/minimize/zoom over the top-left corner, so the brand starts
+     to their right. */
+  padding: 12px 16px 12px 84px;
   background: linear-gradient(180deg, rgba(4, 22, 12, 0.62), rgba(2, 9, 6, 0.30));
   animation: wd-fade-down 600ms ease both;
 }
@@ -639,8 +642,15 @@ html, body {
 .wd-radar-empty { margin-top: 7px; color: var(--ink-faint); font-size: 13px; letter-spacing: 0.1em; }
 .wd-radar-feed-empty { padding: 8px 0; font-size: 11px; letter-spacing: 0.06em; }
 
-/* live activity feed (newest-first) */
-.wd-radar-feed { list-style: none; margin: 10px 0 0; padding: 0; }
+/* live activity feed (newest-first) — ~10 rows visible, scroll back to the oldest */
+.wd-radar-feed {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0 6px 0 0;
+  max-height: 290px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .wd-radar-feed-row {
   display: flex;
   align-items: baseline;
@@ -1160,58 +1170,7 @@ html, body {
 }
 .wd-crumb.is-current:hover { background: transparent; }
 
-/* ── window controls (in .wd-nav) ─────────────────────────────────────────*/
-/* The spacer uses data-tauri-drag-region, so we must keep cursor:default there
-   but NOT inherit it through to the buttons themselves. */
-.wd-nav-spacer {
-  flex: 1;
-  min-width: 12px;
-  /* drag region is set by Tauri via data-tauri-drag-region attribute */
-  cursor: default;
-}
-.wd-nav-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  z-index: var(--z-controls);
-  /* controls must not inherit drag-through; they capture their own pointer events */
-  cursor: default;
-}
-.wd-win-btn {
-  appearance: none;
-  border: none;
-  background: rgba(118, 255, 157, 0.06);
-  color: var(--ink-soft);
-  font: inherit;
-  font-size: 11px;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  border: 1px solid var(--hair);
-  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
-}
-.wd-win-btn:hover {
-  background: rgba(118, 255, 157, 0.12);
-  color: var(--ink);
-  border-color: var(--hair-bright);
-}
-.wd-win-btn:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--hair-bright);
-}
-/* minimize — subtle yellow hint on hover (traffic-light convention, muted) */
-.wd-win-min:hover {
-  background: rgba(255, 209, 102, 0.12);
-  color: var(--warn);
-  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
-}
-/* close — red/danger hint on hover */
-.wd-win-close:hover {
-  background: rgba(255, 84, 112, 0.14);
-  color: var(--red);
-  border-color: color-mix(in srgb, var(--red) 45%, transparent);
-}
+/* Window controls (close · minimize · zoom) are native macOS traffic lights now
+   (titleBarStyle: Overlay), drawn by the OS over the top-left corner — there is no
+   in-DOM window-control chrome to style. The top-left HUD is inset to clear them
+   (see `.wd-hud` padding). */

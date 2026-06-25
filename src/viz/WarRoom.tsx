@@ -32,7 +32,7 @@ import { RadarDetailPanel } from './RadarDetailPanel';
 import { layoutRadarScene, isFlatAgent } from './radarLayout';
 import { TransitionDriver, FoldGroup, makeTransition, beginTransition } from './Transition';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
-import { targetDim, type EmphasisFilter } from './emphasis';
+import { targetDim, matchesFilter, type EmphasisFilter } from './emphasis';
 import { subtreeBounds, type Bounds } from './cameraFraming';
 import IntroVideo from './IntroVideo';
 
@@ -187,6 +187,9 @@ function HabitsForest({
             // null filter `targetDim` is 0, so the look is unchanged until Task 10
             // lights a chip. Reuses the pure `emphasis` module (no logic forked here).
             dimTarget={targetDim({ harness: node.harness, severity: node.issue?.severity }, emphasisFilter)}
+            // …and a matching orb POPS (extra glow + a touch of scale) so the chosen
+            // severity/harness stands out, not just the others dimming.
+            emphasized={emphasisFilter !== null && matchesFilter({ harness: node.harness, severity: node.issue?.severity }, emphasisFilter)}
             appearDelay={Math.min(i * 0.045, 0.6)}
             onHover={onHover}
             onLeave={onLeave}
@@ -596,33 +599,12 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
 
   return (
     <div className={`viz-root viz-phase-${scene.phase} viz-orb-map`}>
-      {/* Frameless window has no titlebar — this top strip is the drag handle. Drag
-          to move (across displays); double-click toggles maximize; dragging while
-          maximized un-maximizes first (macOS "zoom" behavior). Dynamic import keeps
-          it safe under vitest/jsdom and the dev browser (no Tauri global). */}
-      <div
-        className="wd-dragbar"
-        onMouseDown={async (e) => {
-          if (e.button !== 0) return;
-          try {
-            const { getCurrentWindow } = await import('@tauri-apps/api/window');
-            const win = getCurrentWindow();
-            if (await win.isMaximized()) await win.unmaximize();
-            await win.startDragging();
-          } catch {
-            /* non-Tauri surface: no-op */
-          }
-        }}
-        onDoubleClick={async () => {
-          try {
-            const { getCurrentWindow } = await import('@tauri-apps/api/window');
-            const win = getCurrentWindow();
-            (await win.isMaximized()) ? await win.unmaximize() : await win.maximize();
-          } catch {
-            /* no-op */
-          }
-        }}
-      />
+      {/* The window now wears native macOS chrome (titleBarStyle: Overlay): the OS
+          draws the traffic lights and owns drag, double-click-to-zoom and resize.
+          This top strip is just a wide drag handle — `data-tauri-drag-region` hands
+          the drag (and the double-click zoom) straight to the OS, so there is no
+          fragile JS window-control code to keep in sync. */}
+      <div className="wd-dragbar" data-tauri-drag-region />
       <Canvas
         dpr={[1, 2]}
         frameloop={frameloopFor(!active)}

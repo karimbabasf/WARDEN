@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { radarNodeColor } from './RadarConstellation';
+import { radarGlowTarget, radarNodeColor } from './RadarConstellation';
 import type { RadarAgent } from './radarTypes';
 
 function luminance(hex: string): number {
@@ -57,5 +57,24 @@ describe('radarNodeColor', () => {
     const c = radarNodeColor(agent({ id: 'e', harness: 'gemini', fillPct: 0.5 }));
     // neutral is neither the Claude nor Codex base — just assert it is a valid hex
     expect(/^#[0-9a-f]{6}$/i.test(c)).toBe(true);
+  });
+
+  it('makes working agents visibly brighter than idle agents', () => {
+    const working = radarGlowTarget({
+      agent: agent({ id: 'working', harness: 'codex', fillPct: 0.45, status: 'working' }),
+      isRoot: true,
+      emphasis: false,
+      selected: false,
+      hovered: false,
+    });
+    const idle = radarGlowTarget({
+      agent: agent({ id: 'idle', harness: 'codex', fillPct: 0.45, status: 'idle' }),
+      isRoot: true,
+      emphasis: false,
+      selected: false,
+      hovered: false,
+    });
+
+    expect(working).toBeGreaterThan(idle * 5);
   });
 });

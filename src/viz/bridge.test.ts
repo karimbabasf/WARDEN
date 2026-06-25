@@ -248,7 +248,7 @@ describe('bridge reducer', () => {
   it('reset preserves persistent orb scene and summon state while clearing live signals', () => {
     const bridge = createBridge(noopListen);
     bridge.ingest('orb_scene_ready', {
-      agents: [{ id: 'codex', harness: 'codex', label: 'Codex', glyph: '▲', color: '#b98cff' }],
+      agents: [{ id: 'codex', harness: 'codex', label: 'Codex', glyph: '▣', color: '#b98cff' }],
       issues: [],
       links: [],
       guidance: {},
@@ -278,13 +278,13 @@ describe('bridge reducer', () => {
 });
 
 describe('harnessTheme', () => {
-  it('maps codex to its electric violet mark', () => {
-    expect(harnessTheme('codex').color).toBe('#b98cff');
+  it('maps codex to its electric blue mark', () => {
+    expect(harnessTheme('codex').color).toBe('#2e8bff');
     expect(harnessTheme('codex').glyph).toBe('▣');
   });
 
-  it('maps claude_code to its coral-orange brand colour', () => {
-    expect(harnessTheme('claude_code').color).toBe('#ff8c42');
+  it('maps claude_code to its vivid-orange brand colour', () => {
+    expect(harnessTheme('claude_code').color).toBe('#ff7a18');
   });
 
   it('falls back to a neutral theme for unknown harnesses', () => {

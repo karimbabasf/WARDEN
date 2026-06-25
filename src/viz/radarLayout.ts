@@ -14,6 +14,25 @@ import type { LayoutNode, OrbLayout, OrbLink, Vec3 } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 import { radarHarness, RADAR_NEUTRAL } from './radarTheme';
 
+/**
+ * One folder constellation — every root sharing a project folder (cwd) is grouped
+ * into one cluster, laid out as its own little loop and spread across the plane
+ * with a labelled gap from its neighbours. The render draws `label` under `center`.
+ */
+export type RadarCluster = {
+  key: string;
+  /** The folder/project name shown under the constellation (e.g. "WARDEN"). */
+  label: string;
+  /** Dominant harness in the cluster — drives the label hue only (color-blind a11y). */
+  harness: string;
+  center: Vec3;
+  /** Outer extent of the cluster (label placement + camera framing). */
+  radius: number;
+};
+
+/** `OrbLayout` plus the per-folder cluster metadata the radar label layer reads. */
+export type RadarLayout = OrbLayout & { clusters: RadarCluster[] };
+
 // Depth boost: a main planet is biggest; each level down is meaningfully smaller.
 // (Index past the table clamps to the last, deepest value.)
 const DEPTH_BOOST = [0.62, 0.3, 0.16, 0.1];
@@ -73,37 +92,35 @@ const SHELL_STEP = 1.15;
 // perfectly flat circle. Kept well under SHELL_STEP so the shell banding (used by
 // camera framing to group a subtree) is never blurred, regardless of shell size.
 const STAGGER_SPAN = 0.18;
-// Reserved angular gap (radians) inserted at each harness-sector boundary so the
-// boundary is always visible regardless of weight distribution. Two barren roots
-// from different harnesses would otherwise sit as close as in-sector neighbours.
-// Kept small (~6°) so a large forest still has ample arc for its sectors.
-const SECTOR_GAP = 0.1;
 
-// Roots ring: enough circumference that planets (plus their moon halos) don't
-// collide. A floor keeps a lone/duo root from sitting on the origin awkwardly.
-// `weightSum` (Σ of per-root subtree weights) widens the ring when the forest is
-// busy, so subtree-scaled slices below have room to breathe.
-function rootRingRadius(count: number, maxRootR: number, weightSum: number): number {
+// Local LOOP radius for a folder's roots: the ring each root sits on inside its
+// constellation, sized so a root plus its whole moon halo (`maxFoot`) clears its
+// neighbours. The chord between two adjacent roots on the loop is 2·R·sin(π/n), so
+// we invert that against the largest footprint. One root → 0 (it sits dead centre).
+function localRingRadius(count: number, maxFoot: number): number {
   if (count <= 1) return 0;
-  const circumferenceNeed = (weightSum * (maxRootR * 2 + 3.4)) / (2 * Math.PI);
-  return Math.max(4.0, circumferenceNeed);
+  return Math.max(maxFoot, maxFoot / Math.sin(Math.PI / count));
 }
 
 // A child's base orbit radius around its parent — scaled by the parent's size and
-// the child's depth so deeper moons hug tighter. Bounded to keep the tree compact.
+// the child's depth so deeper moons hug tighter. The depth-1 gap is deliberately
+// generous so the parent→child link is a real DRAWN tether strand (the Habits look)
+// rather than a subagent bundled on top of its parent; deeper levels shrink back in
+// to keep the tree compact.
 function orbitRadius(parentRadius: number, childDepth: number): number {
-  const base = parentRadius + 1.5;
-  const shrink = Math.max(0.5, 1 - (childDepth - 1) * 0.22);
+  const base = parentRadius + 2.2;
+  const shrink = Math.max(0.46, 1 - (childDepth - 1) * 0.26);
   return base * shrink;
 }
 
-// Shared tilt plane for the whole constellation (roots AND children).
-// Flattening Y more than Z gives the disk a 3-D read without excessive depth.
-// Both `placeRoot` and `ringPosition` use these factors so no two tiers can
-// drift onto inconsistent planes — change here and everywhere updates.
-// Exported so tests can recover the true polar angle from tilted positions.
-export const TILT_Y = 0.34;
-export const TILT_Z = 0.22;
+// Shared tilt plane for the whole constellation (roots AND children). A ROUNDER
+// ring (closer to 1.0) spreads a parent's moons in a clear circle around it so the
+// parent→child tether reads as a drawn strand — a very flat ring squashed the moons
+// almost onto the parent, which is what made subagents look "bundled". Still tilted
+// (not a flat 1.0) so the disk keeps a 3-D read. Exported so tests can recover the
+// true polar angle from tilted positions.
+export const TILT_Y = 0.52;
+export const TILT_Z = 0.3;
 
 // Polar placement on a tilted ring (mirrors orbLayout.satellitePosition): start
 // at 12 o'clock, flatten Y a touch and push Z for a 3D read. `angle` is supplied by
@@ -150,7 +167,7 @@ function makeNode(agent: RadarAgent, position: Vec3): LayoutNode {
  * resolved centre. Links are emitted parent->child only when the parent is present
  * in the model (an orphan renders solo — no dangling edge).
  */
-export function layoutRadarScene(model: RadarSceneModel): OrbLayout {
+export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
   const agents = model.agents;
   const byId = new Map(agents.map((a) => [a.id, a]));
 
@@ -175,32 +192,12 @@ export function layoutRadarScene(model: RadarSceneModel): OrbLayout {
   }
   for (const list of childrenOf.values()) list.sort((x, y) => x.id.localeCompare(y.id));
 
-  // Transitive descendant count over the RESOLVED tree only (flat parents own no
-  // subtree, so their strays never inflate anyone's weight). Memoised, and guarded
-  // against a malformed cyclic payload (`seen`) so schema drift can never spin the
-  // layout — honest-viz: a drifted forest degrades gracefully, never crashes.
-  const descCache = new Map<string, number>();
-  function descendantCount(id: string, seen: Set<string> = new Set()): number {
-    const cached = descCache.get(id);
-    if (cached !== undefined) return cached;
-    if (seen.has(id)) return 0; // cycle: stop counting, don't recurse forever
-    seen.add(id);
-    const kids = childrenOf.get(id) ?? [];
-    let total = kids.length;
-    for (const k of kids) total += descendantCount(k.id, seen);
-    seen.delete(id);
-    descCache.set(id, total);
-    return total;
-  }
-
   // Roots: depth 0, OR any agent whose declared parent does not resolve (absent OR
   // flat) — promoted to a solo root so it still renders (honest, never dropped),
   // but never fabricated as a moon under a globe that cannot have one.
   const roots = agents
     .filter((a) => a.depth === 0 || !resolvesParent(a))
     .sort((x, y) => x.id.localeCompare(y.id));
-
-  const maxRootR = roots.reduce((m, r) => Math.max(m, radarRadius(r.contextTokens, 0)), 0.34);
 
   const nodes: LayoutNode[] = [];
   const links: OrbLink[] = [];
@@ -239,70 +236,115 @@ export function layoutRadarScene(model: RadarSceneModel): OrbLayout {
     });
   }
 
-  // ── harness-sectored, subtree-weighted root placement ────────────────────────
-  // Each root's angular slice (and a small radial push) scales with its descendant
-  // count; roots are partitioned into per-harness sectors so harnesses don't
-  // interleave. Sectors and roots-within-sector are deterministically ordered.
-  const rootWeight = (r: RadarAgent): number => 1 + descendantCount(r.id);
-  const weightSum = roots.reduce((s, r) => s + rootWeight(r), 0);
-  const ring = rootRingRadius(roots.length, maxRootR, Math.max(roots.length, weightSum));
+  // ── folder constellations ────────────────────────────────────────────────────
+  // Roots are grouped into per-FOLDER clusters (by cwd): every agent you're running
+  // in one project forms one constellation — its roots arranged on a local loop, its
+  // subagents tethered out as moons. Clusters are spread across the plane with a
+  // labelled gap between them. Harness identity is carried by COLOUR (Claude orange /
+  // Codex blue), never by position, so a folder driven by both harnesses reads as a
+  // single constellation in two hues. Deterministic: folders + members are sorted.
 
-  // Group roots by harness key; order the harness sectors deterministically.
-  const sectorMap = new Map<string, RadarAgent[]>();
-  for (const r of roots) {
-    const key = r.harness || '∅';
-    const list = sectorMap.get(key) ?? [];
-    list.push(r);
-    sectorMap.set(key, list);
-  }
-  const sectorKeys = [...sectorMap.keys()].sort((a, b) => a.localeCompare(b));
+  // Folder key: a real cwd first; else the agent's own label (a Claude root's task);
+  // else its harness. So two roots in the same project cluster together, and a
+  // cwd-less stray still gets its own constellation rather than a shared bucket.
+  const folderKey = (r: RadarAgent): string => {
+    const dir = r.cwd?.trim();
+    if (dir) return `dir:${dir}`;
+    const label = r.label?.trim();
+    if (label) return `task:${label}`;
+    return `harness:${r.harness || '∅'}`;
+  };
+  const folderLabelOf = (r: RadarAgent): string =>
+    r.cwd?.trim() || r.label?.trim() || radarHarness(r.harness).label;
 
-  const placeRoot = (root: RadarAgent, angle: number) => {
-    if (roots.length <= 1) {
-      const node = makeNode(root, { x: 0, y: 0, z: 0 });
-      nodes.push(node);
-      placeChildren(root, node.position, node.radius);
-      return;
-    }
-    // busy roots ride a touch farther out so their wider moon halo clears neighbours.
-    const push = ring * (1 + Math.min(0.25, descendantCount(root.id) * 0.02));
-    const center: Vec3 = {
-      x: Math.cos(angle) * push,
-      y: Math.sin(angle) * push * TILT_Y,
-      z: Math.sin(angle) * push * TILT_Z,
-    };
-    const node = makeNode(root, center);
-    nodes.push(node);
-    placeChildren(root, center, node.radius);
+  // The farthest a root reaches from its own centre: its globe plus (if it has
+  // children) the outermost moon shell + that moon's globe. Drives both the local
+  // loop radius and the inter-cluster spacing so nothing overlaps.
+  const rootReach = (r: RadarAgent): number => {
+    const rr = radarRadius(r.contextTokens, 0);
+    const kids = childrenOf.get(r.id);
+    if (!kids || kids.length === 0) return rr;
+    const shells = Math.floor((kids.length - 1) / shellCapacity());
+    const childR = kids.reduce((m, k) => Math.max(m, radarRadius(k.contextTokens, k.depth)), 0.34);
+    return orbitRadius(rr, kids[0].depth) + shells * SHELL_STEP + childR;
   };
 
-  // Walk the full circle, handing each harness sector an arc proportional to the
-  // combined weight of its roots, and each root within it a slice proportional to
-  // its own weight. Place every root at the centre of its slice.
-  //
-  // Inter-sector gaps: reserve SECTOR_GAP at each harness boundary so the sector
-  // seam is always visible regardless of weight distribution. The remaining arc
-  // (2π − numSectors·SECTOR_GAP) is distributed proportionally among roots.
-  const numSectors = sectorKeys.length;
-  // Available arc after subtracting all inter-sector gaps (floor at 2π to avoid
-  // negative available arc for absurdly many single-root sectors).
-  const availableArc = Math.max(Math.PI * 2 * 0.5, Math.PI * 2 - numSectors * SECTOR_GAP);
+  const CLUSTER_MARGIN = 0.8; // breathing room around each root's reach
+  const CLUSTER_GAP = 1.8; // empty lateral space between adjacent constellations
+  const CLUSTER_ARC_DEPTH = 1.4; // shallow camera-facing bow so clusters don't recede flat
 
-  let cursor = -Math.PI / 2; // start at 12 o'clock, sweep clockwise (increasing angle)
-  for (let si = 0; si < sectorKeys.length; si++) {
-    const key = sectorKeys[si];
-    // Reserve half the inter-sector gap before this sector starts (shared with the
-    // previous sector's trailing edge), giving a symmetric visual gap at the boundary.
-    if (si > 0) cursor += SECTOR_GAP;
-    const sectorRoots = sectorMap.get(key)!; // already in id order (roots was sorted)
-    for (const root of sectorRoots) {
-      const slice = (rootWeight(root) / Math.max(1, weightSum)) * availableArc;
-      // Place the root at the centre of its slice: a wider slice (busier subtree)
-      // therefore leaves more clear air to each neighbouring root.
-      placeRoot(root, cursor + slice / 2);
-      cursor += slice;
-    }
+  // Group roots into folders (deterministic order).
+  const folderMap = new Map<string, RadarAgent[]>();
+  for (const r of roots) {
+    const k = folderKey(r);
+    const list = folderMap.get(k) ?? [];
+    list.push(r);
+    folderMap.set(k, list);
   }
+  const folderKeys = [...folderMap.keys()].sort((a, b) => a.localeCompare(b));
 
-  return { nodes, links };
+  // Resolve each folder into a cluster plan: members ordered (harness then id) so
+  // same-harness roots sit adjacent on the loop; a local ring radius; an outer
+  // extent; a display label; and the dominant harness (for the label hue only).
+  type ClusterPlan = {
+    key: string;
+    label: string;
+    harness: string;
+    members: RadarAgent[];
+    ringR: number;
+    extent: number;
+  };
+  const plans: ClusterPlan[] = folderKeys.map((key) => {
+    const members = folderMap
+      .get(key)!
+      .slice()
+      .sort((a, b) => a.harness.localeCompare(b.harness) || a.id.localeCompare(b.id));
+    const maxFoot = members.reduce((m, r) => Math.max(m, rootReach(r) + CLUSTER_MARGIN), 0.5);
+    const ringR = localRingRadius(members.length, maxFoot);
+    const counts = new Map<string, number>();
+    for (const m of members) counts.set(m.harness, (counts.get(m.harness) ?? 0) + 1);
+    const harness = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+    return { key, label: folderLabelOf(members[0]), harness, members, ringR, extent: ringR + maxFoot };
+  });
+
+  // Lay the constellations left→right, centred on the origin, each pulled back along
+  // a shallow camera-facing arc (mirrors the Habits zone arc) so a row of folders
+  // reads side-by-side rather than marching into the distance.
+  const totalWidth =
+    plans.reduce((s, p) => s + p.extent * 2, 0) + CLUSTER_GAP * Math.max(0, plans.length - 1);
+  const halfSpan = totalWidth / 2;
+  const lastIdx = Math.max(1, plans.length - 1);
+  const rawZ = plans.map((_, i) => -CLUSTER_ARC_DEPTH * (1 - Math.cos((i / lastIdx) * (Math.PI / 2))));
+  const meanZ = rawZ.reduce((a, b) => a + b, 0) / Math.max(1, rawZ.length);
+
+  const clusters: RadarCluster[] = [];
+  let cursor = -halfSpan;
+  plans.forEach((plan, i) => {
+    const cx = cursor + plan.extent; // cluster centre on the lateral axis
+    cursor += plan.extent * 2 + CLUSTER_GAP;
+    const center: Vec3 = { x: cx, y: 0, z: rawZ[i] - meanZ };
+
+    const place = (root: RadarAgent, pos: Vec3) => {
+      const node = makeNode(root, pos);
+      nodes.push(node);
+      placeChildren(root, pos, node.radius);
+    };
+
+    if (plan.members.length === 1) {
+      // a lone root sits dead-centre in its constellation.
+      place(plan.members[0], center);
+    } else {
+      // roots ride a local loop around the cluster centre (the "loop link").
+      const n = plan.members.length;
+      const phase = angleSeed(plan.key);
+      plan.members.forEach((root, j) => {
+        const angle = phase + (j / n) * Math.PI * 2;
+        place(root, ringPosition(center, angle, plan.ringR));
+      });
+    }
+
+    clusters.push({ key: plan.key, label: plan.label, harness: plan.harness, center, radius: plan.extent });
+  });
+
+  return { nodes, links, clusters };
 }

@@ -9,8 +9,9 @@
 // REMEMBER the exact pose the user dove FROM, and restore it verbatim when they
 // back out — so zooming out never leaves the camera tilted at a strange angle.
 //
-// This file also tames the close-zoom fisheye (FOV taper), keeps panning from
-// losing the constellation (clamped target), and adds a cinematic fly-to that
+// This file also tames the close-zoom fisheye (FOV taper), locks the orbit pivot
+// to the constellation centre (no pan; zoom dollies to centre, not the cursor) so
+// the cluster can never be roamed off-screen, and adds a cinematic fly-to that
 // frames a bounded subtree (`focusBounds`) over ~700ms with an expo ease — again
 // preserving the current viewing angle, and easing back to the overview pose
 // when the bounds clear.
@@ -42,13 +43,6 @@ const FOV_TAPER_START = 9;
 // Below this projection-matrix delta we skip updateProjectionMatrix() — no point
 // reuploading the matrix for a sub-hundredth-of-a-degree change every frame.
 const FOV_EPS = 0.01;
-
-// Constrained pan. OrbitControls pan moves the *target*; left unbounded you can
-// drift the whole constellation out of frame and "lose" it. We clamp the target
-// to a sphere around the scene origin so roaming always keeps the cluster
-// reachable. Generous enough to inspect edges, tight enough not to get lost.
-const PAN_BOUND_RADIUS = 14;
-const panCenter = new THREE.Vector3(0, 0, 0);
 
 // Fly-to framing timing — an explicit ~700ms expo ease-in-out (per spec), so the
 // move reads as a deliberate cinematic push rather than the springy settle used
@@ -262,13 +256,6 @@ export function CameraRig({
       c.object.updateProjectionMatrix();
     }
 
-    // Constrained pan — keep the orbit target within reach of the constellation
-    // so panning can never lose it. Clamp to a sphere around the scene centre.
-    const offset = c.target.distanceTo(panCenter);
-    if (offset > PAN_BOUND_RADIUS) {
-      c.target.sub(panCenter).multiplyScalar(PAN_BOUND_RADIUS / offset).add(panCenter);
-    }
-
     c.update();
   });
 
@@ -277,19 +264,14 @@ export function CameraRig({
       ref={controls}
       makeDefault
       enableDamping
-      dampingFactor={0.085}
-      rotateSpeed={0.85}
-      zoomSpeed={0.95}
-      // Dolly toward whatever the cursor is over (and back out from it) instead of
-      // always toward the orbit centre — the scroll zooms into the region you're
-      // pointing at. OrbitControls keeps that world point pinned under the mouse.
-      zoomToCursor
-      // Pan enabled but the target is clamped each frame (see useFrame) so the
-      // constellation can never be roamed off-screen.
-      enablePan
-      panSpeed={0.7}
-      // Screen-space pan keeps drag direction intuitive regardless of pitch.
-      screenSpacePanning
+      dampingFactor={0.15}
+      rotateSpeed={0.95}
+      zoomSpeed={1.0}
+      // Locked pivot: zoom dollies toward the orbit centre (NOT the cursor) and pan
+      // is OFF, so the constellation stays pinned in frame. Browsing is then always
+      // a clean turntable orbit around the cluster — you can't slide the pivot off
+      // into empty space and lose your bearings.
+      enablePan={false}
       minDistance={MIN_DIST}
       maxDistance={MAX_DIST}
       // Keep the constellation upright-ish; allow looking from above/below but

@@ -4,7 +4,7 @@
 // Intro / Reveal / Recap, mirroring the CSS custom properties in src/style.css
 // (the DOM side reads those vars; WebGL/Remotion can't, so this is their mirror).
 // Kept import-free so it stays inside the lazy Remotion chunk without dragging
-// anything onto the ⌘⇧Space summon hot path. Harness identity is deliberately NOT
+// anything onto the ⌘⌥⌃M summon hot path. Harness identity is deliberately NOT
 // here — that lives in ../harnessTheme.ts (the single harness source) and is
 // always paired colour + glyph + label.
 

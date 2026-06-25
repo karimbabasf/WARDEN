@@ -3,12 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { HARNESS_COLORS, harnessColor } from './harnessColors';
 
 describe('HARNESS_COLORS constant', () => {
-  it('claude_code has the canonical orange hue', () => {
-    expect(HARNESS_COLORS.claude_code.hue).toBe('#ff8c42');
+  it('claude_code has the canonical vivid-orange hue', () => {
+    expect(HARNESS_COLORS.claude_code.hue).toBe('#ff7a18');
   });
 
-  it('codex has the canonical violet hue', () => {
-    expect(HARNESS_COLORS.codex.hue).toBe('#b98cff');
+  it('codex has the canonical electric-blue hue', () => {
+    expect(HARNESS_COLORS.codex.hue).toBe('#2e8bff');
   });
 
   it('unknown has the canonical slate hue', () => {
@@ -36,7 +36,7 @@ describe('HARNESS_COLORS constant', () => {
 
 describe('harnessColor()', () => {
   it('resolves claude_code to the orange hue', () => {
-    expect(harnessColor('claude_code').hue).toBe('#ff8c42');
+    expect(harnessColor('claude_code').hue).toBe('#ff7a18');
   });
 
   it('resolves codex glyph', () => {
@@ -60,7 +60,7 @@ describe('harnessColor()', () => {
   });
 
   it('is case-insensitive (CLAUDE_CODE → claude_code)', () => {
-    expect(harnessColor('CLAUDE_CODE').hue).toBe('#ff8c42');
+    expect(harnessColor('CLAUDE_CODE').hue).toBe('#ff7a18');
   });
 
   it('unknown fallback has the neutral slate colour (honest-viz)', () => {
@@ -69,7 +69,7 @@ describe('harnessColor()', () => {
 
   it('unknown fallback colour is distinct from both brand hues', () => {
     const u = harnessColor('something_random');
-    expect(u.hue).not.toBe('#ff8c42');
-    expect(u.hue).not.toBe('#b98cff');
+    expect(u.hue).not.toBe('#ff7a18');
+    expect(u.hue).not.toBe('#2e8bff');
   });
 });

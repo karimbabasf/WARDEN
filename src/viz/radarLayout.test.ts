@@ -152,122 +152,91 @@ describe('layoutRadarScene', () => {
   });
 });
 
-// ── Task 5: harness sectors + multi-shell siblings + subtree-scaled spacing ─────
-
-/**
- * Corrected polar angle of a point relative to a centre, recovering the true
- * placement angle used by `ringPosition` and `placeRoot`.
- *
- * `ringPosition` places nodes with x = cx + cos(a)·R and z = cz + sin(a)·R·TILT_Z,
- * so atan2((dz/TILT_Z), dx) = atan2(sin(a)·R, cos(a)·R) = a exactly.
- * This is strictly monotonic and projection-independent — it works for both roots
- * and moons (which now share the same tilt plane after the I-1 unification).
- * Ordering tests only needed monotonicity; this keeps that and also gives correct
- * absolute separations for the min-gap test.
- */
-function bearing(center: { x: number; z: number }, p: { x: number; z: number }): number {
-  return Math.atan2((p.z - center.z) / TILT_Z, p.x - center.x);
-}
-
-/** Smallest absolute angular separation between two bearings, in [0, π]. */
-function angularGap(a: number, b: number): number {
-  let d = Math.abs(a - b) % (2 * Math.PI);
-  if (d > Math.PI) d = 2 * Math.PI - d;
-  return d;
-}
+// ── folder constellations + multi-shell siblings ───────────────────────────────
 
 function roots(model: RadarSceneModel) {
   const layout = layoutRadarScene(model);
   return { layout, byId: new Map(layout.nodes.map((n) => [n.id, n])) };
 }
 
-describe('layoutRadarScene — harness sectors (roots grouped by harness arc)', () => {
-  // Three Claude roots + three Codex roots: each harness must own a contiguous arc,
-  // i.e. sorting all root bearings yields one solid block per harness (no harness's
-  // roots interleave with the other's). This is the readable "no clumping by
-  // harness" guarantee for 15+ agents.
-  function twoHarnessForest(): RadarSceneModel {
-    const a: RadarAgent[] = [];
-    for (let i = 0; i < 3; i++)
-      a.push(agent({ id: `cl-${i}`, harness: 'claude_code', depth: 0, contextTokens: 40000 }));
-    for (let i = 0; i < 3; i++)
-      a.push(agent({ id: `cx-${i}`, harness: 'codex', origin: 'Codex Desktop', depth: 0, contextTokens: 40000 }));
-    return { generatedAt: 'T', agents: a };
+describe('layoutRadarScene — folder constellations (roots grouped by cwd)', () => {
+  // Two roots in the WARDEN folder + one in JB Hunting: same-folder roots form one
+  // constellation, different folders are pushed apart on the plane. Harness is no
+  // longer the grouping axis — it is carried by COLOUR — so a folder can hold both.
+  function twoFolderForest(): RadarSceneModel {
+    return {
+      generatedAt: 'T',
+      agents: [
+        agent({ id: 'w1', cwd: 'WARDEN', contextTokens: 40000 }),
+        agent({ id: 'w2', cwd: 'WARDEN', contextTokens: 40000 }),
+        agent({ id: 'j1', cwd: 'JB Hunting', contextTokens: 40000 }),
+      ],
+    };
   }
 
-  it('keeps each harness\'s roots within one contiguous angular arc (no interleaving)', () => {
-    const { layout } = roots(twoHarnessForest());
-    const origin = { x: 0, z: 0 };
-    const ordered = layout.nodes
-      .filter((n) => n.depth === 0)
-      .map((n) => ({ id: n.id, harness: n.radarAgent!.harness, theta: bearing(origin, n.position) }))
-      .sort((p, q) => p.theta - q.theta);
+  it('groups same-folder roots together and pushes different folders apart', () => {
+    const { byId } = roots(twoFolderForest());
+    const w1 = byId.get('w1')!;
+    const w2 = byId.get('w2')!;
+    const j1 = byId.get('j1')!;
+    const sameFolder = distance(w1.position, w2.position); // both in WARDEN
+    const crossFolder = distance(w1.position, j1.position); // WARDEN → JB Hunting
+    // a same-folder neighbour is closer than a root in another folder.
+    expect(sameFolder).toBeLessThan(crossFolder);
+  });
 
-    // Walking the ring in bearing order, the harness label changes at most twice
-    // (claude…→codex…→claude… across the 0/2π seam) — never more. More than two
-    // transitions means the harnesses are interleaved (clumped together), not
-    // sectored.
-    let transitions = 0;
-    for (let i = 0; i < ordered.length; i++) {
-      const prev = ordered[(i - 1 + ordered.length) % ordered.length];
-      if (prev.harness !== ordered[i].harness) transitions++;
+  it('exposes one labelled cluster per folder (for the on-screen constellation label)', () => {
+    const { layout } = roots(twoFolderForest());
+    const labels = layout.clusters.map((c) => c.label).sort();
+    expect(labels).toEqual(['JB Hunting', 'WARDEN']);
+    for (const c of layout.clusters) {
+      expect(Number.isFinite(c.center.x)).toBe(true);
+      expect(Number.isFinite(c.center.y)).toBe(true);
+      expect(Number.isFinite(c.center.z)).toBe(true);
+      expect(c.radius).toBeGreaterThan(0);
     }
-    expect(transitions).toBeLessThanOrEqual(2);
   });
 
-  it('separates the two harness sectors (closest cross-harness pair is farther than the tightest in-harness pair would force)', () => {
-    const { layout } = roots(twoHarnessForest());
-    const origin = { x: 0, z: 0 };
-    const cl = layout.nodes.filter((n) => n.radarAgent!.harness === 'claude_code');
-    const cx = layout.nodes.filter((n) => n.radarAgent!.harness === 'codex');
-    // every claude root is a distinct position from every codex root, and the two
-    // groups occupy different parts of the ring (their bearing centroids differ).
-    const centroid = (ns: typeof cl) => {
-      const xs = ns.map((n) => bearing(origin, n.position));
-      // circular mean
-      const sx = xs.reduce((s, t) => s + Math.cos(t), 0);
-      const sz = xs.reduce((s, t) => s + Math.sin(t), 0);
-      return Math.atan2(sz, sx);
+  it('keeps a folder driven by BOTH harnesses in one constellation (colour splits them, not position)', () => {
+    const model: RadarSceneModel = {
+      generatedAt: 'T',
+      agents: [
+        agent({ id: 'cl', harness: 'claude_code', cwd: 'WARDEN', contextTokens: 30000 }),
+        agent({ id: 'cx', harness: 'codex', origin: 'Codex Desktop', cwd: 'WARDEN', contextTokens: 30000 }),
+      ],
     };
-    expect(angularGap(centroid(cl), centroid(cx))).toBeGreaterThan(0.5);
+    const { layout } = roots(model);
+    const warden = layout.clusters.filter((c) => c.label === 'WARDEN');
+    expect(warden).toHaveLength(1); // one WARDEN constellation, two hues
   });
 
-  it('is still deterministic with a multi-harness forest', () => {
-    const a = layoutRadarScene(twoHarnessForest());
-    const b = layoutRadarScene(twoHarnessForest());
+  it('is deterministic with a multi-folder forest (nodes AND clusters)', () => {
+    const a = layoutRadarScene(twoFolderForest());
+    const b = layoutRadarScene(twoFolderForest());
     expect(a.nodes.map((n) => [n.id, n.position.x, n.position.y, n.position.z])).toEqual(
       b.nodes.map((n) => [n.id, n.position.x, n.position.y, n.position.z]),
+    );
+    expect(a.clusters.map((c) => [c.key, c.center.x, c.radius])).toEqual(
+      b.clusters.map((c) => [c.key, c.center.x, c.radius]),
     );
   });
 });
 
-describe('layoutRadarScene — subtree-scaled root spacing (busy orchestrators get more room)', () => {
-  it('gives a root with many descendants a wider angular slice than a barren root of the same harness', () => {
-    // Two Claude roots: `busy` has 6 children, `barren` has none. The busy root's
-    // arc must be wider, so the angular gap from busy's neighbours is larger than
-    // the gap around barren. We approximate "arc width" by the angular distance
-    // from each root to its nearest neighbouring root on the ring.
+describe('layoutRadarScene — busy constellations claim more room', () => {
+  it('gives a folder whose root has many subagents a larger constellation extent than a barren one', () => {
+    // `busy-proj` holds one root with 6 subagents; `barren-proj` holds one barren
+    // root. The busy constellation's extent (which drives its lateral spacing) must
+    // be wider, so a busy orchestrator's moon halo never crowds its neighbours.
     const a: RadarAgent[] = [
-      agent({ id: 'busy', harness: 'claude_code', depth: 0, contextTokens: 40000, childCount: 6 }),
-      agent({ id: 'barren', harness: 'claude_code', depth: 0, contextTokens: 40000, childCount: 0 }),
-      agent({ id: 'filler', harness: 'claude_code', depth: 0, contextTokens: 40000, childCount: 0 }),
+      agent({ id: 'busy', cwd: 'busy-proj', depth: 0, contextTokens: 40000, childCount: 6 }),
+      agent({ id: 'barren', cwd: 'barren-proj', depth: 0, contextTokens: 40000, childCount: 0 }),
     ];
     for (let i = 0; i < 6; i++)
-      a.push(agent({ id: `busy-kid-${i}`, harness: 'claude_code', depth: 1, parentId: 'busy', contextTokens: 5000 }));
-    const layout = layoutRadarScene({ generatedAt: 'T', agents: a });
-    const origin = { x: 0, z: 0 };
-    const rootBearings = layout.nodes
-      .filter((n) => n.depth === 0)
-      .map((n) => ({ id: n.id, theta: bearing(origin, n.position) }));
-    const nearest = (id: string) => {
-      const me = rootBearings.find((r) => r.id === id)!;
-      return Math.min(
-        ...rootBearings.filter((r) => r.id !== id).map((r) => angularGap(me.theta, r.theta)),
-      );
-    };
-    // the busy root claims more angular room (its nearest neighbour is farther off)
-    // than the barren root does.
-    expect(nearest('busy')).toBeGreaterThan(nearest('barren'));
+      a.push(agent({ id: `busy-kid-${i}`, depth: 1, parentId: 'busy', contextTokens: 5000 }));
+    const { layout } = roots({ generatedAt: 'T', agents: a });
+    const busyC = layout.clusters.find((c) => c.label === 'busy-proj')!;
+    const barrenC = layout.clusters.find((c) => c.label === 'barren-proj')!;
+    expect(busyC.radius).toBeGreaterThan(barrenC.radius);
   });
 });
 

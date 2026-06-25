@@ -3,7 +3,7 @@
 // This is the ONLY module that imports `@remotion/player` and the compositions,
 // so it forms a single lazy Vite chunk. WarRoom.tsx reaches it exclusively via
 // React.lazy(), so Remotion never lands in the main bundle and never runs on the
-// ⌘⇧Space summon hot path (risk R-Bundle / R-Rem). It mounts ABOVE the R3F
+// ⌘⌥⌃M summon hot path (risk R-Bundle / R-Rem). It mounts ABOVE the R3F
 // canvas inside #war-room-root and plays:
 //   • Reveal — on phase==='reveal', driven by the REAL findings handed in
 //

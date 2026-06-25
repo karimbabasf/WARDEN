@@ -1,7 +1,7 @@
 // mount.tsx — mounts the R3F war-room island EXACTLY ONCE into the pre-warmed
 // hidden overlay window. Mount-once is the load-bearing perf rule: React +
 // Three + the postprocessing composer initialise off the summon hot path, so by
-// the time ⌘⇧Space fires the scene is already warm and only the bridge state
+// the time ⌘⌥⌃M fires the scene is already warm and only the bridge state
 // changes thereafter.
 
 import { createRoot, type Root } from 'react-dom/client';

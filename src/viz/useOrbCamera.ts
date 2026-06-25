@@ -34,7 +34,7 @@ export function cameraTargetForOverview(): CameraTarget {
  */
 export function cameraTargetForRadarOverview(): CameraTarget {
   return {
-    position: { x: 0, y: 1.0, z: 11.5 },
+    position: { x: 0, y: 2.6, z: 17.5 },
     lookAt: { x: 0, y: 0, z: 0 },
   };
 }

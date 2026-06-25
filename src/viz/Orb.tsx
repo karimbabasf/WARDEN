@@ -82,6 +82,7 @@ export function Orb({
   hovered,
   dimmed,
   dimTarget = 0,
+  emphasized = false,
   appearDelay,
   onHover,
   onLeave,
@@ -95,6 +96,9 @@ export function Orb({
    *  frame and applied to COLOUR ONLY (never scale/opacity/geometry). Defaults to
    *  0 so the project type-checks before Task 9 wires it. */
   dimTarget?: number;
+  /** This orb MATCHES the active legend filter — give it a real glow + a touch of
+   *  scale so the chosen severity/harness POPS, not just dims everything else. */
+  emphasized?: boolean;
   appearDelay: number;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
@@ -168,10 +172,14 @@ export function Orb({
     const alive = t >= s.born;
 
     const breathe = 1 + Math.sin(t * 1.1 + seed * 6.28) * 0.02;
-    const boost = selected ? 0.22 : hovered ? 0.07 : 0;
+    // A legend match POPS: a real glow lift + a touch of scale so the chosen severity
+    // / harness stands out, while the non-matches dim (litK) — tuned to be noticeable
+    // without blowing out the bloom.
+    const emphasisGlow = emphasized ? 0.6 : 0;
+    const boost = (selected ? 0.22 : hovered ? 0.07 : 0) + (emphasized ? 0.08 : 0);
     const severityGlow = isHub ? 0.0 : (severity / 5) * 0.4;
     const targetScale = alive ? node.radius * (1 + boost) : 0.0001;
-    const targetGlow = (isHub ? 0.85 : 0.5) + severityGlow + (selected ? 0.9 : hovered ? 0.35 : 0);
+    const targetGlow = (isHub ? 0.85 : 0.5) + severityGlow + emphasisGlow + (selected ? 0.9 : hovered ? 0.35 : 0);
     const targetDim = dimmed ? 1 : 0;
     // Legend colour-dim: dims for the legend filter OR the boolean other-selected
     // state, whichever is stronger — one eased float, colour only.

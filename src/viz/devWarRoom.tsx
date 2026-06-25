@@ -21,7 +21,7 @@ const bridge = createBridge(noopListen);
 const ORB_SCENE = {
   agents: [
     { id: 'claude_code', harness: 'claude_code', label: 'Claude', glyph: '◆', color: '#3dffa0', sessions: 47, event_count: 1402, total_load: 17 },
-    { id: 'codex', harness: 'codex', label: 'Codex', glyph: '▲', color: '#b98cff', sessions: 12, event_count: 411, total_load: 8 },
+    { id: 'codex', harness: 'codex', label: 'Codex', glyph: '▣', color: '#b98cff', sessions: 12, event_count: 411, total_load: 8 },
   ],
   issues: [
     { id: 'claude_code:CONTEXT_BLOAT', agent_id: 'claude_code', harness: 'claude_code', pattern_id: 'CONTEXT_BLOAT', title: 'Context bloat', count: 8, severity: 5, rationale: 'Main-context search and file reading recur before useful edits.', est_cost_tokens: 84000, est_cost_minutes: 34, frequency: 0.62, confidence: 0.9, session_ids: ['claude-a', 'claude-b', 'claude-c'], evidence: [] },

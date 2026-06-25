@@ -13,7 +13,6 @@
 // bar (a11y `aria-current`, keyboard focus, the sweep) is verified live.
 
 import { Fragment } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 
 export type ConstellationTab = 'habits' | 'radar';
 
@@ -42,10 +41,11 @@ export function NavBar({
   counts?: Partial<Record<ConstellationTab, number>>;
 }) {
   return (
-    // `data-tauri-drag-region` makes the bar's empty backdrop a drag handle for
-    // the frameless overlay. Interactive children (tabs, window controls) are
-    // real <button>s and capture their own clicks, so dragging only starts on
-    // the inert regions (the mark, the dividers, the flex spacer).
+    // `data-tauri-drag-region` makes the bar's empty backdrop a drag handle for the
+    // window. The native macOS title bar (titleBarStyle: Overlay) owns the real
+    // close / minimize / zoom traffic lights, so this bar no longer carries its own
+    // window-control buttons — only the tab <button>s, which capture their clicks.
+    // Dragging therefore starts on the inert regions (the mark, the dividers).
     <nav className="wd-nav" aria-label="Constellation" data-tauri-drag-region>
       <span className="wd-nav-mark" aria-hidden>
         ✦
@@ -72,28 +72,6 @@ export function NavBar({
           </Fragment>
         );
       })}
-      {/* Flex spacer pushes controls to the right and doubles as drag surface. */}
-      <span className="wd-nav-spacer" data-tauri-drag-region />
-      <div className="wd-nav-controls">
-        <button
-          type="button"
-          className="wd-win-btn wd-win-min"
-          title="Minimize"
-          aria-label="Minimize window"
-          onClick={() => void invoke('minimize_window')}
-        >
-          <span aria-hidden>—</span>
-        </button>
-        <button
-          type="button"
-          className="wd-win-btn wd-win-close"
-          title="Close · hide overlay"
-          aria-label="Close window"
-          onClick={() => void invoke('hide_window')}
-        >
-          <span aria-hidden>✕</span>
-        </button>
-      </div>
     </nav>
   );
 }
