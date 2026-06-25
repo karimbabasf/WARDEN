@@ -79,6 +79,22 @@ html, body {
   font-family: var(--mono);
 }
 
+/* Native-style titlebar drag handle for the frameless overlay. Thin top band; the
+   HUD + nav sit above it (higher z) and keep their own pointer-events. */
+.wd-dragbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 34px;
+  z-index: 4;
+  pointer-events: auto;
+  cursor: grab;
+}
+.wd-dragbar:active {
+  cursor: grabbing;
+}
+
 /* faint scanline texture over everything, like a console CRT — kept very low so
    it never fights legibility */
 .wd-chrome::after {

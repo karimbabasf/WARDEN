@@ -9,7 +9,7 @@
 // must never throw or drop the forest.
 
 /** Liveness of one agent. Mirrors Rust `AgentStatus`. */
-export type RadarStatus = 'working' | 'idle' | 'closed';
+export type RadarStatus = 'working' | 'idle' | 'closed' | 'terminated';
 
 /** A single recent event tailing in an agent's context. */
 export type RadarActivity = {
@@ -117,7 +117,7 @@ function clamp01(v: number): number {
   return v;
 }
 
-const STATUSES: ReadonlySet<string> = new Set(['working', 'idle', 'closed']);
+const STATUSES: ReadonlySet<string> = new Set(['working', 'idle', 'closed', 'terminated']);
 function status(v: unknown): RadarStatus {
   return typeof v === 'string' && STATUSES.has(v) ? (v as RadarStatus) : 'idle';
 }

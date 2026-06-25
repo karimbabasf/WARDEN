@@ -67,52 +67,26 @@ describe('frameloopFor — RAF pauses when hidden', () => {
   });
 });
 
-describe('activeFor — the war-room wakes on daemon summon OR a visible page', () => {
-  it('is active when the daemon summoned the overlay, even with a hidden page', () => {
-    // The packaged app's overlay is a hidden native window: document.hidden stays
-    // true, but the warden_hotkey summon (summoned=true) must wake the loop. This
-    // is the exact regression that left the live war-room blank.
+describe('activeFor — animate unless minimized (blur is irrelevant)', () => {
+  it('a summoned overlay stays active when blurred / on another screen', () => {
+    expect(activeFor(true, false)).toBe(true);
+    // even if the page-visibility flag is stale-true right after a native show
     expect(activeFor(true, true)).toBe(true);
-    expect(frameloopFor(!activeFor(true, true))).toBe('always');
   });
 
-  it('is active when the page is visible even without a summon (dev/browser)', () => {
+  it('pauses only when minimized', () => {
+    expect(activeFor(true, false, true)).toBe(false);
+    expect(frameloopFor(!activeFor(true, false, true))).toBe('never');
+  });
+
+  it('a visible dev/browser page (no summon) is active, and pauses when tab-hidden', () => {
     expect(activeFor(false, false)).toBe(true);
     expect(activeFor(undefined, false)).toBe(true);
-  });
-
-  it('pauses only when neither summoned nor visible', () => {
     expect(activeFor(false, true)).toBe(false);
-    expect(activeFor(undefined, true)).toBe(false);
-    expect(frameloopFor(!activeFor(false, true))).toBe('never');
   });
-});
 
-describe('activeFor — an unfocused dev surface pauses (stop rendering what nobody watches)', () => {
-  it('pauses a visible, unsummoned page when the window is blurred', () => {
-    // Dev iteration: the dev-viz tab/window is visible but you are typing in your
-    // IDE. With no daemon summon, visibility alone keeps the 60fps loop alive — and
-    // a blurred window means nobody is looking, so the heavy render must halt.
+  it('minimize overrides everything', () => {
     expect(activeFor(false, false, true)).toBe(false);
-    expect(frameloopFor(!activeFor(false, false, true))).toBe('never');
-  });
-
-  it('runs a visible, unsummoned page while the window is focused', () => {
-    expect(activeFor(false, false, false)).toBe(true);
-    expect(frameloopFor(!activeFor(false, false, false))).toBe('always');
-  });
-
-  it('keeps a summoned overlay running even when blurred (prod summon is focus-independent)', () => {
-    // The packaged overlay never steals focus ("focus": false in tauri.conf) and
-    // dismisses on blur on its own; while summoned, the render must NOT hinge on
-    // focus, or the live war-room would blank the instant it appears.
-    expect(activeFor(true, true, true)).toBe(true);
-    expect(activeFor(true, false, true)).toBe(true);
-  });
-
-  it('defaults to focused when the blur flag is omitted (back-compat with the 2-arg calls)', () => {
-    expect(activeFor(false, false)).toBe(true);
-    expect(activeFor(undefined, false)).toBe(true);
-    expect(activeFor(false, true)).toBe(false);
+    expect(activeFor(undefined, false, true)).toBe(false);
   });
 });

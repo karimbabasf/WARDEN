@@ -3,7 +3,9 @@
 //   1. mount the island once into #war-room-root (pre-warmed on the hidden window),
 //   2. pull boot state (profile, orb scene, cached diagnosis) into the bridge,
 //   3. fan every Tauri event into the bridge and own the overlay lifecycle (summon
-//      wake, blur-dismiss, Esc-hide).
+//      wake + minimize-pause). The overlay STAYS ON SCREEN and KEEPS ANIMATING when
+//      it loses focus or moves to another display; the render loop pauses ONLY when
+//      the window is minimized. It never auto-hides on blur or Esc.
 // All rendering — HUD, ask bar, live pipeline, diagnosis drill-in — happens inside
 // the island (src/viz/), driven purely by the bridge's SceneState. No DOM here.
 
@@ -127,18 +129,15 @@ listen('warden_hotkey', () => {
   diag(`hotkey received hidden=${document.hidden} vis=${document.visibilityState}`);
 });
 
-// Pause the war-room when the overlay loses focus (the daemon hides it on blur).
-appWindow.onFocusChanged(({ payload: focused }) => {
-  if (!focused) bridge.ingest('warden_dismiss', {});
-}).catch(() => {});
-
-document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape') {
-    ev.preventDefault();
-    // Dismiss via the daemon so it also restores click-through (idle state),
-    // matching the tray + blur dismissal path. Fall back to a direct hide.
-    invoke('hide_overlay').catch(() => appWindow.hide().catch(() => {}));
+// The overlay STAYS ON SCREEN and KEEPS ANIMATING when it loses focus or you move to
+// another display — animation is no longer tied to focus. The ONLY pause is minimize.
+// Tauri has no dedicated minimize event, so we sample isMinimized() on every resize.
+appWindow.onResized(async () => {
+  try {
+    bridge.ingest((await appWindow.isMinimized()) ? 'warden_minimized' : 'warden_restored', {});
+  } catch {
+    /* non-Tauri / dev surface: no-op */
   }
-});
+}).catch(() => {});
 
 boot();

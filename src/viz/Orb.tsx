@@ -194,15 +194,19 @@ export function Orb({
     // dimK (opacity/intensity) stays bound to the boolean-dim track only — the
     // legend colour-dim must NOT change opacity, so it is deliberately excluded.
     const dimK = 1 - s.dim * 0.6;
-    gemMat.current.emissiveIntensity = (0.55 + s.glow * 0.6) * dimK;
-    haloMat.current.opacity = (0.2 + s.glow * 0.28) * dimK;
-    nodeMat.current.opacity = (0.45 + s.glow * 0.32) * dimK;
+    // The legend filter also crushes opacity/emissive (not just colour) so a
+    // filtered-out node falls below the bloom threshold → near-dark ember, while a
+    // match keeps its full halo and blooms. litK=1 when lit, ~0.18 when filtered.
+    const litK = 1 - s.colorDim * 0.82;
+    gemMat.current.emissiveIntensity = (0.55 + s.glow * 0.6) * dimK * litK;
+    haloMat.current.opacity = (0.2 + s.glow * 0.28) * dimK * litK;
+    nodeMat.current.opacity = (0.45 + s.glow * 0.32) * dimK * litK;
 
     // ── eased legend dim, COLOUR ONLY ───────────────────────────────────────
     // Copy each material's base colour, scale by the eased dim, write it back.
     // Copy-then-scale (never multiply in place) so the dim never compounds.
-    const shellScale = dimScale(s.colorDim, 0.42);
-    const innerScale = dimScale(s.colorDim, 0.45);
+    const shellScale = dimScale(s.colorDim, 0.18);
+    const innerScale = dimScale(s.colorDim, 0.22);
     if (!shellMat.current) shellMat.current = findWireframeMaterial(shellGroup.current);
     if (!cageMat.current) cageMat.current = findWireframeMaterial(innerGroup.current);
     if (shellMat.current) {

@@ -29,7 +29,7 @@ export type LifecycleEntry = {
 export type LifecycleMap = Record<string, LifecycleEntry>;
 
 /** The live forest's id + status, as fed each frame from the radar model. */
-export type LiveId = { id: string; status: 'working' | 'idle' | 'closed' };
+export type LiveId = { id: string; status: 'working' | 'idle' | 'closed' | 'terminated' };
 
 // Tween rates (per second, exp-damped → inherently dt-bounded, never overshoot).
 const SPAWN_LAMBDA = 7;
@@ -49,7 +49,9 @@ export function reconcileLifecycle(prev: LifecycleMap, live: LiveId[], dt: numbe
   // 1) Every live (non-closed) id: spawn or stay alive.
   for (const { id, status } of live) {
     const was = prev[id];
-    const closed = status === 'closed';
+    // `closed` (root/process gone) and `terminated` (a finished subagent) are both
+    // terminal: implode once, then stay gone (no resurrection bloom).
+    const closed = status === 'closed' || status === 'terminated';
 
     if (closed) {
       // A closed id whose gone entry was already pruned (or that first appears

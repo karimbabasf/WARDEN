@@ -36,6 +36,7 @@ const STATUS_LABEL: Record<RadarAgent['status'], string> = {
   working: 'Working',
   idle: 'Idle',
   closed: 'Closed',
+  terminated: 'Terminated',
 };
 
 /**
@@ -293,6 +294,12 @@ function IdentitySection({ agent }: { agent: RadarAgent }) {
             <span aria-hidden>{theme.glyph}</span> {theme.label}
           </dd>
         </div>
+        {agent.role ? (
+          <div>
+            <dt>Role</dt>
+            <dd>{agent.role}</dd>
+          </div>
+        ) : null}
         <div>
           <dt>Model</dt>
           <dd>{agent.model ?? '—'}</dd>

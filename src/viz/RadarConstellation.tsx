@@ -140,12 +140,15 @@ function RadarGlobe({
   const agent = node.radarAgent!;
   const isRoot = node.depth === 0;
   const working = agent.status === 'working';
+  const terminated = agent.status === 'terminated';
+  // A finishing subagent flares verdict-amber as the lifecycle implodes its scale.
+  const baseHex = terminated ? '#ff5a37' : radarNodeColor(agent);
   const seed = useMemo(() => seedOf(node.id), [node.id]);
 
-  // Colour depends only on harness hue + fill heat; `normalizeRadarState` rebuilds
-  // the whole `agent` object every emit, so key on those two fields (not identity)
-  // to avoid rebuilding the THREE.Color (and its derived clones) on every frame.
-  const color = useMemo(() => new THREE.Color(radarNodeColor(agent)), [agent.harness, agent.fillPct]);
+  // Colour depends only on harness hue + fill heat (or the amber terminated flare);
+  // `normalizeRadarState` rebuilds the whole `agent` object every emit, so key on the
+  // resolved hex (not identity) to avoid rebuilding the THREE.Color every frame.
+  const color = useMemo(() => new THREE.Color(baseHex), [baseHex]);
   const innerColor = useMemo(() => color.clone().lerp(WHITE, 0.24), [color]);
   const nodeColor = useMemo(() => color.clone().lerp(WHITE, 0.16), [color]);
 
@@ -203,12 +206,15 @@ function RadarGlobe({
     const lifecycleScale = lifecycleRef.current[node.id]?.scale ?? (agent.status === 'closed' ? 0 : 1);
     const targetScale = node.radius * (1 + boost) * Math.max(0, lifecycleScale);
     const fillGlow = 0.25 + agent.fillPct * 0.65; // fuller = hotter core
-    const idleDim = working ? 0 : 0.28; // idle agents read dimmer (at-a-glance who's thinking)
-    const targetGlow = (isRoot ? 0.8 : 0.55) + fillGlow - idleDim + (selected ? 0.9 : hovered ? 0.35 : 0);
+    // Working blazes; idle is crushed HARD on both glow and colour so the contrast
+    // reads instantly. (was idleDim 0.28, colour untouched.)
+    const idleDim = working ? 0 : 0.5;
+    const workingLift = working ? 0.18 : 0;
+    const targetGlow =
+      (isRoot ? 0.8 : 0.55) + fillGlow - idleDim + workingLift + (selected ? 0.9 : hovered ? 0.35 : 0);
     const targetDim = dimmed ? 1 : 0;
-    // Legend colour-dim: dims for the legend filter OR the boolean other-selected
-    // state, whichever is stronger — one eased float, colour only.
-    const targetColorDim = Math.max(targetDim, Math.min(1, Math.max(0, dimTarget)));
+    const idleColorDim = working ? 0 : 0.5; // idle also DESATURATES, not only loses glow
+    const targetColorDim = Math.max(targetDim, Math.min(1, Math.max(0, dimTarget)), idleColorDim);
 
     // spawn eases in fast; implode collapses fast — both damped (never snap).
     const scaleLambda = lifecycleScale < 0.999 ? 10 : 6;
@@ -240,8 +246,8 @@ function RadarGlobe({
     // ── eased legend dim, COLOUR ONLY ───────────────────────────────────────
     // Copy each material's base colour, scale by the eased dim, write it back
     // (copy-then-scale so the dim never compounds frame to frame).
-    const shellScaleC = dimScale(s.colorDim, 0.42);
-    const innerScaleC = dimScale(s.colorDim, 0.45);
+    const shellScaleC = dimScale(s.colorDim, 0.2);
+    const innerScaleC = dimScale(s.colorDim, 0.24);
     if (!shellMat.current) shellMat.current = findWireframeMaterial(shellGroup.current);
     if (!cageMat.current) cageMat.current = findWireframeMaterial(innerGroup.current);
     if (shellMat.current) {
@@ -717,7 +723,7 @@ export function RadarSceneBody(props: RadarConstellationProps) {
       <RadarForest {...props} />
 
       <EffectComposer multisampling={4}>
-        <Bloom intensity={0.95} luminanceThreshold={0.26} luminanceSmoothing={0.95} mipmapBlur radius={0.74} />
+        <Bloom intensity={1.05} luminanceThreshold={0.22} luminanceSmoothing={0.95} mipmapBlur radius={0.78} />
         <Vignette eskil={false} offset={0.2} darkness={0.92} />
       </EffectComposer>
     </>

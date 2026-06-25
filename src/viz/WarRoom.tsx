@@ -44,20 +44,18 @@ export function frameloopFor(hidden: boolean): 'always' | 'never' {
   return hidden ? 'never' : 'always';
 }
 
-// The render loop should run when the daemon summoned the overlay (prod) OR the
-// page is genuinely being watched — visible AND focused. `blurred` defaults to
-// false so the existing 2-arg call sites keep their old meaning. The focus gate
-// is what stops the heavy 60fps war-room from rendering while you sit in your IDE
-// during `pnpm tauri dev` (the dev surface is visible but unwatched). A `summoned`
-// overlay stays active regardless of focus: the packaged window never takes focus
-// ("focus": false) and dismisses on blur on its own, so its render must not hinge
-// on it.
+// The render loop runs whenever the window is on screen — even unfocused or sitting
+// on another display. The ONLY thing that pauses it is MINIMIZE (CPU saver). A
+// summoned overlay is active regardless of the page-visibility flag (a native
+// .show() may leave document.hidden stale-true). Dev/browser (no summon) keys off
+// page visibility so a hidden tab still pauses.
 export function activeFor(
   summoned: boolean | undefined,
   visHidden: boolean,
-  blurred = false,
+  minimized = false,
 ): boolean {
-  return Boolean(summoned) || (!visHidden && !blurred);
+  if (minimized) return false;
+  return Boolean(summoned) || !visHidden;
 }
 
 function humanisePattern(patternId: string): string {
@@ -304,7 +302,7 @@ function SceneShell({
           lines from sub-pixel shimmering into the bloom pass (the flicker). High
           smoothing + a higher threshold keep the bloom stable + calm. */}
       <EffectComposer multisampling={4}>
-        <Bloom intensity={0.93} luminanceThreshold={0.27} luminanceSmoothing={0.95} mipmapBlur radius={0.74} />
+        <Bloom intensity={1.05} luminanceThreshold={0.22} luminanceSmoothing={0.95} mipmapBlur radius={0.78} />
         <Vignette eskil={false} offset={0.2} darkness={0.92} />
       </EffectComposer>
     </>
@@ -321,12 +319,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     clustered: 0,
   }));
   const [visHidden, setVisHidden] = useState(() => document.hidden);
-  // Twin of `visHidden`: true while the window is blurred (e.g. you alt-tabbed to
-  // your editor during `pnpm tauri dev`). Combined with `visHidden` it lets the
-  // Canvas pause the heavy render whenever nobody is actually watching the page.
-  const [blurred, setBlurred] = useState(() =>
-    typeof document.hasFocus === 'function' ? !document.hasFocus() : false,
-  );
   // `tab` is the nav INTENT (the lit tab — flips instantly on click); `displayTab`
   // is the constellation actually on screen, which only swaps at the PEAK of the
   // hyperspace jump so the change happens hidden under the streaks.
@@ -346,7 +338,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const [fixPreview, setFixPreview] = useState<FixPreview | undefined>();
   const [loadingFix, setLoadingFix] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
-  const active = activeFor(scene.summoned, visHidden, blurred);
+  const active = activeFor(scene.summoned, visHidden, scene.minimized);
   const introPlayed = useRef(!document.hidden);
   const [showIntro, setShowIntro] = useState(false);
 
@@ -376,15 +368,9 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
 
   useEffect(() => {
     const onVis = () => setVisHidden(document.hidden);
-    const onFocus = () => setBlurred(false);
-    const onBlur = () => setBlurred(true);
     document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('focus', onFocus);
-    window.addEventListener('blur', onBlur);
     return () => {
       document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('focus', onFocus);
-      window.removeEventListener('blur', onBlur);
     };
   }, []);
 
@@ -494,10 +480,10 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     [focusStack],
   );
 
-  // Esc backs out one level: while an orb is focused the first Esc deselects, and
-  // is swallowed (capture phase) before main.ts's global handler so the overlay
-  // stays open. With nothing selected this listener is inert and Esc falls through
-  // to the daemon dismiss exactly as before.
+  // Esc backs out one level: while an orb is focused, Esc deselects it (swallowed in
+  // the capture phase). With nothing selected this listener is inert and Esc does
+  // nothing — the overlay stays on screen. Dismissal is explicit only: the
+  // Minimize / Close window controls, the tray, or the ⌘⌥⌃M hotkey.
   useEffect(() => {
     if (!selectedId) return;
     const onKey = (ev: KeyboardEvent) => {
@@ -610,6 +596,33 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
 
   return (
     <div className={`viz-root viz-phase-${scene.phase} viz-orb-map`}>
+      {/* Frameless window has no titlebar — this top strip is the drag handle. Drag
+          to move (across displays); double-click toggles maximize; dragging while
+          maximized un-maximizes first (macOS "zoom" behavior). Dynamic import keeps
+          it safe under vitest/jsdom and the dev browser (no Tauri global). */}
+      <div
+        className="wd-dragbar"
+        onMouseDown={async (e) => {
+          if (e.button !== 0) return;
+          try {
+            const { getCurrentWindow } = await import('@tauri-apps/api/window');
+            const win = getCurrentWindow();
+            if (await win.isMaximized()) await win.unmaximize();
+            await win.startDragging();
+          } catch {
+            /* non-Tauri surface: no-op */
+          }
+        }}
+        onDoubleClick={async () => {
+          try {
+            const { getCurrentWindow } = await import('@tauri-apps/api/window');
+            const win = getCurrentWindow();
+            (await win.isMaximized()) ? await win.unmaximize() : await win.maximize();
+          } catch {
+            /* no-op */
+          }
+        }}
+      />
       <Canvas
         dpr={[1, 2]}
         frameloop={frameloopFor(!active)}

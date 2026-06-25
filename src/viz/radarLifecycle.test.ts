@@ -18,7 +18,7 @@ function run(prev: LifecycleMap, ids: LiveId[], frames: number, dt = DT): Lifecy
   return map;
 }
 
-function live(id: string, status: 'working' | 'idle' | 'closed' = 'working'): LiveId {
+function live(id: string, status: 'working' | 'idle' | 'closed' | 'terminated' = 'working'): LiveId {
   return { id, status };
 }
 
@@ -83,6 +83,23 @@ describe('reconcileLifecycle — implode', () => {
     expect(imploding.a.phase).toBe('imploding');
     const reborn = reconcileLifecycle(imploding, [live('a')], DT);
     expect(reborn.a.phase).toBe('spawning');
+  });
+});
+
+describe('reconcileLifecycle — terminated subagent', () => {
+  it('a terminated id implodes like closed and does not resurrect after prune', () => {
+    const alive = run({}, [live('a', 'working')], 240);
+    const closing = reconcileLifecycle(alive, [live('a', 'terminated')], DT);
+    expect(closing.a.phase).toBe('imploding');
+
+    const gone = run(closing, [live('a', 'terminated')], 240);
+    expect(gone.a.phase).toBe('gone');
+    const pruned = pruneGone(gone);
+    expect(pruned.a).toBeUndefined();
+    // a stray late payload still tagging it terminated must NOT bloom it back
+    const after = reconcileLifecycle(pruned, [live('a', 'terminated')], DT);
+    expect(after.a.phase).toBe('gone');
+    expect(after.a.scale).toBe(0);
   });
 });
 

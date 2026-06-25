@@ -16,11 +16,12 @@ import type { RadarAgent } from './radarTypes';
 import { radarSubtitle } from './radarTypes';
 import { radarHarness } from './radarTheme';
 
-/** Human status words (the `working|idle|closed` enum is terse; spell it for glance). */
+/** Human status words (the `working|idle|closed|terminated` enum is terse; spell it for glance). */
 const STATUS_LABEL: Record<RadarAgent['status'], string> = {
   working: 'Working',
   idle: 'Idle',
   closed: 'Closed',
+  terminated: 'Terminated',
 };
 
 function pct(fill: number): string {

@@ -81,6 +81,11 @@ export type SceneState = {
    *  Tauri event by main.ts — is the authoritative wake signal for the R3F render
    *  loop + one-shot intro. */
   summoned?: boolean;
+  /** True while the overlay window is MINIMIZED — the one and only animation gate.
+   *  Tracked from the Tauri window resize → `isMinimized()` sample in main.ts. Blur
+   *  and moving to another display do NOT set this: the render keeps running off-focus
+   *  and only halts (CPU saver) when the window is actually minimized. */
+  minimized?: boolean;
   /** Persistent memory profile (totals + per-harness rollup), from `query_profile`. */
   profile?: Profile;
   /** Human-readable status line for the chrome (replaces the old terminal status). */
@@ -101,7 +106,7 @@ export const NODE_CAP = 24;
 const PULSE_CAP = 48;
 
 function emptyState(): SceneState {
-  return { phase: 'idle', candidates: [], verdicts: {}, pulses: [], usage: {}, clustered: 0 };
+  return { phase: 'idle', candidates: [], verdicts: {}, pulses: [], usage: {}, clustered: 0, minimized: false };
 }
 
 function num(v: unknown): number {
@@ -329,6 +334,12 @@ export function reduce(state: SceneState, name: string, payload: any): SceneStat
       // Overlay lost focus / was hidden — let the render loop pause.
       return state.summoned ? { ...state, summoned: false } : state;
 
+    case 'warden_minimized':
+      return state.minimized ? state : { ...state, minimized: true };
+
+    case 'warden_restored':
+      return state.minimized ? { ...state, minimized: false } : state;
+
     default:
       // ingest_progress, diagnosis_status, schema drift, … — not scene-driving.
       // Ignore without mutating.
@@ -376,9 +387,10 @@ export function createBridge(
     },
     reset() {
       // Live run signals clear; the persistent memory (orb scene, radar forest,
-      // profile) and the summon state survive — none is part of a single run.
-      const { orbScene, radarScene, summoned, profile } = state;
-      state = { ...emptyState(), orbScene, radarScene, summoned, profile };
+      // profile) and the window state (summon, minimize) survive — none is part of
+      // a single run.
+      const { orbScene, radarScene, summoned, minimized, profile } = state;
+      state = { ...emptyState(), orbScene, radarScene, summoned, minimized, profile };
       emit();
     },
   };
