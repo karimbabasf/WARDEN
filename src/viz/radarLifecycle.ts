@@ -33,9 +33,9 @@ export type LiveId = { id: string; status: 'working' | 'idle' | 'closed' | 'term
 
 // Tween rates (per second, exp-damped → inherently dt-bounded, never overshoot).
 const SPAWN_LAMBDA = 7;
-const IMPLODE_LAMBDA = 9;
+const IMPLODE_LAMBDA = 16;
 const ALIVE_AT = 0.985; // spawning promotes to alive past this scale
-const GONE_AT = 0.01; // imploding finishes (→ gone, then dropped) below this scale
+const GONE_AT = 0.025; // imploding finishes (→ gone, then dropped) below this scale
 const CROSSFADE_LAMBDA = 6;
 
 /**

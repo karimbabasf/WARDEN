@@ -327,8 +327,11 @@ export function reduce(state: SceneState, name: string, payload: any): SceneStat
     case 'warden_hotkey':
       // Daemon summoned the overlay. The native window .show() does not drive the
       // webview Page Visibility API, so this is the war-room's authoritative wake
-      // signal (resumes the render loop + fires the one-shot intro).
-      return state.summoned ? state : { ...state, summoned: true };
+      // signal (resumes the render loop + fires the one-shot intro). It also clears
+      // the minimize pause: Dock/tray/hotkey restore can emit only this signal, not a
+      // resize-derived `warden_restored`, so the visible overlay must never stay
+      // logically minimized.
+      return state.summoned && !state.minimized ? state : { ...state, summoned: true, minimized: false };
 
     case 'warden_dismiss':
       // Overlay lost focus / was hidden — let the render loop pause.

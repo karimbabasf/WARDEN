@@ -89,10 +89,14 @@ impl AdapterRegistry {
             }
         }
 
-        // RADAR (Task 5): once every adapter's batches are persisted, resolve Codex
-        // Desktop parent→child links over the store (both parent and child rows now
-        // exist). Best-effort: a linkage failure is surfaced as an error but never
-        // discards the ingested data.
+        // RADAR: once every adapter's batches are persisted, resolve parent→child
+        // links over the store (both parent and child rows now exist). Best-effort:
+        // a linkage failure is surfaced as an error but never discards the ingested
+        // data. This is the expensive whole-store point; steady RADAR reads stay
+        // read-only and cached.
+        if let Err(e) = claude_code::link_claude_subagents_in_store(store) {
+            errors.push(format!("claude linkage: {e:#}"));
+        }
         if let Err(e) = codex::link_codex_subagents_in_store(store) {
             errors.push(format!("codex linkage: {e:#}"));
         }
@@ -156,8 +160,7 @@ mod tests {
         )
         .unwrap();
         let store = Store::memory().unwrap();
-        let adapter =
-            crate::ingest::claude_code::ClaudeCodeAdapter::with_root(root, store.clone());
+        let adapter = crate::ingest::claude_code::ClaudeCodeAdapter::with_root(root, store.clone());
         let registry = AdapterRegistry {
             adapters: vec![Box::new(adapter)],
         };
@@ -166,6 +169,48 @@ mod tests {
         let (harness, sessions, _events) = &summary.by_harness[0];
         assert!(matches!(harness, Harness::ClaudeCode));
         assert_eq!(*sessions, 1, "expected 1 session ingested");
+    }
+
+    #[test]
+    fn backfill_all_links_claude_subagents_after_persisting_batches() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let session = root.join("019sess");
+        let subs = session.join("subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+
+        let parent_jsonl = session.join("019sess.jsonl");
+        std::fs::write(&parent_jsonl, "{\"type\":\"assistant\",\"uuid\":\"a1\",\"sessionId\":\"019sess\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"sourceToolAssistantUuid\":\"a1\",\"message\":{\"role\":\"assistant\",\"model\":\"claude\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_registry\",\"name\":\"Task\",\"input\":{}}]}}\n").unwrap();
+
+        let child_jsonl = subs.join("agent-feedface.jsonl");
+        std::fs::write(&child_jsonl, "{\"type\":\"user\",\"uuid\":\"cu\",\"sessionId\":\"019sess-sub\",\"isSidechain\":true,\"agentId\":\"feedface\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{\"content\":\"work\"}}\n").unwrap();
+        std::fs::write(
+            subs.join("agent-feedface.meta.json"),
+            r#"{"agentType":"Explore","description":"trace the live radar path","toolUseId":"toolu_registry"}"#,
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        let adapter =
+            crate::ingest::claude_code::ClaudeCodeAdapter::with_root(root.clone(), store.clone());
+        let registry = AdapterRegistry {
+            adapters: vec![Box::new(adapter)],
+        };
+        let summary = registry.backfill_all(&store);
+        assert!(summary.errors.is_empty(), "no errors: {:?}", summary.errors);
+
+        let parent_sid =
+            crate::util::stable_id(&["claude_code", "019sess", &parent_jsonl.to_string_lossy()]);
+        let child_sid = crate::util::stable_id(&[
+            "claude_code",
+            "agent-feedface",
+            &child_jsonl.to_string_lossy(),
+        ]);
+        assert_eq!(
+            store.parent_of(&child_sid).unwrap(),
+            Some(parent_sid),
+            "registry backfill must preserve Claude subagent nesting without relying on RADAR recompute"
+        );
     }
 
     #[test]
@@ -189,8 +234,10 @@ mod tests {
         )
         .unwrap();
         let store = Store::memory().unwrap();
-        let adapter =
-            crate::ingest::claude_code::ClaudeCodeAdapter::with_root(dir.path().to_path_buf(), store);
+        let adapter = crate::ingest::claude_code::ClaudeCodeAdapter::with_root(
+            dir.path().to_path_buf(),
+            store,
+        );
         let bytes = std::fs::read(&p).unwrap();
         let batches = adapter.parse_range(&p, &bytes, 0, 0).unwrap();
         assert_eq!(batches.len(), 1);
@@ -210,8 +257,10 @@ mod tests {
         let eof = original.len() as u64;
         let appended = b"{\"type\":\"assistant\",\"uuid\":\"a\",\"parentUuid\":\"u\",\"sessionId\":\"s\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude\",\"content\":\"tail\"}}\n";
         let store = Store::memory().unwrap();
-        let adapter =
-            crate::ingest::claude_code::ClaudeCodeAdapter::with_root(dir.path().to_path_buf(), store);
+        let adapter = crate::ingest::claude_code::ClaudeCodeAdapter::with_root(
+            dir.path().to_path_buf(),
+            store,
+        );
         let batches = adapter
             .parse_range(&p, appended, eof, 0)
             .expect("tail slice parses");
@@ -228,8 +277,10 @@ mod tests {
     fn roots_returns_adapter_root() {
         let dir = tempdir().unwrap();
         let store = Store::memory().unwrap();
-        let adapter =
-            crate::ingest::claude_code::ClaudeCodeAdapter::with_root(dir.path().to_path_buf(), store);
+        let adapter = crate::ingest::claude_code::ClaudeCodeAdapter::with_root(
+            dir.path().to_path_buf(),
+            store,
+        );
         let roots = adapter.roots();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0], dir.path());

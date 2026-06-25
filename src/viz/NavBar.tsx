@@ -16,9 +16,11 @@ import { Fragment } from 'react';
 
 export type ConstellationTab = 'habits' | 'radar';
 
+export const PRIMARY_CONSTELLATION_TAB: ConstellationTab = 'radar';
+
 export const TABS: ReadonlyArray<{ id: ConstellationTab; label: string; hint: string }> = [
-  { id: 'habits', label: 'Habits', hint: 'anti-pattern mind-map' },
   { id: 'radar', label: 'Radar', hint: 'live agent forest' },
+  { id: 'habits', label: 'Habits', hint: 'anti-pattern mind-map' },
 ];
 
 /** Per-tab props the button spreads — `aria-current="page"` only on the active tab. */
@@ -41,12 +43,7 @@ export function NavBar({
   counts?: Partial<Record<ConstellationTab, number>>;
 }) {
   return (
-    // `data-tauri-drag-region` makes the bar's empty backdrop a drag handle for the
-    // window. The native macOS title bar (titleBarStyle: Overlay) owns the real
-    // close / minimize / zoom traffic lights, so this bar no longer carries its own
-    // window-control buttons — only the tab <button>s, which capture their clicks.
-    // Dragging therefore starts on the inert regions (the mark, the dividers).
-    <nav className="wd-nav" aria-label="Constellation" data-tauri-drag-region>
+    <nav className="wd-nav" aria-label="Constellation">
       <span className="wd-nav-mark" aria-hidden>
         ✦
       </span>

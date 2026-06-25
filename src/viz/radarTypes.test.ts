@@ -21,6 +21,16 @@ function fullAgent() {
     contextTokens: 120000,
     maxTokens: 200000,
     fillPct: 0.6,
+    contextBreakdown: {
+      usedTokens: 120000,
+      maxTokens: 200000,
+      fillPct: 0.6,
+      rows: [
+        { key: 'messages', label: 'Messages', tokens: 86000, percent: 0.43, count: null },
+        { key: 'mcp_tools', label: 'MCP tools', tokens: 12000, percent: 0.06, count: 4 },
+        { key: 'free_space', label: 'Free space', tokens: 80000, percent: 0.4, count: null, muted: true },
+      ],
+    },
     composition: {
       exact: { cacheRead: 90000, fresh: 12000, output: 2620 },
       estimated: { preamble: 7000, conversation: 3000, toolOutput: 1500, thinking: 200 },
@@ -44,6 +54,16 @@ describe('normalizeRadarState', () => {
     expect(a.parentId).toBeNull();
     expect(a.contextTokens).toBe(120000);
     expect(a.fillPct).toBeCloseTo(0.6);
+    expect(a.contextBreakdown).toEqual({
+      usedTokens: 120000,
+      maxTokens: 200000,
+      fillPct: 0.6,
+      rows: [
+        { key: 'messages', label: 'Messages', tokens: 86000, percent: 0.43, count: null, muted: false },
+        { key: 'mcp_tools', label: 'MCP tools', tokens: 12000, percent: 0.06, count: 4, muted: false },
+        { key: 'free_space', label: 'Free space', tokens: 80000, percent: 0.4, count: null, muted: true },
+      ],
+    });
     expect(a.composition.exact).toEqual({ cacheRead: 90000, fresh: 12000, output: 2620 });
     expect(a.composition.estimated).toEqual({ preamble: 7000, conversation: 3000, toolOutput: 1500, thinking: 200 });
     expect(a.recentActivity[0]).toEqual({ ts: '2026-06-23T22:50:00Z', kind: 'tool', label: 'Read' });
@@ -78,6 +98,7 @@ describe('normalizeRadarState', () => {
     expect(a.contextTokens).toBe(0);
     expect(a.maxTokens).toBe(0);
     expect(a.fillPct).toBe(0);
+    expect(a.contextBreakdown).toEqual({ usedTokens: 0, maxTokens: 0, fillPct: 0, rows: [] });
     expect(a.childCount).toBe(0);
     expect(a.composition.exact).toEqual({ cacheRead: 0, fresh: 0, output: 0 });
     expect(a.composition.estimated).toBeNull();
@@ -100,6 +121,37 @@ describe('normalizeRadarState', () => {
     expect(model.agents[0].status).toBe('idle');
     expect(model.agents[0].contextTokens).toBe(0);
     expect(model.agents[0].maxTokens).toBe(0);
+  });
+
+  it('normalizes snake_case context-window rows and clamps row percentages', () => {
+    const model = normalizeRadarState({
+      agents: [
+        {
+          id: 'ctx',
+          harness: 'codex',
+          status: 'working',
+          context_breakdown: {
+            used_tokens: 66_000,
+            max_tokens: 100_000,
+            fill_pct: 0.66,
+            rows: [
+              { key: 'messages', label: 'Messages', tokens: 40_000, percent: 2, count: 9 },
+              { key: 'free_space', label: 'Free space', tokens: 34_000, percent: -1, muted: true },
+              'bad-row',
+            ],
+          },
+        },
+      ],
+    });
+    expect(model.agents[0].contextBreakdown).toEqual({
+      usedTokens: 66_000,
+      maxTokens: 100_000,
+      fillPct: 0.66,
+      rows: [
+        { key: 'messages', label: 'Messages', tokens: 40_000, percent: 1, count: 9, muted: false },
+        { key: 'free_space', label: 'Free space', tokens: 34_000, percent: 0, count: null, muted: true },
+      ],
+    });
   });
 
   it('tolerates a missing/garbage payload without throwing (empty forest)', () => {

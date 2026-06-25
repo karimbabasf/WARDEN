@@ -189,9 +189,9 @@ fn parse_file(path: &Path, bytes: &[u8], raw_hash: u64) -> Result<SessionBatch> 
 /// The pure resolver ([`crate::radar::hierarchy::link_codex_subagents`]) returns
 /// `(child_external_id, parent_external_id)` pairs; this maps both back to their
 /// stored session ids before persisting. Idempotent (re-recording the same parent
-/// is a plain UPDATE) and cheap, so it is safe to call after every backfill and on
-/// each radar recompute. Returns the number of links recorded. VS Code Codex
-/// sessions yield no pairs (they are never `thread_source == "subagent"`).
+/// is a plain UPDATE), so startup/live ingest can call it before RADAR refreshes its
+/// cached forest. Returns the number of links recorded. VS Code Codex sessions yield
+/// no pairs (they are never `thread_source == "subagent"`).
 pub fn link_codex_subagents_in_store(store: &Store) -> Result<usize> {
     let sessions = store.sessions()?;
     // external_id → session id, restricted to Codex rows (Claude shares the table).
@@ -450,8 +450,7 @@ fn parse_slice(
                 "token_count" => {
                     // Per-event delta only. `info` is null early in a session — skip then.
                     if let Some(last) = payload.pointer("/info/last_token_usage") {
-                        let tid =
-                            current_or_open(&mut cur_turn, &mut turns, &mut idx, &sid, ts);
+                        let tid = current_or_open(&mut cur_turn, &mut turns, &mut idx, &sid, ts);
                         let model = models.iter().next().cloned().unwrap_or_default();
                         events.push(EventRecord {
                             id: stable_id(&[&tid, "usage", &ln.to_string()]),
@@ -462,13 +461,11 @@ fn parse_slice(
                                 input: last
                                     .get("input_tokens")
                                     .and_then(Value::as_u64)
-                                    .unwrap_or(0)
-                                    as u32,
+                                    .unwrap_or(0) as u32,
                                 output: last
                                     .get("output_tokens")
                                     .and_then(Value::as_u64)
-                                    .unwrap_or(0)
-                                    as u32,
+                                    .unwrap_or(0) as u32,
                                 cache_creation: 0,
                                 cache_read: last
                                     .get("cached_input_tokens")
@@ -907,8 +904,14 @@ mod tests {
                 _ => None,
             })
             .expect("a TokenUsage event must exist");
-        assert_eq!(input, expected["token_usage"]["input"].as_u64().unwrap() as u32);
-        assert_eq!(output, expected["token_usage"]["output"].as_u64().unwrap() as u32);
+        assert_eq!(
+            input,
+            expected["token_usage"]["input"].as_u64().unwrap() as u32
+        );
+        assert_eq!(
+            output,
+            expected["token_usage"]["output"].as_u64().unwrap() as u32
+        );
         assert_eq!(
             cache_read,
             expected["token_usage"]["cache_read"].as_u64().unwrap() as u32
@@ -981,12 +984,27 @@ mod tests {
         let bytes = std::fs::read(&p).unwrap();
         let b = parse_file(&p, &bytes, hash64(&bytes)).unwrap();
         let m = &b.session.meta;
-        assert_eq!(m.get("thread_source").and_then(Value::as_str), Some("subagent"));
+        assert_eq!(
+            m.get("thread_source").and_then(Value::as_str),
+            Some("subagent")
+        );
         assert_eq!(m.get("parent_thread_id").and_then(Value::as_str), Some("P"));
-        assert_eq!(m.get("agent_role").and_then(Value::as_str), Some("explorer"));
-        assert_eq!(m.get("agent_nickname").and_then(Value::as_str), Some("Dirac"));
-        assert_eq!(m.get("multi_agent_version").and_then(Value::as_str), Some("v1"));
-        assert_eq!(m.get("originator").and_then(Value::as_str), Some("Codex Desktop"));
+        assert_eq!(
+            m.get("agent_role").and_then(Value::as_str),
+            Some("explorer")
+        );
+        assert_eq!(
+            m.get("agent_nickname").and_then(Value::as_str),
+            Some("Dirac")
+        );
+        assert_eq!(
+            m.get("multi_agent_version").and_then(Value::as_str),
+            Some("v1")
+        );
+        assert_eq!(
+            m.get("originator").and_then(Value::as_str),
+            Some("Codex Desktop")
+        );
     }
 
     /// Task 5 end-to-end: two Codex rollouts — a parent (external_id "P") and a
@@ -1092,7 +1110,10 @@ mod tests {
         for e in &b.events {
             let off = e.raw_ref.offset as usize;
             assert!(off < bytes.len(), "offset within file");
-            assert_eq!(bytes[off], b'{', "raw_ref.offset must point at a line start");
+            assert_eq!(
+                bytes[off], b'{',
+                "raw_ref.offset must point at a line start"
+            );
         }
     }
 
@@ -1136,9 +1157,9 @@ mod tests {
         let src = fixture("codex_rollout_sample.jsonl");
         let original = std::fs::read(&src).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(
-            "rollout-2026-06-19T16-33-00-019ee0ba-8295-7ba0-9971-c5af95e77191.jsonl",
-        );
+        let path = dir
+            .path()
+            .join("rollout-2026-06-19T16-33-00-019ee0ba-8295-7ba0-9971-c5af95e77191.jsonl");
         std::fs::write(&path, &original).unwrap();
         let original_eof = original.len() as u64;
 
@@ -1156,11 +1177,8 @@ mod tests {
         // Tail parse: feed ONLY the appended slice with start_offset = original EOF.
         let slice = &full[original_eof as usize..];
         let store = Store::memory().unwrap();
-        let adapter = CodexAdapter::with_root(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-            store,
-        );
+        let adapter =
+            CodexAdapter::with_root(dir.path().to_path_buf(), dir.path().to_path_buf(), store);
         let batches = adapter
             .parse_range(&path, slice, original_eof, hash64(&full))
             .expect("tail parse_range ok");
@@ -1172,7 +1190,10 @@ mod tests {
             b.events.len(),
             1,
             "exactly one appended event, got kinds: {:?}",
-            b.events.iter().map(|e| e.event.kind_name()).collect::<Vec<_>>()
+            b.events
+                .iter()
+                .map(|e| e.event.kind_name())
+                .collect::<Vec<_>>()
         );
         let ev = &b.events[0];
         assert!(
@@ -1220,11 +1241,7 @@ mod tests {
     #[test]
     fn roots_returns_live_and_archived() {
         let store = Store::memory().unwrap();
-        let adapter = CodexAdapter::with_root(
-            PathBuf::from("/a"),
-            PathBuf::from("/b"),
-            store,
-        );
+        let adapter = CodexAdapter::with_root(PathBuf::from("/a"), PathBuf::from("/b"), store);
         let roots = adapter.roots();
         assert_eq!(roots, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
     }

@@ -35,6 +35,29 @@ export function motifFor(harness: string): Motif {
   return 'star';
 }
 
+/** Working roots get a slightly faster gyro cradle; idle roots stay calm. */
+export function agentCoreSpinMultiplier(working: boolean): number {
+  return working ? 1.35 : 1;
+}
+
+export type AgentCorePulseState = {
+  heartScale: number;
+  ringScale: number;
+  glowMultiplier: number;
+};
+
+/** Working roots breathe at the core; idle roots stay visually steady. */
+export function agentCorePulseState(working: boolean, wave: number): AgentCorePulseState {
+  if (!working) return { heartScale: 1, ringScale: 1, glowMultiplier: 1 };
+  const w = Math.max(-1, Math.min(1, wave));
+  const crest = (w + 1) / 2;
+  return {
+    heartScale: 1.04 + w * 0.08,
+    ringScale: 1.02 + w * 0.05,
+    glowMultiplier: 1 + crest * 0.28,
+  };
+}
+
 // ── geometry builders (all in local unit space, the gem heart is ~0.26) ─────────
 
 /** A flat circle as a line loop in the XY plane — one gyro ring. */
@@ -126,6 +149,7 @@ export function AgentCore({
   color,
   dimmed,
   active,
+  working = false,
 }: {
   /** snake_case harness id; selects the brand motif. */
   harness: string;
@@ -134,6 +158,8 @@ export function AgentCore({
   dimmed: boolean;
   /** Selected or hovered — the core brightens a touch in sympathy with the globe. */
   active: boolean;
+  /** True while the owning root agent is actively generating. */
+  working?: boolean;
 }) {
   const ringA = useRef<THREE.Group>(null!);
   const ringB = useRef<THREE.Group>(null!);
@@ -166,15 +192,21 @@ export function AgentCore({
     const t = state.clock.elapsedTime;
     const s = sim.current;
 
-    // slow gyroscope — authority, not alarm. Two rings turning on different axes.
-    ringA.current.rotation.y += dt * 0.22;
-    ringA.current.rotation.x += dt * 0.05;
-    ringB.current.rotation.x += dt * 0.18;
-    ringB.current.rotation.z -= dt * 0.07;
+    // slow gyroscope — authority, not alarm. Working agents get a small velocity
+    // lift so the cradle reads more alive without turning into a spinner.
+    const spin = agentCoreSpinMultiplier(working);
+    const pulse = agentCorePulseState(working, Math.sin(t * 2.2));
+    ringA.current.scale.setScalar(pulse.ringScale);
+    ringB.current.scale.setScalar(pulse.ringScale);
+    heart.current.scale.setScalar(pulse.heartScale);
+    ringA.current.rotation.y += dt * 0.22 * spin;
+    ringA.current.rotation.x += dt * 0.05 * spin;
+    ringB.current.rotation.x += dt * 0.18 * spin;
+    ringB.current.rotation.z -= dt * 0.07 * spin;
     heart.current.rotation.y += dt * 0.3;
     heart.current.rotation.z += dt * 0.11;
 
-    const targetGlow = (active ? 1.35 : 1) * (1 + Math.sin(t * 1.4) * 0.05);
+    const targetGlow = (active ? 1.35 : 1) * pulse.glowMultiplier * (1 + Math.sin(t * 1.4) * 0.03);
     const targetDim = dimmed ? 1 : 0;
     s.glow = THREE.MathUtils.lerp(s.glow, targetGlow, 1 - Math.exp(-5 * dt));
     s.dim = THREE.MathUtils.lerp(s.dim, targetDim, 1 - Math.exp(-6 * dt));

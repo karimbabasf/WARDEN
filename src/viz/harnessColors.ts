@@ -22,16 +22,19 @@ export interface HarnessColor {
 /**
  * Canonical harness colour/glyph/label table.
  *
- * Hues are deliberately VIBRANT and maximally distinct so a globe's harness reads
- * at a glance on --bg #020403: Claude a vivid orange, Codex an electric blue.
+ * Two brand-true hues, refined for a near-black void (--bg #020403): Claude a
+ * TANGY TANGERINE (its logo's warm clay-orange, zested up), Codex a CYAN-ICE blue
+ * (its cool bluish-light). Both are chosen as the IDLE / resting hue — a working
+ * globe blazes from here toward white-hot in the render; brightness is the liveness
+ * signal, never the colour. Distinct + premium, no green anywhere.
  * (Always paired with a glyph + label — colour alone is never a signal.)
- *   claude_code → vivid orange   #ff7a18  ◆  Claude
- *   codex       → electric blue  #2e8bff  ▣  Codex
- *   unknown     → slate          #8fa0b8  ◇  Unknown
+ *   claude_code → tangy tangerine  #ff8636  ◆  Claude
+ *   codex       → cyan-ice blue    #4fc9ff  ▣  Codex
+ *   unknown     → slate            #8fa0b8  ◇  Unknown
  */
 export const HARNESS_COLORS: Record<HarnessId, HarnessColor> = {
-  claude_code: { id: 'claude_code', hue: '#ff7a18', glyph: '◆', label: 'Claude' },
-  codex:       { id: 'codex',       hue: '#2e8bff', glyph: '▣', label: 'Codex' },
+  claude_code: { id: 'claude_code', hue: '#ff8636', glyph: '◆', label: 'Claude' },
+  codex:       { id: 'codex',       hue: '#4fc9ff', glyph: '▣', label: 'Codex' },
   unknown:     { id: 'unknown',     hue: '#8fa0b8', glyph: '◇', label: 'Unknown' },
 };
 

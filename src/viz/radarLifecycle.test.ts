@@ -101,6 +101,14 @@ describe('reconcileLifecycle — terminated subagent', () => {
     expect(after.a.phase).toBe('gone');
     expect(after.a.scale).toBe(0);
   });
+
+  it('finishes a terminated subagent collapse in under half a second', () => {
+    const alive = run({}, [live('a', 'working')], 240);
+    const gone = run(alive, [live('a', 'terminated')], 24);
+
+    expect(gone.a.phase).toBe('gone');
+    expect(gone.a.scale).toBe(0);
+  });
 });
 
 describe('reconcileLifecycle — smoothness', () => {

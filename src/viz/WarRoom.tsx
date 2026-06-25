@@ -10,7 +10,7 @@
 // Honest-viz holds throughout: every orb/link/flare maps to a computed signal,
 // and off-Fugu runs degrade gracefully (no fabricated counts, verdicts or costs).
 
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import { Environment, Lightformer, Html } from '@react-three/drei';
@@ -24,12 +24,16 @@ import { Orb } from './Orb';
 import { StarCatalog } from './StarCatalog';
 import { ConstellationWeb } from './Constellation';
 import { CameraRig } from './CameraRig';
-import { Chrome, type FixPreview } from './chrome';
+import { Chrome, type Artifact, type FixPreview } from './chrome';
 import type { RevealFinding } from './compositions/Reveal';
-import { NavBar, type ConstellationTab } from './NavBar';
+import { NavBar, PRIMARY_CONSTELLATION_TAB, type ConstellationTab } from './NavBar';
 import { RadarForest } from './RadarConstellation';
 import { RadarDetailPanel } from './RadarDetailPanel';
+import { FilterBar } from './FilterBar';
+import { Sidebar } from './Sidebar';
+import { buildRadarRoster, buildHabitsRoster } from './rosterTree';
 import { layoutRadarScene, isFlatAgent } from './radarLayout';
+import { radarHarness } from './radarTheme';
 import { TransitionDriver, FoldGroup, makeTransition, beginTransition } from './Transition';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 import { targetDim, matchesFilter, type EmphasisFilter } from './emphasis';
@@ -44,6 +48,8 @@ export function frameloopFor(hidden: boolean): 'always' | 'never' {
   return hidden ? 'never' : 'always';
 }
 
+export const RADAR_VISIBLE_PULL_MS = 750;
+
 // The render loop runs whenever the window is on screen — even unfocused or sitting
 // on another display. The ONLY thing that pauses it is MINIMIZE (CPU saver). A
 // summoned overlay is active regardless of the page-visibility flag (a native
@@ -56,6 +62,20 @@ export function activeFor(
 ): boolean {
   if (minimized) return false;
   return Boolean(summoned) || !visHidden;
+}
+
+export function isDiscoveryHomeDoubleClickAllowed({
+  selectedId,
+  focusDepth,
+  eventTarget,
+}: {
+  selectedId: string | null;
+  focusDepth: number;
+  eventTarget: EventTarget | null;
+}): boolean {
+  if (selectedId !== null || focusDepth > 0) return false;
+  if (typeof Element === 'undefined' || !(eventTarget instanceof Element)) return true;
+  return eventTarget.closest('button, input, select, textarea, a, [contenteditable="true"], [role="button"]') === null;
 }
 
 function humanisePattern(patternId: string): string {
@@ -73,6 +93,14 @@ export function deriveFindings(scene: SceneState): RevealFinding[] {
     .filter((v) => v.verdict === 'confirmed')
     .sort((a, b) => b.severity - a.severity)
     .map((v) => ({ title: humanisePattern(v.patternId), severity: v.severity, harness: v.harness }));
+}
+
+// Upsert one artifact into the history list by id (newest write wins), keeping
+// it newest-first. Pure so the ledger-merge is unit-testable without a render.
+// A re-staged/re-applied artifact replaces its prior row rather than duplicating.
+export function mergeArtifact(prev: Artifact[], next: Artifact): Artifact[] {
+  const without = prev.filter((a) => a.id !== next.id);
+  return [next, ...without];
 }
 
 // Live-run fallback model: before `get_orb_scene` lands (or off-Fugu), build a
@@ -110,6 +138,30 @@ function fallbackOrbScene(scene: SceneState): OrbSceneModel {
     issues,
     links: issues.map((issue) => ({ source: issue.agentId, target: issue.id, kind: 'agent_issue' as const })),
     guidance: { doItems: [], stopItems: [] },
+  };
+}
+
+export function chromeModelForTab(
+  tab: ConstellationTab,
+  habitsModel: OrbSceneModel,
+  radarModel: RadarSceneModel,
+): OrbSceneModel {
+  if (tab !== 'radar') return habitsModel;
+  return {
+    ...habitsModel,
+    agents: radarModel.agents.map((agent) => {
+      const t = radarHarness(agent.harness);
+      return {
+        id: agent.id,
+        harness: agent.harness,
+        label: agent.nickname ?? agent.label,
+        glyph: t.glyph,
+        color: t.color,
+        sessions: 1,
+        eventCount: agent.recentActivity.length,
+        totalLoad: agent.contextTokens,
+      };
+    }),
   };
 }
 
@@ -218,6 +270,7 @@ function SceneShell({
   hoveredId,
   emphasisFilter,
   focusBounds,
+  homeSignal,
   scaleRef,
   onHover,
   onLeave,
@@ -234,6 +287,8 @@ function SceneShell({
   emphasisFilter: EmphasisFilter;
   /** Cinematic fly-to bounds for the shared CameraRig (null = overview/home). */
   focusBounds: Bounds | null;
+  /** Monotonic signal that asks the shared CameraRig to return to home. */
+  homeSignal: number;
   scaleRef: { current: number };
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
@@ -255,14 +310,14 @@ function SceneShell({
 
       {/* Lights sculpt only the crystal gem hearts (the cages/nodes are unlit
           emissive); the Environment probe gives each facet its glint. */}
-      <ambientLight intensity={0.1} />
-      <directionalLight position={[5, 6, 4]} intensity={2.2} color="#e6fff0" />
-      <directionalLight position={[-6, -1, -2]} intensity={0.7} color="#9fd0ff" />
+      <ambientLight intensity={0.085} />
+      <directionalLight position={[5, 6, 4]} intensity={2.1} color="#fff3e9" />
+      <directionalLight position={[-6, -1, -2]} intensity={0.65} color="#bfe2ff" />
       <Environment resolution={128}>
-        {/* one shared probe for both tabs — emerald, violet + warm formers so
-            Claude, Codex and the radar gems all glint without the void changing. */}
-        <Lightformer form="rect" intensity={1.7} color="#bfffe0" position={[-5, 3, -3]} scale={[7, 7, 1]} />
-        <Lightformer form="rect" intensity={1.3} color="#cab8ff" position={[5, 1, -4]} scale={[6, 6, 1]} />
+        {/* one shared probe for both tabs — Claude-tangerine, Codex-cyan + warm
+            formers so every gem glints in its own hue without the void changing. */}
+        <Lightformer form="rect" intensity={1.7} color="#ffcaa0" position={[-5, 3, -3]} scale={[7, 7, 1]} />
+        <Lightformer form="rect" intensity={1.4} color="#bfeaff" position={[5, 1, -4]} scale={[6, 6, 1]} />
         <Lightformer form="rect" intensity={1.0} color="#ffd9b8" position={[0, -3, -4]} scale={[6, 4, 1]} />
         <Lightformer form="ring" intensity={1.1} color="#ffffff" position={[2, 4, 2]} scale={[2, 2, 1]} />
       </Environment>
@@ -271,7 +326,7 @@ function SceneShell({
           deliberately subordinate so the data reads first (see StarCatalog.tsx). */}
       <StarCatalog />
 
-      <CameraRig selected={selected} focusBounds={focusBounds} />
+      <CameraRig selected={selected} focusBounds={focusBounds} homeSignal={homeSignal} />
 
       {/* The ONLY thing that swaps on a tab change — folded to nothing at the swap
           midpoint, then bloomed back. The shell around it never remounts. */}
@@ -305,8 +360,8 @@ function SceneShell({
           lines from sub-pixel shimmering into the bloom pass (the flicker). High
           smoothing + a higher threshold keep the bloom stable + calm. */}
       <EffectComposer multisampling={4}>
-        <Bloom intensity={1.05} luminanceThreshold={0.22} luminanceSmoothing={0.95} mipmapBlur radius={0.78} />
-        <Vignette eskil={false} offset={0.2} darkness={0.92} />
+        <Bloom intensity={1.3} luminanceThreshold={0.22} luminanceSmoothing={0.9} mipmapBlur radius={0.85} />
+        <Vignette eskil={false} offset={0.22} darkness={0.95} />
       </EffectComposer>
     </>
   );
@@ -325,8 +380,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // `tab` is the nav INTENT (the lit tab — flips instantly on click); `displayTab`
   // is the constellation actually on screen, which only swaps at the PEAK of the
   // hyperspace jump so the change happens hidden under the streaks.
-  const [tab, setTab] = useState<ConstellationTab>('habits');
-  const [displayTab, setDisplayTab] = useState<ConstellationTab>('habits');
+  const [tab, setTab] = useState<ConstellationTab>(PRIMARY_CONSTELLATION_TAB);
+  const [displayTab, setDisplayTab] = useState<ConstellationTab>(PRIMARY_CONSTELLATION_TAB);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   // Interactive-legend filter (Task 10 lights the chips). null = no filter, so every
@@ -338,12 +393,27 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // id; the deepest id drives the CameraRig fly-to (`focusBounds`). Task 10 builds the
   // breadcrumb UI; here we only own the stack + expose pop/clear.
   const [focusStack, setFocusStack] = useState<string[]>([]);
+  const [homeSignal, setHomeSignal] = useState(0);
   const [fixPreview, setFixPreview] = useState<FixPreview | undefined>();
   const [loadingFix, setLoadingFix] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  // ── M4 Forge: the reversible apply/revert write loop ──────────────────────
+  // `artifact` is the write record for the currently-open finding (drives the
+  // applied badge + Revert affordance); `artifacts` is the full guardrail ledger
+  // (applied + reverted history). `applying`/`reverting` gate the buttons while
+  // an invoke is in flight. All four mirror the REAL backend Artifact rows —
+  // never fabricated client state.
+  const [artifact, setArtifact] = useState<Artifact | undefined>();
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [applying, setApplying] = useState(false);
+  const [reverting, setReverting] = useState(false);
+  const [ledgerOpen, setLedgerOpen] = useState(false);
   const active = activeFor(scene.summoned, visHidden, scene.minimized);
   const introPlayed = useRef(!document.hidden);
   const [showIntro, setShowIntro] = useState(false);
+  // Roster sidebar (left dock) — closed by default; the ≡ button and the panel's
+  // ✕ both toggle it. Session-local (not persisted); a tab swap keeps it as-is.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // ── tab fold transition (Radar spec §8 — nothing ever cuts) ─────────────────
   // The single warm <Canvas> never remounts. On a Habits↔Radar switch the current
@@ -354,7 +424,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // the screen at the fold midpoint).
   const transitionRef = useRef(makeTransition());
   const foldScale = useRef(1);
-  const pendingTab = useRef<ConstellationTab>('habits');
+  const pendingTab = useRef<ConstellationTab>(PRIMARY_CONSTELLATION_TAB);
 
   useEffect(() => bridge.subscribe(setScene), [bridge]);
 
@@ -381,6 +451,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const layout = useMemo(() => layoutOrbScene(model), [model]);
   // Radar forest (live agents) — empty until the backend emits `radar_state`.
   const radarModel = useMemo<RadarSceneModel>(() => scene.radarScene ?? { agents: [], generatedAt: '' }, [scene.radarScene]);
+  const chromeModel = useMemo(() => chromeModelForTab(tab, model, radarModel), [tab, model, radarModel]);
   // Memoised radar layout — also the source of the `id → {pos, radius}` map that
   // `subtreeBounds` frames against. Computed from the same deterministic layout the
   // forest renders, so the camera frames exactly what's on screen.
@@ -395,6 +466,24 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const activeLayout = displayTab === 'radar' ? radarLayout : layout;
   const selectedNode = useMemo(() => activeLayout.nodes.find((n) => n.id === selectedId) ?? null, [activeLayout, selectedId]);
   const hoveredNode = useMemo(() => activeLayout.nodes.find((n) => n.id === hoveredId) ?? null, [activeLayout, hoveredId]);
+
+  // Roster (left sidebar) content for the constellation on screen: radar agents
+  // grouped by harness with subagents nested, or the habit orbs grouped by harness.
+  // Built from the SAME models the forest renders (honest-viz) so a row click
+  // selects exactly that globe via the shared `selectedId`.
+  const rosterGroups = useMemo(
+    () => (displayTab === 'radar' ? buildRadarRoster(radarModel.agents) : buildHabitsRoster(layout)),
+    [displayTab, radarModel, layout],
+  );
+  const rosterHeader = useMemo(() => {
+    if (displayTab === 'radar') {
+      const n = radarModel.agents.length;
+      const working = radarModel.agents.filter((a) => a.status === 'working').length;
+      return `${n} ${n === 1 ? 'agent' : 'agents'} · ${working} working`;
+    }
+    const habits = layout.nodes.filter((node) => node.kind === 'issue').length;
+    return `${habits} ${habits === 1 ? 'habit' : 'habits'}`;
+  }, [displayTab, radarModel, layout]);
 
   // Radar detail-panel inputs: the selected live agent and its REAL children
   // (agents whose parentId === the selection). A flat agent yields []; the panel
@@ -421,16 +510,43 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     // screen there's always an easy way to deselect (alongside empty-click + Esc).
     setSelectedId((cur) => (cur === node.id ? null : node.id));
     setFixPreview(undefined);
+    setArtifact(undefined); // the open write record is per-finding — reset on a new dive
   }, []);
   const onClear = useCallback(() => {
     setSelectedId(null);
     setFixPreview(undefined);
+    setArtifact(undefined);
   }, []);
+
+  const onDiscoveryHomeDoubleClick = useCallback(
+    (event: MouseEvent<HTMLDivElement>) => {
+      if (
+        !isDiscoveryHomeDoubleClickAllowed({
+          selectedId,
+          focusDepth: focusStack.length,
+          eventTarget: event.target,
+        })
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setHoveredId(null);
+      setHomeSignal((signal) => signal + 1);
+    },
+    [focusStack.length, selectedId],
+  );
 
   // ── interactive legend ───────────────────────────────────────────────────────
   // Lift-only: set the active filter. Task 10's legend chips call this; passing the
   // same filter again (a chip toggled off) is the caller's job — we just store it.
   const onFilter = useCallback((next: EmphasisFilter) => setEmphasisFilter(next), []);
+
+  // Sidebar toggle, and the roster row → select that globe. Picking reuses the
+  // single selection source so the existing camera dive (focusStack/CameraRig) +
+  // detail dock follow for free on both tabs (a radar agent id and a habits node
+  // id both address `selectedId`).
+  const onToggleSidebar = useCallback(() => setSidebarOpen((o) => !o), []);
+  const onPickRoster = useCallback((id: string) => setSelectedId(id), []);
 
   // ── radar focus breadcrumb ───────────────────────────────────────────────────
   // The stack is DERIVED from the radar selection so `selectedId` stays the single
@@ -524,7 +640,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   useEffect(() => {
     if (displayTab !== 'radar' || !active) return;
     fetchRadar(); // immediate on entering the radar / on summon
-    const id = window.setInterval(fetchRadar, 3000); // keep idle/working state current
+    const id = window.setInterval(fetchRadar, RADAR_VISIBLE_PULL_MS); // fallback; push events remain the fast path
     return () => window.clearInterval(id);
   }, [displayTab, active, fetchRadar]);
 
@@ -590,6 +706,76 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     }
   }, []);
 
+  // ── M4 Forge: stage → apply → revert, wired to the FROZEN CONTRACT ─────────
+  // Refresh the full guardrail ledger from the backend (the single source of
+  // truth for history). `invoke` rejects in the browser-QA harness (no Tauri) →
+  // caught → the ledger is left as-is, never a fabricated row.
+  const refreshLedger = useCallback(async () => {
+    try {
+      const all = await invoke<Artifact[]>('list_artifacts', {});
+      setArtifacts(Array.isArray(all) ? all : []);
+    } catch {
+      /* no backend (harness) — keep whatever we have */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshLedger();
+  }, [refreshLedger]);
+
+  // Apply: stage a PENDING artifact for the finding/issue, then apply it. Both
+  // calls return the real Artifact; we flip the card off `apply`'s returned
+  // `status` (never faked) and fold the result into the ledger. In browser QA
+  // the invoke rejects → we surface an honest "never writes" preview instead.
+  const onApplyFix = useCallback(
+    async (issue: OrbIssue) => {
+      setApplying(true);
+      setRunError(null);
+      try {
+        const staged = await invoke<Artifact>('stage_artifact', {
+          findingId: issue.findingId ?? null,
+          issueId: issue.findingId ? null : issue.id,
+        });
+        const applied = await invoke<Artifact>('apply_artifact', { id: staged.id });
+        setArtifact(applied);
+        setArtifacts((cur) => mergeArtifact(cur, applied));
+      } catch (e) {
+        setRunError(String(e));
+      } finally {
+        setApplying(false);
+      }
+    },
+    [],
+  );
+
+  // Revert: restore the verified pre-image and flip the card back to candidate.
+  // Drives off the returned Artifact's `reverted` status; refuses silently-safe
+  // if the backend rejects (sha mismatch surfaces the typed error to the user).
+  const onRevertFix = useCallback(
+    async (id: string) => {
+      setReverting(true);
+      setRunError(null);
+      try {
+        const reverted = await invoke<Artifact>('revert_artifact', { id });
+        setArtifact((cur) => (cur && cur.id === id ? reverted : cur));
+        setArtifacts((cur) => mergeArtifact(cur, reverted));
+      } catch (e) {
+        setRunError(String(e));
+      } finally {
+        setReverting(false);
+      }
+    },
+    [],
+  );
+
+  const onToggleLedger = useCallback(() => {
+    setLedgerOpen((open) => {
+      // Opening the ledger pulls a fresh history so it never shows a stale trail.
+      if (!open) void refreshLedger();
+      return !open;
+    });
+  }, [refreshLedger]);
+
   const onDismiss = useCallback(() => {
     invoke('hide_overlay').catch(() => {});
   }, []);
@@ -598,13 +784,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const diagnosisId = scene.diagnosisId ?? 'diagnosis';
 
   return (
-    <div className={`viz-root viz-phase-${scene.phase} viz-orb-map`}>
-      {/* The window now wears native macOS chrome (titleBarStyle: Overlay): the OS
-          draws the traffic lights and owns drag, double-click-to-zoom and resize.
-          This top strip is just a wide drag handle — `data-tauri-drag-region` hands
-          the drag (and the double-click zoom) straight to the OS, so there is no
-          fragile JS window-control code to keep in sync. */}
-      <div className="wd-dragbar" data-tauri-drag-region />
+    <div className={`viz-root viz-phase-${scene.phase} viz-orb-map`} onDoubleClick={onDiscoveryHomeDoubleClick}>
       <Canvas
         dpr={[1, 2]}
         frameloop={frameloopFor(!active)}
@@ -634,6 +814,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           hoveredId={hoveredId}
           emphasisFilter={emphasisFilter}
           focusBounds={focusBounds}
+          homeSignal={homeSignal}
           scaleRef={foldScale}
           onHover={onHover}
           onLeave={onLeave}
@@ -648,27 +829,62 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         counts={{ habits: layout.nodes.filter((n) => n.kind === 'issue').length, radar: radarModel.agents.length }}
       />
 
+      {/* ≡ roster toggle (top-left) + the left roster Sidebar. The roster lists
+          every globe as a scannable list (radar agents nested by harness / habits
+          by harness); a row click selects that globe via the shared selection. */}
+      <button
+        type="button"
+        className={`wd-side-toggle${sidebarOpen ? ' is-open' : ''}`}
+        aria-expanded={sidebarOpen}
+        aria-controls="wd-roster"
+        aria-label={sidebarOpen ? 'Collapse roster' : 'Open roster'}
+        title="Roster"
+        onClick={onToggleSidebar}
+      >
+        ☰
+      </button>
+
+      <Sidebar
+        open={sidebarOpen}
+        displayTab={displayTab}
+        groups={rosterGroups}
+        headerCount={rosterHeader}
+        selectedId={selectedId}
+        onPick={onPickRoster}
+        onToggle={onToggleSidebar}
+      />
+
+      {/* The severity + harness emphasis filter, centred along the bottom (its own
+          dock now — it replaced the removed StatusDeck). */}
+      <FilterBar tab={tab} model={chromeModel} filter={emphasisFilter} onFilter={onFilter} />
+
       {/* Chrome is the Habits inspector (keys off node.issue/agent). On the radar
           tab the live selection flows to RadarSceneBody via selectedId; the radar
           detail panel is Phase 3, so keep the Habits inspector closed here rather
           than feeding it a radar node it cannot render. */}
       <Chrome
         scene={scene}
-        model={model}
+        model={chromeModel}
         tab={tab}
         hoveredNode={displayTab === 'radar' ? null : hoveredNode}
         selectedNode={displayTab === 'radar' ? null : selectedNode}
-        emphasisFilter={emphasisFilter}
         focusStack={focusStack}
         running={Boolean(scene.running)}
         error={runError}
         fixPreview={fixPreview}
         loadingFix={loadingFix}
+        artifact={artifact}
+        artifacts={artifacts}
+        applying={applying}
+        reverting={reverting}
+        ledgerOpen={ledgerOpen}
         onAsk={onAsk}
         onRequestFix={onRequestFix}
+        onApplyFix={onApplyFix}
+        onRevertFix={onRevertFix}
+        onToggleLedger={onToggleLedger}
         onClearSelection={onClear}
         onDismiss={onDismiss}
-        onFilter={onFilter}
         onPopFocus={onPopFocus}
         onClearFocus={onClearFocus}
       />

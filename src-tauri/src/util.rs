@@ -3,6 +3,9 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn stable_id(parts: &[&str]) -> String {
     let mut h = Sha256::new();
     for p in parts {
@@ -138,6 +141,24 @@ pub fn ensure_parent(path: &Path) -> Result<()> {
         std::fs::create_dir_all(p).with_context(|| format!("create {}", p.display()))?;
     }
     Ok(())
+}
+/// M4 Forge: the sibling directory where per-artifact pre-image backups live,
+/// `<target_dir>/.warden-bak`. Beside the target so an atomic rename and the
+/// backup share the target's filesystem (no cross-device rename), and namespaced
+/// per artifact id by the caller so concurrent applies can't clobber each other.
+pub fn backup_dir(target: &Path) -> PathBuf {
+    target
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".warden-bak")
+}
+/// Lowercase hex SHA-256 of `bytes`. The integrity primitive for Forge backups:
+/// the pre-image hash recorded at apply time is recomputed and compared at revert
+/// time, so a tampered/lost backup refuses to restore. `sha256_hex("")` is the
+/// empty-input digest (e2…e855…b934ca495991b7852b855).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 pub fn repo_root(cwd: &Path) -> Option<PathBuf> {
     let mut p = cwd.to_path_buf();
@@ -401,6 +422,34 @@ mod tests {
         let result = brain_structured_output();
         clear_brain_env();
         assert_eq!(result, "json_object");
+    }
+
+    // ── backup_dir / sha256_hex (M4 Forge) ───────────────────────────────────
+
+    #[test]
+    fn backup_dir_is_sibling_warden_bak_of_target() {
+        let target = PathBuf::from("/tmp/warden-forge/CLAUDE.md");
+        assert_eq!(
+            backup_dir(&target),
+            PathBuf::from("/tmp/warden-forge/.warden-bak")
+        );
+    }
+
+    #[test]
+    fn sha256_hex_of_empty_input_is_known_digest() {
+        // The canonical SHA-256 of the empty byte string. Apply against a missing
+        // target records exactly this as the pre-image hash.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn sha256_hex_changes_with_content() {
+        assert_ne!(sha256_hex(b"a"), sha256_hex(b"b"));
+        // Deterministic for the same bytes.
+        assert_eq!(sha256_hex(b"warden"), sha256_hex(b"warden"));
     }
 
     // ── claude_md_path ────────────────────────────────────────────────────────

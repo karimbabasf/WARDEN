@@ -90,7 +90,7 @@ impl Store {
         CREATE TABLE IF NOT EXISTS profile_history(ts TEXT NOT NULL,vector_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY,pattern_id TEXT NOT NULL,session_ids_json TEXT NOT NULL,severity INTEGER NOT NULL,frequency REAL NOT NULL,est_cost_tokens INTEGER NOT NULL,est_cost_minutes INTEGER NOT NULL,confidence REAL NOT NULL,evidence_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,rationale TEXT NOT NULL,title TEXT NOT NULL,verifier_verdict TEXT);
         CREATE TABLE IF NOT EXISTS diagnoses(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,ranked_findings_json TEXT NOT NULL,do_json TEXT NOT NULL,stop_json TEXT NOT NULL,narrative TEXT NOT NULL,detector_only INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY,finding_id TEXT,kind TEXT NOT NULL,target_path TEXT NOT NULL,diff TEXT NOT NULL,status TEXT NOT NULL,applied_at TEXT,backup_path TEXT);
+        CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY,finding_id TEXT,kind TEXT NOT NULL,target_path TEXT NOT NULL,diff TEXT NOT NULL,status TEXT NOT NULL,applied_at TEXT,backup_path TEXT,created_at TEXT);
         CREATE TABLE IF NOT EXISTS fugu_runs(id TEXT PRIMARY KEY,stage TEXT NOT NULL,model TEXT NOT NULL,effort TEXT NOT NULL,req_hash TEXT NOT NULL,input_tokens INTEGER NOT NULL,output_tokens INTEGER NOT NULL,orchestration_input_tokens INTEGER NOT NULL,orchestration_output_tokens INTEGER NOT NULL,latency_ms INTEGER NOT NULL,cost_usd REAL NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS interjections(id TEXT PRIMARY KEY,ts TEXT NOT NULL,pattern_id TEXT NOT NULL,session_id TEXT,shown INTEGER NOT NULL,dismissed INTEGER NOT NULL,muted INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS radar_token_cache(session_id TEXT PRIMARY KEY,change_key INTEGER NOT NULL,turn1_total INTEGER NOT NULL,first_user_tokens INTEGER NOT NULL,conversation INTEGER NOT NULL,tool_output INTEGER NOT NULL,thinking INTEGER NOT NULL,updated_at TEXT NOT NULL);
@@ -108,6 +108,47 @@ impl Store {
             .is_some();
         if !has_parent_col {
             c.execute_batch("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;")?;
+        }
+        // M4 Forge: the `artifacts` table was created with 8 columns; apply/revert
+        // need two more (the literal block to ensure + the pre-image hash to verify
+        // a restore). Same idempotent `pragma_table_info` guard as above so migrate()
+        // re-runs cleanly on a DB created before M4.
+        let has_block_col: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('artifacts') WHERE name='block'")?
+            .query_row([], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !has_block_col {
+            c.execute_batch("ALTER TABLE artifacts ADD COLUMN block TEXT NOT NULL DEFAULT '';")?;
+        }
+        let has_pre_image_col: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('artifacts') WHERE name='pre_image_sha256'")?
+            .query_row([], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !has_pre_image_col {
+            c.execute_batch("ALTER TABLE artifacts ADD COLUMN pre_image_sha256 TEXT;")?;
+        }
+        // M4 Forge drift guard: the SHA-256 of the content WARDEN wrote at apply time.
+        // Revert compares the current target against this to refuse clobbering
+        // out-of-band edits. Idempotent guard so migrate() re-runs on a pre-drift DB.
+        let has_post_image_col: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('artifacts') WHERE name='post_image_sha256'")?
+            .query_row([], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !has_post_image_col {
+            c.execute_batch("ALTER TABLE artifacts ADD COLUMN post_image_sha256 TEXT;")?;
+        }
+        // `created_at` orders the artifact history. Older DBs (and the legacy
+        // 8-column shell) lack it — add it idempotently so ORDER BY created_at works.
+        let has_created_col: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('artifacts') WHERE name='created_at'")?
+            .query_row([], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !has_created_col {
+            c.execute_batch("ALTER TABLE artifacts ADD COLUMN created_at TEXT;")?;
         }
         Ok(())
     }
@@ -188,6 +229,14 @@ impl Store {
         //   started_at → MIN (true session start wins); ended_at → MAX (extend);
         //   raw_hash/ingested_at → always take the latest (reflect current file).
         // Backfill is unaffected: it has no prior row, or arrives with full data.
+        let existing_meta_json: Option<String> = tx
+            .query_row(
+                "SELECT meta_json FROM sessions WHERE id=?",
+                [&session.id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        let meta_json = merged_meta_json_for_upsert(existing_meta_json.as_deref(), &session.meta)?;
         tx.execute(
             "INSERT INTO sessions(id,harness,external_id,project_json,model_ids_json,started_at,ended_at,source_path,raw_hash,ingested_at,meta_json) VALUES(?,?,?,?,?,?,?,?,?,?,?) \
              ON CONFLICT(id) DO UPDATE SET \
@@ -197,8 +246,8 @@ impl Store {
                ended_at=MAX(COALESCE(sessions.ended_at, excluded.ended_at), COALESCE(excluded.ended_at, sessions.ended_at)), \
                raw_hash=excluded.raw_hash, \
                ingested_at=excluded.ingested_at, \
-               meta_json=CASE WHEN excluded.meta_json IN ('{\"ignored_record_types\":{}}','{}','') THEN sessions.meta_json ELSE excluded.meta_json END",
-            params![session.id, session.harness.as_str(), session.external_id, serde_json::to_string(&session.project)?, serde_json::to_string(&session.model_ids)?, session.started_at.to_rfc3339(), session.ended_at.map(|d| d.to_rfc3339()), session.source_path.to_string_lossy(), session.raw_hash as i64, session.ingested_at.to_rfc3339(), serde_json::to_string(&session.meta)?],
+               meta_json=excluded.meta_json",
+            params![session.id, session.harness.as_str(), session.external_id, serde_json::to_string(&session.project)?, serde_json::to_string(&session.model_ids)?, session.started_at.to_rfc3339(), session.ended_at.map(|d| d.to_rfc3339()), session.source_path.to_string_lossy(), session.raw_hash as i64, session.ingested_at.to_rfc3339(), meta_json],
         )?;
         for t in turns {
             tx.execute("INSERT INTO turns(id,session_id,parent_id,role,idx,started_at,duration_ms,is_sidechain) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET duration_ms=COALESCE(excluded.duration_ms, turns.duration_ms), idx=excluded.idx", params![t.id,t.session_id,t.parent_id,format!("{:?}",t.role).to_lowercase(),t.index,t.started_at.to_rfc3339(),t.duration_ms.map(|x| x as i64), if t.is_sidechain{1}else{0}])?;
@@ -229,14 +278,46 @@ impl Store {
             .unwrap_or(0))
     }
     pub fn source_raw_hash(&self, path: &Path) -> Result<Option<u64>> {
-        self.conn()
-            .query_row(
-                "SELECT raw_hash FROM sessions WHERE source_path=? LIMIT 1",
-                [path.to_string_lossy().to_string()],
-                |r| Ok(r.get::<_, i64>(0)? as u64),
-            )
-            .optional()
-            .map_err(Into::into)
+        let rows = {
+            let c = self.conn();
+            let mut st = c.prepare(
+                "SELECT harness,external_id,raw_hash,meta_json FROM sessions WHERE source_path=?",
+            )?;
+            let rows = st.query_map([path.to_string_lossy().to_string()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if let Some(expected) = claude_subagent_external_id_from_path(path) {
+            if let Some((_, _, hash, _)) = rows
+                .iter()
+                .find(|(harness, external_id, _, _)| {
+                    harness == "claude_code" && external_id == &expected
+                })
+            {
+                return Ok(Some(*hash));
+            }
+            if rows.iter().any(|(harness, _, _, _)| harness == "claude_code") {
+                return Ok(None);
+            }
+        }
+        if rows.iter().any(|(harness, _, _, _)| harness == "codex")
+            && codex_rollout_has_session_identity(path)
+        {
+            if let Some((_, _, hash, _)) = rows
+                .iter()
+                .find(|(harness, _, _, meta)| harness == "codex" && codex_meta_has_identity(meta))
+            {
+                return Ok(Some(*hash));
+            }
+            return Ok(None);
+        }
+        Ok(rows.first().map(|(_, _, hash, _)| *hash))
     }
     /// RADAR (Fix #3): fetch a session's cached estimated-composition token sums,
     /// but ONLY when the stored `change_key` matches `change_key` (the session's
@@ -541,6 +622,115 @@ impl Store {
         self.conn().execute("INSERT INTO fugu_runs(id,stage,model,effort,req_hash,input_tokens,output_tokens,orchestration_input_tokens,orchestration_output_tokens,latency_ms,cost_usd,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", params![id,stage,model,effort,req_hash,input as i64,output as i64,oi as i64,oo as i64,latency_ms as i64,0.0f64,Utc::now().to_rfc3339()])?;
         Ok(())
     }
+
+    // ── M4 Forge: reversible apply artifacts ──────────────────────────────────
+    // Mirror the findings CRUD shape (`save_findings`/`finding_by_id`/`all_findings`).
+    // The artifact row is the unit of reversible history: stage persists it PENDING,
+    // apply/revert update its status + backup/pre-image columns. `created_at` is
+    // recorded on first save so `all_artifacts` can order by it.
+
+    /// Insert-or-replace an artifact row. PENDING on stage; status/backup/pre-image
+    /// fields updated through `update_artifact_status`. `created_at` is set only when
+    /// the row is new so re-saving (e.g. a status flip) preserves stage ordering.
+    pub fn save_artifact(&self, a: &Artifact) -> Result<()> {
+        let c = self.conn();
+        let existing_created: Option<String> = c
+            .query_row(
+                "SELECT created_at FROM artifacts WHERE id=?",
+                [&a.id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        let created_at = existing_created.unwrap_or_else(|| Utc::now().to_rfc3339());
+        c.execute(
+            "INSERT OR REPLACE INTO artifacts(id,finding_id,kind,target_path,diff,status,applied_at,backup_path,block,pre_image_sha256,post_image_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![
+                a.id,
+                a.finding_id,
+                a.kind,
+                a.target_path,
+                a.diff,
+                a.status,
+                a.applied_at,
+                a.backup_path,
+                a.block,
+                a.pre_image_sha256,
+                a.post_image_sha256,
+                created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load a single artifact by id; `None` when absent. Used for state
+    /// reconciliation and by apply/revert to resolve the row to act on.
+    pub fn artifact_by_id(&self, id: &str) -> Result<Option<Artifact>> {
+        self.conn()
+            .query_row(ARTIFACT_SELECT_BY_ID, [id], row_to_artifact)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// All artifacts staged for a given finding/issue id, newest first.
+    pub fn artifacts_for_finding(&self, finding_id: &str) -> Result<Vec<Artifact>> {
+        let c = self.conn();
+        let mut st = c.prepare(ARTIFACT_SELECT_FOR_FINDING)?;
+        let rows = st.query_map([finding_id], row_to_artifact)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Every artifact, newest first (applied_at when set, else created_at).
+    pub fn all_artifacts(&self) -> Result<Vec<Artifact>> {
+        let c = self.conn();
+        let mut st = c.prepare(ARTIFACT_SELECT_ALL)?;
+        let rows = st.query_map([], row_to_artifact)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Flip an artifact's lifecycle state and record the apply/revert outcome.
+    /// `applied_at`/`backup_path`/`pre_image_sha256`/`post_image_sha256` are written
+    /// verbatim (null clears them) so a no-op apply records `applied` with no backup,
+    /// and revert keeps the backup path for the audit trail.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_artifact_status(
+        &self,
+        id: &str,
+        status: &str,
+        applied_at: Option<&str>,
+        backup_path: Option<&str>,
+        pre_image_sha256: Option<&str>,
+        post_image_sha256: Option<&str>,
+    ) -> Result<()> {
+        self.conn().execute(
+            "UPDATE artifacts SET status=?,applied_at=?,backup_path=?,pre_image_sha256=?,post_image_sha256=? WHERE id=?",
+            params![status, applied_at, backup_path, pre_image_sha256, post_image_sha256, id],
+        )?;
+        Ok(())
+    }
+}
+
+const ARTIFACT_SELECT_BY_ID: &str = "SELECT id,finding_id,kind,target_path,diff,status,applied_at,backup_path,block,pre_image_sha256,post_image_sha256 FROM artifacts WHERE id=? LIMIT 1";
+
+const ARTIFACT_SELECT_FOR_FINDING: &str = "SELECT id,finding_id,kind,target_path,diff,status,applied_at,backup_path,block,pre_image_sha256,post_image_sha256 FROM artifacts WHERE finding_id=? ORDER BY COALESCE(applied_at, created_at) DESC";
+
+const ARTIFACT_SELECT_ALL: &str = "SELECT id,finding_id,kind,target_path,diff,status,applied_at,backup_path,block,pre_image_sha256,post_image_sha256 FROM artifacts ORDER BY COALESCE(applied_at, created_at) DESC";
+
+fn row_to_artifact(r: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {
+    Ok(Artifact {
+        id: r.get(0)?,
+        finding_id: r.get(1)?,
+        kind: r.get(2)?,
+        target_path: r.get(3)?,
+        diff: r.get(4)?,
+        status: r.get(5)?,
+        applied_at: r.get(6)?,
+        backup_path: r.get(7)?,
+        block: r.get(8)?,
+        pre_image_sha256: r.get(9)?,
+        post_image_sha256: r.get(10)?,
+    })
 }
 fn parse_dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
@@ -556,6 +746,134 @@ fn parse_role(s: &str) -> Role {
         _ => Role::System,
     }
 }
+
+fn merged_meta_json_for_upsert(
+    existing: Option<&str>,
+    incoming: &serde_json::Value,
+) -> Result<String> {
+    serde_json::to_string(&merged_meta_for_upsert(existing, incoming)).map_err(Into::into)
+}
+
+fn merged_meta_for_upsert(
+    existing: Option<&str>,
+    incoming: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(existing) = existing else {
+        return incoming.clone();
+    };
+    let existing_value =
+        serde_json::from_str::<serde_json::Value>(existing).unwrap_or_else(|_| serde_json::json!({}));
+    let (Some(existing_obj), Some(incoming_obj)) = (existing_value.as_object(), incoming.as_object())
+    else {
+        return if incoming.is_null() {
+            existing_value
+        } else {
+            incoming.clone()
+        };
+    };
+    if incoming_obj.is_empty() || incoming_is_empty_ignored_sentinel(incoming_obj) {
+        return existing_value;
+    }
+
+    let mut merged = existing_obj.clone();
+    for (key, value) in incoming_obj {
+        if value.is_null() {
+            continue;
+        }
+        if key == "ignored_record_types" {
+            merge_ignored_record_types(&mut merged, value);
+            continue;
+        }
+        if value.as_str() == Some("") && merged.get(key).and_then(serde_json::Value::as_str) != Some("")
+        {
+            continue;
+        }
+        merged.insert(key.clone(), value.clone());
+    }
+    serde_json::Value::Object(merged)
+}
+
+fn incoming_is_empty_ignored_sentinel(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    map.len() == 1
+        && map
+            .get("ignored_record_types")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|ignored| ignored.is_empty())
+}
+
+fn merge_ignored_record_types(
+    merged: &mut serde_json::Map<String, serde_json::Value>,
+    incoming: &serde_json::Value,
+) {
+    let Some(incoming) = incoming.as_object() else {
+        return;
+    };
+    let target = merged
+        .entry("ignored_record_types".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !target.is_object() {
+        *target = serde_json::json!({});
+    }
+    let target = target.as_object_mut().expect("target was normalized");
+    for (key, value) in incoming {
+        let incoming_count = value.as_u64().unwrap_or(1);
+        let existing_count = target
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        target.insert(key.clone(), serde_json::json!(existing_count.max(incoming_count)));
+    }
+}
+
+fn claude_subagent_external_id_from_path(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    if !stem.starts_with("agent-") {
+        return None;
+    }
+    let under_subagents = path.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::Normal(part) if part == "subagents"
+        )
+    });
+    under_subagents.then(|| stem.to_string())
+}
+
+fn codex_meta_has_identity(meta_json: &str) -> bool {
+    let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) else {
+        return false;
+    };
+    ["thread_source", "parent_thread_id", "originator", "agent_nickname"]
+        .iter()
+        .any(|key| meta.get(*key).is_some_and(|v| !v.is_null()))
+}
+
+fn codex_rollout_has_session_identity(path: &Path) -> bool {
+    let is_rollout = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"));
+    if !is_rollout {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Some(first_line) = bytes.split(|b| *b == b'\n').find(|line| !line.is_empty()) else {
+        return false;
+    };
+    let Ok(line) = std::str::from_utf8(first_line) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    v.get("type").and_then(serde_json::Value::as_str) == Some("session_meta")
+        && ["thread_source", "parent_thread_id", "originator", "agent_nickname"]
+            .iter()
+            .any(|key| v.pointer(&format!("/payload/{key}")).is_some())
+}
+
 fn row_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     let h: String = r.get(1)?;
     Ok(Session {
@@ -790,6 +1108,167 @@ mod tests {
     }
 
     #[test]
+    fn upsert_tail_meta_preserves_codex_subagent_identity() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let source_path = PathBuf::from("/tmp/rollout-child.jsonl");
+        let session = Session {
+            id: "child".into(),
+            harness: Harness::Codex,
+            external_id: "child".into(),
+            project: None,
+            model_ids: vec!["openai".into()],
+            started_at: now,
+            ended_at: None,
+            source_path: source_path.clone(),
+            raw_hash: 1,
+            ingested_at: now,
+            meta: serde_json::json!({
+                "thread_source": "subagent",
+                "parent_thread_id": "parent",
+                "agent_nickname": "Russell",
+                "originator": "Codex Desktop"
+            }),
+        };
+        store.upsert_session_batch(&session, &[], &[], 100).unwrap();
+
+        let mut tail = session.clone();
+        tail.raw_hash = 2;
+        tail.ingested_at = now + chrono::Duration::seconds(1);
+        tail.meta = serde_json::json!({
+            "ignored_record_types": {
+                "event_msg/web_search_end": 1
+            }
+        });
+        store.upsert_session_batch(&tail, &[], &[], 120).unwrap();
+
+        let got = store
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == "child")
+            .unwrap();
+        assert_eq!(
+            got.meta.get("thread_source").and_then(serde_json::Value::as_str),
+            Some("subagent"),
+            "tail parses must not erase Codex subagent identity metadata"
+        );
+        assert_eq!(
+            got.meta
+                .get("parent_thread_id")
+                .and_then(serde_json::Value::as_str),
+            Some("parent")
+        );
+        assert_eq!(
+            got.meta
+                .pointer("/ignored_record_types/event_msg~1web_search_end")
+                .and_then(serde_json::Value::as_u64),
+            Some(1),
+            "tail diagnostics should be merged instead of replacing identity"
+        );
+        assert_eq!(store.watermark_offset(&source_path).unwrap(), 120);
+    }
+
+    #[test]
+    fn source_raw_hash_for_claude_subagent_requires_agent_identity() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let source_path = PathBuf::from(
+            "/tmp/root-session/subagents/workflows/wf_123/agent-child123.jsonl",
+        );
+        let stale = Session {
+            id: "stale-child".into(),
+            harness: Harness::ClaudeCode,
+            external_id: "root-session".into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: source_path.clone(),
+            raw_hash: 7,
+            ingested_at: now,
+            meta: serde_json::json!({}),
+        };
+        store.upsert_session_batch(&stale, &[], &[], 100).unwrap();
+
+        assert_eq!(
+            store.source_raw_hash(&source_path).unwrap(),
+            None,
+            "mis-keyed nested Claude subagents must be reparsed instead of hash-skipped forever"
+        );
+
+        let mut repaired = stale.clone();
+        repaired.id = "repaired-child".into();
+        repaired.external_id = "agent-child123".into();
+        repaired.raw_hash = 9;
+        store
+            .upsert_session_batch(&repaired, &[], &[], 100)
+            .unwrap();
+
+        assert_eq!(
+            store.source_raw_hash(&source_path).unwrap(),
+            Some(9),
+            "once the agent-file identity exists, unchanged subagents can use the normal hash skip"
+        );
+    }
+
+    #[test]
+    fn source_raw_hash_for_codex_rollout_requires_session_identity_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir
+            .path()
+            .join("rollout-2026-06-25T12-00-00-019f0040-0000-7000-8000-000000000001.jsonl");
+        std::fs::write(
+            &source_path,
+            "{\"timestamp\":\"2026-06-25T19:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"019f0040-0000-7000-8000-000000000001\",\"cwd\":\"/tmp/Codex\",\"originator\":\"Codex Desktop\",\"thread_source\":\"subagent\",\"parent_thread_id\":\"parent\"}}\n",
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let stale = Session {
+            id: "stale-codex".into(),
+            harness: Harness::Codex,
+            external_id: "019f0040-0000-7000-8000-000000000001".into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: source_path.clone(),
+            raw_hash: 7,
+            ingested_at: now,
+            meta: serde_json::json!({
+                "ignored_record_types": {
+                    "event_msg/web_search_end": 1
+                }
+            }),
+        };
+        store.upsert_session_batch(&stale, &[], &[], 100).unwrap();
+
+        assert_eq!(
+            store.source_raw_hash(&source_path).unwrap(),
+            None,
+            "Codex rows whose live tail erased session_meta identity must be reparsed once"
+        );
+
+        let mut repaired = stale.clone();
+        repaired.raw_hash = 9;
+        repaired.meta = serde_json::json!({
+            "thread_source": "subagent",
+            "parent_thread_id": "parent",
+            "originator": "Codex Desktop",
+            "ignored_record_types": {
+                "event_msg/web_search_end": 1
+            }
+        });
+        store
+            .upsert_session_batch(&repaired, &[], &[], 100)
+            .unwrap();
+
+        assert_eq!(store.source_raw_hash(&source_path).unwrap(), Some(9));
+    }
+
+    #[test]
     fn link_child_session_sets_and_reads_parent() {
         let store = Store::memory().unwrap();
         store.migrate().unwrap();
@@ -800,5 +1279,141 @@ mod tests {
         store.link_child_session("child", "parent").unwrap();
         assert_eq!(store.parent_of("child").unwrap(), Some("parent".to_string()));
         assert_eq!(store.parent_of("parent").unwrap(), None);
+    }
+
+    // ── M4 Forge artifact CRUD + migration ────────────────────────────────────
+
+    fn pending_artifact(id: &str, finding_id: Option<&str>) -> Artifact {
+        Artifact {
+            id: id.into(),
+            finding_id: finding_id.map(Into::into),
+            kind: "claude_md_guardrail".into(),
+            target_path: "/tmp/warden-forge/CLAUDE.md".into(),
+            diff: "--- a\n+++ b\n@@\n+## WARDEN guardrail — X\n".into(),
+            block: "\n## WARDEN guardrail — X\n- rule\n".into(),
+            status: "pending".into(),
+            applied_at: None,
+            backup_path: None,
+            pre_image_sha256: None,
+            post_image_sha256: None,
+        }
+    }
+
+    #[test]
+    fn artifact_round_trips_and_status_transitions_persist() {
+        let store = Store::memory().unwrap();
+        let a = pending_artifact("art-1", Some("find-1"));
+        store.save_artifact(&a).unwrap();
+
+        // get reflects the PENDING row exactly.
+        let got = store.artifact_by_id("art-1").unwrap().expect("row present");
+        assert_eq!(got.status, "pending");
+        assert_eq!(got.finding_id.as_deref(), Some("find-1"));
+        assert_eq!(got.block, a.block);
+        assert!(got.applied_at.is_none() && got.backup_path.is_none());
+
+        // list (all + by finding).
+        assert_eq!(store.all_artifacts().unwrap().len(), 1);
+        assert_eq!(store.artifacts_for_finding("find-1").unwrap().len(), 1);
+        assert!(store.artifacts_for_finding("nope").unwrap().is_empty());
+
+        // pending → applied records applied_at/backup/pre-image.
+        store
+            .update_artifact_status(
+                "art-1",
+                "applied",
+                Some("2026-06-25T08:00:00Z"),
+                Some("/tmp/warden-forge/.warden-bak/art-1.bak"),
+                Some("deadbeef"),
+                Some("cafef00d"),
+            )
+            .unwrap();
+        let applied = store.artifact_by_id("art-1").unwrap().unwrap();
+        assert_eq!(applied.status, "applied");
+        assert_eq!(applied.applied_at.as_deref(), Some("2026-06-25T08:00:00Z"));
+        assert_eq!(
+            applied.backup_path.as_deref(),
+            Some("/tmp/warden-forge/.warden-bak/art-1.bak")
+        );
+        assert_eq!(applied.pre_image_sha256.as_deref(), Some("deadbeef"));
+        assert_eq!(applied.post_image_sha256.as_deref(), Some("cafef00d"));
+
+        // applied → reverted keeps backup_path for the audit trail.
+        store
+            .update_artifact_status(
+                "art-1",
+                "reverted",
+                Some("2026-06-25T08:00:00Z"),
+                Some("/tmp/warden-forge/.warden-bak/art-1.bak"),
+                Some("deadbeef"),
+                Some("cafef00d"),
+            )
+            .unwrap();
+        let reverted = store.artifact_by_id("art-1").unwrap().unwrap();
+        assert_eq!(reverted.status, "reverted");
+        assert!(reverted.backup_path.is_some());
+    }
+
+    #[test]
+    fn artifacts_for_finding_filters_by_finding_id() {
+        let store = Store::memory().unwrap();
+        store.save_artifact(&pending_artifact("a1", Some("f1"))).unwrap();
+        store.save_artifact(&pending_artifact("a2", Some("f1"))).unwrap();
+        store.save_artifact(&pending_artifact("a3", Some("f2"))).unwrap();
+        store.save_artifact(&pending_artifact("a4", None)).unwrap();
+
+        assert_eq!(store.artifacts_for_finding("f1").unwrap().len(), 2);
+        assert_eq!(store.artifacts_for_finding("f2").unwrap().len(), 1);
+        assert_eq!(store.all_artifacts().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn artifact_by_id_absent_returns_none() {
+        let store = Store::memory().unwrap();
+        assert!(store.artifact_by_id("ghost").unwrap().is_none());
+    }
+
+    #[test]
+    fn migrate_adds_artifact_columns_on_fresh_db() {
+        // A fresh in-memory store already ran migrate(); the new columns must be
+        // usable, which save_artifact (writing block + pre_image_sha256) proves.
+        let store = Store::memory().unwrap();
+        store.save_artifact(&pending_artifact("fresh", None)).unwrap();
+        let got = store.artifact_by_id("fresh").unwrap().unwrap();
+        assert_eq!(got.block, pending_artifact("fresh", None).block);
+    }
+
+    #[test]
+    fn migrate_adds_artifact_columns_on_preexisting_db() {
+        // Build a DB with the legacy 8-column `artifacts` table (no block /
+        // pre_image_sha256), close it, then open via Store::open so migrate()
+        // ALTERs in the two M4 columns idempotently. A round-trip then proves the
+        // columns exist and old rows survive with safe defaults.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy.db");
+        {
+            let c = Connection::open(&db_path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE artifacts(id TEXT PRIMARY KEY,finding_id TEXT,kind TEXT NOT NULL,target_path TEXT NOT NULL,diff TEXT NOT NULL,status TEXT NOT NULL,applied_at TEXT,backup_path TEXT,created_at TEXT);",
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO artifacts(id,finding_id,kind,target_path,diff,status,created_at) VALUES('old',NULL,'claude_md_guardrail','/tmp/x','d','pending','2026-06-25T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        // Open through Store, which runs migrate() and must add the two columns.
+        let store = Store::open(&db_path).unwrap();
+        // Legacy row survives; block defaults to '' (NOT NULL DEFAULT '').
+        let old = store.artifact_by_id("old").unwrap().expect("legacy row");
+        assert_eq!(old.status, "pending");
+        assert_eq!(old.block, "");
+        assert!(old.pre_image_sha256.is_none());
+        assert!(old.post_image_sha256.is_none());
+        // New writes use the new columns.
+        store.save_artifact(&pending_artifact("new", Some("f"))).unwrap();
+        let new = store.artifact_by_id("new").unwrap().unwrap();
+        assert!(!new.block.is_empty());
     }
 }

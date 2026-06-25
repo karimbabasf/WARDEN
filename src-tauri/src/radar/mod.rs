@@ -17,7 +17,7 @@ pub mod liveness;
 
 pub use liveness::{AgentStatus, LiveSession};
 
-use crate::ir::{Event, Harness, Session};
+use crate::ir::{Event, Harness, Session, ToolKind};
 use crate::store::Store;
 use chrono::{DateTime, Utc};
 use composition::{
@@ -51,6 +51,7 @@ pub struct RadarAgent {
     pub context_tokens: u64,
     pub max_tokens: u64,
     pub fill_pct: f64,
+    pub context_breakdown: RadarContextBreakdown,
     pub composition: RadarComposition,
     pub recent_activity: Vec<RadarActivity>,
     pub child_count: u32,
@@ -81,6 +82,26 @@ pub struct RadarComposition {
     pub exact: RadarExact,
     /// `None` (serialized `null`) when there is no turn-1 baseline to estimate from.
     pub estimated: Option<RadarEstimated>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RadarContextBreakdown {
+    pub used_tokens: u64,
+    pub max_tokens: u64,
+    pub fill_pct: f64,
+    pub rows: Vec<RadarContextRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RadarContextRow {
+    pub key: String,
+    pub label: String,
+    pub tokens: u64,
+    pub percent: f64,
+    pub count: Option<u32>,
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,13 +151,12 @@ pub fn assemble(
     // deterministic across reads, so the working↔idle flicker is gone. The closure
     // bridges the registry's external `sessionId` → the store row → its events.
     let stale_secs = crate::util::radar_working_stale_secs();
-    let fallback_status =
-        |ext: &str| claude_conversation_status(store, &sessions, ext, now, stale_secs, &mtime_secs_ago);
+    let fallback_status = |ext: &str| {
+        claude_conversation_status(store, &sessions, ext, now, stale_secs, &mtime_secs_ago)
+    };
     let live = partition_claude(&registry, is_alive, &fallback_status);
-    let claude_status: HashMap<String, AgentStatus> = live
-        .into_iter()
-        .map(|(s, st)| (s.session_id, st))
-        .collect();
+    let claude_status: HashMap<String, AgentStatus> =
+        live.into_iter().map(|(s, st)| (s.session_id, st)).collect();
 
     // parent link per session id (None = root). Built for every stored session so
     // we can resolve a subagent's root before deciding membership.
@@ -163,7 +183,12 @@ pub fn assemble(
     let by_id: HashMap<&str, &Session> = sessions.iter().map(|s| (s.id.as_str(), s)).collect();
     let open: HashMap<String, bool> = sessions
         .iter()
-        .map(|s| (s.id.clone(), root_is_open(&s.id, &parent_of, &by_id, &directly_open)))
+        .map(|s| {
+            (
+                s.id.clone(),
+                root_is_open(&s.id, &parent_of, &by_id, &directly_open),
+            )
+        })
         .collect();
     let is_open = |id: &str| open.get(id).copied().unwrap_or(false);
 
@@ -185,10 +210,14 @@ pub fn assemble(
             .iter()
             .copied()
             .max_by(|a, b| {
-                a.started_at
-                    .cmp(&b.started_at)
-                    .then(a.ingested_at.cmp(&b.ingested_at))
-                    .then(a.id.cmp(&b.id))
+                (!is_subagent_transcript_path(&a.source_path))
+                    .cmp(&(!is_subagent_transcript_path(&b.source_path)))
+                    .then(
+                        a.started_at
+                            .cmp(&b.started_at)
+                            .then(a.ingested_at.cmp(&b.ingested_at))
+                            .then(a.id.cmp(&b.id)),
+                    )
             })
             .expect("group is non-empty");
         keep.insert(chosen.id.clone());
@@ -339,6 +368,10 @@ pub fn assemble(
     }
 }
 
+fn is_subagent_transcript_path(path: &Path) -> bool {
+    crate::ingest::claude_code::is_subagent_session_path(path)
+}
+
 /// Walk a session's parent-chain to its root and report whether that root is
 /// directly open. A session is a member of the live forest iff its root agent is
 /// open (a subagent rides on its open root; an orphan under a closed root is
@@ -383,6 +416,12 @@ fn agent_status(
     // FAULT B: conversation-state first (deterministic), mtime only as a last resort.
     let stale_secs = crate::util::radar_working_stale_secs();
     let working_secs = crate::util::radar_working_ms() / 1000;
+    if matches!(s.harness, Harness::Codex) && source_has_uningested_tail(store, s) {
+        return match mtime_secs_ago(&s.external_id) {
+            Some(secs) if secs < working_secs => AgentStatus::Working,
+            _ => AgentStatus::Idle,
+        };
+    }
     let events = store.session_events(&s.id).unwrap_or_default();
     if let Some(st) = liveness::status_from_last_event(&events, now, stale_secs) {
         return st;
@@ -392,6 +431,15 @@ fn agent_status(
         Some(secs) if secs < working_secs => AgentStatus::Working,
         _ => AgentStatus::Idle,
     }
+}
+
+fn source_has_uningested_tail(store: &Store, s: &Session) -> bool {
+    let Ok(watermark) = store.watermark_offset(&s.source_path) else {
+        return false;
+    };
+    std::fs::metadata(&s.source_path)
+        .map(|m| m.len() > watermark)
+        .unwrap_or(false)
 }
 
 /// Decide a Claude session's working/idle status from its CONVERSATION STATE (Fault B):
@@ -435,8 +483,7 @@ fn claude_conversation_status(
                     )
                 })
                 .map(|(_, e)| e.ts)?;
-            liveness::status_from_last_event(&events, now, stale_secs)
-                .map(|st| (last_ts, st))
+            liveness::status_from_last_event(&events, now, stale_secs).map(|st| (last_ts, st))
         })
         .max_by_key(|(ts, _)| *ts);
     if let Some((_, st)) = freshest {
@@ -539,6 +586,7 @@ fn build_agent(
     };
 
     let estimated = estimate_for_session(store, s, &events, size.context_tokens);
+    let context_breakdown = context_breakdown(s.harness.clone(), size, estimated.clone(), &events);
 
     let recent_activity = recent_activity(&events);
     let est_cost_usd = est_cost_usd(&model, &exact);
@@ -565,6 +613,7 @@ fn build_agent(
         context_tokens: size.context_tokens,
         max_tokens: size.max_tokens,
         fill_pct: size.fill_pct,
+        context_breakdown,
         composition: RadarComposition {
             exact: RadarExact {
                 cache_read: exact.cache_read,
@@ -677,12 +726,323 @@ fn estimate_for_session(
     })
 }
 
+#[derive(Default)]
+struct ToolContextStats {
+    mcp_count: u32,
+    system_count: u32,
+    custom_count: u32,
+    mcp_raw: u64,
+    system_raw: u64,
+    custom_raw: u64,
+}
+
+fn context_breakdown(
+    harness: Harness,
+    size: ContextSize,
+    estimated: Option<RadarEstimated>,
+    events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+) -> RadarContextBreakdown {
+    let used = size.context_tokens;
+    let max = size.max_tokens;
+    let rows = match estimated {
+        Some(est) => match harness {
+            Harness::Codex => codex_context_rows(max, used, &est, events),
+            _ => claude_context_rows(max, used, &est, events),
+        },
+        None => fallback_context_rows(max, used),
+    };
+
+    RadarContextBreakdown {
+        used_tokens: used,
+        max_tokens: max,
+        fill_pct: size.fill_pct,
+        rows,
+    }
+}
+
+fn fallback_context_rows(max: u64, used: u64) -> Vec<RadarContextRow> {
+    let mut rows = vec![context_row("context", "Context", used, max, None, false)];
+    if max > 0 {
+        rows.push(context_row(
+            "free_space",
+            "Free space",
+            max.saturating_sub(used),
+            max,
+            None,
+            true,
+        ));
+    }
+    rows
+}
+
+fn claude_context_rows(
+    max: u64,
+    used: u64,
+    est: &RadarEstimated,
+    events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+) -> Vec<RadarContextRow> {
+    let tools = tool_context_stats(events, est.tool_output);
+    let memory_count = memory_file_count(events);
+    let (skills, memory, system_prompt, deferred_mcp, deferred_system) = split_preamble_for_claude(
+        est.preamble,
+        memory_count,
+        tools.mcp_count,
+        tools.system_count,
+    );
+
+    vec![
+        context_row("messages", "Messages", est.conversation, max, None, false),
+        context_row("skills", "Skills", skills, max, None, false),
+        context_row(
+            "mcp_tools",
+            "MCP tools",
+            tools.mcp_raw,
+            max,
+            count_if_nonzero(tools.mcp_count),
+            false,
+        ),
+        context_row(
+            "memory_files",
+            "Memory files",
+            memory,
+            max,
+            count_if_nonzero(memory_count),
+            false,
+        ),
+        context_row(
+            "system_prompt",
+            "System prompt",
+            system_prompt,
+            max,
+            None,
+            false,
+        ),
+        context_row(
+            "system_tools",
+            "System tools",
+            tools.system_raw,
+            max,
+            count_if_nonzero(tools.system_count),
+            false,
+        ),
+        context_row(
+            "custom_agents",
+            "Custom agents",
+            tools.custom_raw,
+            max,
+            count_if_nonzero(tools.custom_count),
+            false,
+        ),
+        context_row(
+            "mcp_tools_deferred",
+            "MCP tools (deferred)",
+            deferred_mcp,
+            max,
+            None,
+            true,
+        ),
+        context_row(
+            "system_tools_deferred",
+            "System tools (deferred)",
+            deferred_system,
+            max,
+            None,
+            true,
+        ),
+        context_row(
+            "free_space",
+            "Free space",
+            max.saturating_sub(used),
+            max,
+            None,
+            true,
+        ),
+    ]
+}
+
+fn codex_context_rows(
+    max: u64,
+    used: u64,
+    est: &RadarEstimated,
+    events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+) -> Vec<RadarContextRow> {
+    let tools = tool_context_stats(events, est.tool_output);
+    vec![
+        context_row("messages", "Messages", est.conversation, max, None, false),
+        context_row("reasoning", "Reasoning", est.thinking, max, None, false),
+        context_row(
+            "function_tools",
+            "Function tools",
+            tools.system_raw,
+            max,
+            count_if_nonzero(tools.system_count),
+            false,
+        ),
+        context_row(
+            "mcp_tools",
+            "MCP tools",
+            tools.mcp_raw,
+            max,
+            count_if_nonzero(tools.mcp_count),
+            false,
+        ),
+        context_row(
+            "custom_tools",
+            "Custom tools",
+            tools.custom_raw,
+            max,
+            count_if_nonzero(tools.custom_count),
+            false,
+        ),
+        context_row(
+            "base_instructions",
+            "Base instructions",
+            est.preamble,
+            max,
+            None,
+            false,
+        ),
+        context_row(
+            "free_space",
+            "Free space",
+            max.saturating_sub(used),
+            max,
+            None,
+            true,
+        ),
+    ]
+}
+
+fn context_row(
+    key: &str,
+    label: &str,
+    tokens: u64,
+    max: u64,
+    count: Option<u32>,
+    muted: bool,
+) -> RadarContextRow {
+    RadarContextRow {
+        key: key.to_string(),
+        label: label.to_string(),
+        tokens,
+        percent: if max == 0 {
+            0.0
+        } else {
+            (tokens as f64 / max as f64).clamp(0.0, 1.0)
+        },
+        count,
+        muted,
+    }
+}
+
+fn count_if_nonzero(n: u32) -> Option<u32> {
+    (n > 0).then_some(n)
+}
+
+fn split_preamble_for_claude(
+    preamble: u64,
+    memory_count: u32,
+    mcp_count: u32,
+    system_count: u32,
+) -> (u64, u64, u64, u64, u64) {
+    if preamble == 0 {
+        return (0, 0, 0, 0, 0);
+    }
+    let weights = [
+        4 + u64::from(mcp_count > 0),
+        1 + memory_count as u64,
+        5,
+        u64::from(mcp_count),
+        u64::from(system_count),
+    ];
+    let split = allocate_by_weights(preamble, weights);
+    (split[0], split[1], split[2], split[3], split[4])
+}
+
+fn allocate_by_weights<const N: usize>(total: u64, weights: [u64; N]) -> [u64; N] {
+    let sum: u64 = weights.iter().sum();
+    if total == 0 || sum == 0 {
+        return [0; N];
+    }
+    let mut out = [0; N];
+    let mut assigned = 0u64;
+    for (i, weight) in weights.iter().enumerate() {
+        out[i] = total.saturating_mul(*weight) / sum;
+        assigned = assigned.saturating_add(out[i]);
+    }
+    if assigned < total {
+        out[0] = out[0].saturating_add(total - assigned);
+    }
+    out
+}
+
+fn tool_context_stats(
+    events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+    tool_output_tokens: u64,
+) -> ToolContextStats {
+    let mut call_kind: HashMap<String, ToolKind> = HashMap::new();
+    let mut stats = ToolContextStats::default();
+    let mut raw = [0u64; 3];
+
+    for (_, e) in events {
+        match &e.event {
+            Event::ToolCall { call_id, kind, .. } => {
+                call_kind.insert(call_id.clone(), kind.clone());
+                match kind {
+                    ToolKind::Mcp => stats.mcp_count += 1,
+                    ToolKind::SubagentTask => stats.custom_count += 1,
+                    _ => stats.system_count += 1,
+                }
+            }
+            Event::ToolResult { call_id, bytes, .. } => {
+                match call_kind.get(call_id).unwrap_or(&ToolKind::Unknown) {
+                    ToolKind::Mcp => raw[0] += *bytes,
+                    ToolKind::SubagentTask => raw[2] += *bytes,
+                    _ => raw[1] += *bytes,
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if raw.iter().all(|n| *n == 0) {
+        raw = [
+            u64::from(stats.mcp_count),
+            u64::from(stats.system_count),
+            u64::from(stats.custom_count),
+        ];
+    }
+    let split = allocate_by_weights(tool_output_tokens, raw);
+    stats.mcp_raw = split[0];
+    stats.system_raw = split[1];
+    stats.custom_raw = split[2];
+    stats
+}
+
+fn memory_file_count(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> u32 {
+    let count = events
+        .iter()
+        .map(|(_, e)| match &e.event {
+            Event::FileSnapshot { files } => files.len(),
+            Event::UserPrompt { attachments, .. } => attachments.len(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    count.min(u32::MAX as usize) as u32
+}
+
 /// Every action event as a recent-activity row (newest first): a kind glyph-friendly
 /// `kind` plus a short label. No cap — the detail panel shows ~10 rows in a
 /// scrollable feed and lets you scroll back to the very first action.
 fn recent_activity(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> Vec<RadarActivity> {
     let mut out: Vec<RadarActivity> = Vec::new();
-    for (_, e) in events.iter().rev() {
+    let mut ordered: Vec<_> = events.iter().collect();
+    ordered.sort_by(|(_, a), (_, b)| {
+        b.ts.cmp(&a.ts)
+            .then(b.raw_ref.offset.cmp(&a.raw_ref.offset))
+            .then(b.id.cmp(&a.id))
+    });
+    for (_, e) in ordered {
         let (kind, label) = match &e.event {
             // The "what is it doing" signal: name the file touched / command run, not
             // just the bare tool name.
@@ -711,7 +1071,10 @@ fn recent_activity(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> Vec<
 fn tool_activity_label(tool: &str, input: &serde_json::Value) -> String {
     let s = |k: &str| input.get(k).and_then(|v| v.as_str());
     let short = short_tool_name(tool);
-    let target = if let Some(f) = s("file_path").or_else(|| s("path")).or_else(|| s("notebook_path")) {
+    let target = if let Some(f) = s("file_path")
+        .or_else(|| s("path"))
+        .or_else(|| s("notebook_path"))
+    {
         Some(path_basename(f))
     } else if let Some(c) = s("command").or_else(|| s("cmd")) {
         Some(crate::util::truncate_chars(c.trim(), 64))
@@ -822,16 +1185,50 @@ fn subagent_terminated_at(
     terminate_ms: u64,
 ) -> Option<DateTime<Utc>> {
     if let Some(tid) = tool_use_id {
-        if let Some(ts) = parent_events.iter().rev().find_map(|(_, e)| match &e.event {
-            Event::ToolResult { call_id, .. } if call_id == tid => Some(e.ts),
-            _ => None,
-        }) {
+        if let Some(ts) = parent_events
+            .iter()
+            .filter_map(|(_, e)| match &e.event {
+                Event::UserPrompt { text, .. } if task_notification_completed_for(text, tid) => {
+                    Some(e.ts)
+                }
+                _ => None,
+            })
+            .max()
+        {
+            return Some(ts);
+        }
+        if let Some(ts) = parent_events
+            .iter()
+            .filter_map(|(_, e)| match &e.event {
+                Event::ToolResult {
+                    call_id, summary, ..
+                } if call_id == tid && !is_async_agent_launch_summary(summary.as_deref()) => {
+                    Some(e.ts)
+                }
+                _ => None,
+            })
+            .max()
+        {
             return Some(ts);
         }
     }
     let last = child_last_activity?;
     let quiet_ms = now.signed_duration_since(last).num_milliseconds().max(0) as u64;
     (quiet_ms > terminate_ms).then(|| last + chrono::Duration::milliseconds(terminate_ms as i64))
+}
+
+fn task_notification_completed_for(text: &str, tool_use_id: &str) -> bool {
+    text.contains("<task-notification>")
+        && text.contains(&format!("<tool-use-id>{tool_use_id}</tool-use-id>"))
+        && text.contains("<status>completed</status>")
+}
+
+fn is_async_agent_launch_summary(summary: Option<&str>) -> bool {
+    let Some(summary) = summary else {
+        return false;
+    };
+    summary.contains("Async agent launched successfully")
+        || summary.contains("The agent is working in the background")
 }
 
 /// A leading prompt token that is an attachment path (`@…`) or a bare URL — noise to
@@ -846,7 +1243,10 @@ mod naming_tests {
 
     #[test]
     fn collapses_internal_whitespace_and_newlines() {
-        assert_eq!(clean_task_label("  fix   the\n\nradar  glow "), "fix the radar glow");
+        assert_eq!(
+            clean_task_label("  fix   the\n\nradar  glow "),
+            "fix the radar glow"
+        );
     }
 
     #[test]
@@ -886,8 +1286,15 @@ mod naming_tests {
     fn truncates_to_name_size_with_ellipsis() {
         let long = "design a comprehensive multi agent orchestration radar with glow and tethers and side panels";
         let out = clean_task_label(long);
-        assert!(out.chars().count() <= 60, "got {} chars: {out:?}", out.chars().count());
-        assert!(out.ends_with('…'), "long label should be ellipsized: {out:?}");
+        assert!(
+            out.chars().count() <= 60,
+            "got {} chars: {out:?}",
+            out.chars().count()
+        );
+        assert!(
+            out.ends_with('…'),
+            "long label should be ellipsized: {out:?}"
+        );
     }
 
     #[test]
@@ -999,29 +1406,41 @@ fn est_cost_usd(model: &Option<String>, exact: &composition::ExactComposition) -
 /// already in the store), so a subagent tree that forms AFTER startup is linked on
 /// the next recompute instead of staying flat until a full backfill. Best-effort:
 /// a linkage failure is swallowed so the live forest still renders.
+#[cfg(test)]
 fn relink_store_subagents(store: &Store) {
     let _ = crate::ingest::codex::link_codex_subagents_in_store(store);
     let _ = crate::ingest::claude_code::link_claude_subagents_in_store(store);
 }
 
-/// Recompute the forest and return it. The scheduler's watcher calls this on each
-/// relevant FS event; `lib.rs` then emits it as `radar_state`. Uses the real
-/// `pid_alive` syscall and the current clock.
-///
-/// Linkage is re-derived from the current store sessions first (cheap + idempotent)
-/// so live trees — Codex Desktop subagents, Claude subagents — render nested even
-/// when they form after the startup backfill.
-pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> RadarState {
-    relink_store_subagents(store);
+/// Pull current live transcript tails into the store. This is intentionally
+/// explicit: startup/cold-read paths can close the "agent was already running before
+/// WARDEN" gap, while steady heartbeat recomputes stay read-only.
+pub fn refresh_live_context(store: &Store, sessions_dir: &Path) -> usize {
+    let claude_projects_dir = crate::util::default_claude_projects();
+    let claude_events = refresh_live_claude_transcripts(store, &claude_projects_dir, sessions_dir);
     let codex_sessions_dir = crate::util::default_codex_sessions();
     let codex_archived_dir = crate::util::default_codex_archived_sessions();
-    refresh_live_codex_rollouts(store, &codex_sessions_dir, &codex_archived_dir);
+    let codex_events = refresh_live_codex_rollouts(store, &codex_sessions_dir, &codex_archived_dir);
+    claude_events + codex_events
+}
+
+/// Recompute the forest and return it. The scheduler's watcher calls this on each
+/// relevant FS/liveness event; `lib.rs` then emits it as `radar_state`. Uses the real
+/// `pid_alive` syscall and the current clock.
+///
+/// Linkage is derived when transcript bytes are ingested (startup backfill, explicit
+/// live refresh, or live tail watcher). Keeping this steady-state recompute read-only
+/// avoids re-reading/hashing live transcript files on every heartbeat while preserving
+/// live nesting when new data actually arrives.
+pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> RadarState {
     // The Codex live set is the set of rollout uuids whose file currently sits under
     // `~/.codex/sessions/` (and NOT under `~/.codex/archived_sessions/`). We scan the
     // two roots ONCE here, then close over the resulting set so `assemble` stays a
     // pure join (no per-session FS walk inside the tested path). `source_path` in the
     // store can be stale after Codex moves a rollout to the archive, so membership is
     // decided by the CURRENT on-disk location, never by the stored path.
+    let codex_sessions_dir = crate::util::default_codex_sessions();
+    let codex_archived_dir = crate::util::default_codex_archived_sessions();
     let live_codex = live_codex_rollout_ids(&codex_sessions_dir, &codex_archived_dir);
     let is_codex_open = |s: &Session| live_codex.contains(s.external_id.as_str());
     assemble(
@@ -1031,6 +1450,44 @@ pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> RadarState {
         &is_codex_open,
         Utc::now(),
     )
+}
+
+/// Pull current live Claude transcript tails into the store before RADAR assembles
+/// the forest. The liveness registry can say "this PID/session is open" while the
+/// store still holds an old tail (or no row at all) because the session predates
+/// WARDEN startup and no fresh watcher event fired. Reuse the scheduler's
+/// byte-watermark ingester so unchanged transcripts are cheap, while appended root
+/// and subagent bytes become live context/log rows immediately.
+fn refresh_live_claude_transcripts(
+    store: &Store,
+    projects_dir: &Path,
+    sessions_dir: &Path,
+) -> usize {
+    let paths = live_claude_transcript_paths(projects_dir, sessions_dir);
+    if paths.is_empty() {
+        return 0;
+    }
+    let registry = crate::ingest::AdapterRegistry::from_adapters(vec![Box::new(
+        crate::ingest::claude_code::ClaudeCodeAdapter::with_root(
+            projects_dir.to_path_buf(),
+            store.clone(),
+        ),
+    )]);
+    let mut events = 0usize;
+    for path in paths {
+        match crate::scheduler::ingest_file_once(&registry, store, &path) {
+            Ok(n) => events += n,
+            Err(e) => tracing::warn!(
+                path=%path.display(),
+                error=%format!("{e:#}"),
+                "live Claude radar refresh failed"
+            ),
+        }
+    }
+    if events > 0 {
+        let _ = crate::ingest::claude_code::link_claude_subagents_in_store(store);
+    }
+    events
 }
 
 /// Pull current live Codex rollout tails into the store before RADAR assembles the
@@ -1068,6 +1525,73 @@ fn refresh_live_codex_rollouts(store: &Store, sessions_dir: &Path, archived_dir:
     events
 }
 
+/// Resolve live Claude registry entries to their current transcript files. Root
+/// transcripts live at `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`; Claude
+/// subagent transcripts for that live root live below
+/// `<encoded-cwd>/<sessionId>/subagents/**.jsonl`. Missing files are skipped: the
+/// registry is the liveness source, but the transcript is the renderable context.
+fn live_claude_transcript_paths(
+    projects_dir: &Path,
+    sessions_dir: &Path,
+) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for (pid, v) in read_claude_registry(sessions_dir) {
+        if !liveness::pid_alive(pid) {
+            continue;
+        }
+        let Some(session_id) = v.get("sessionId").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        let Some(cwd) = v.get("cwd").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        let root = projects_dir
+            .join(claude_project_dir_name(cwd))
+            .join(format!("{session_id}.jsonl"));
+        if !root.is_file() {
+            continue;
+        }
+        if seen.insert(root.clone()) {
+            out.push(root.clone());
+        }
+
+        let subagents = root
+            .parent()
+            .map(|p| p.join(session_id).join("subagents"))
+            .filter(|p| p.exists());
+        let Some(subagents) = subagents else {
+            continue;
+        };
+        for entry in walkdir::WalkDir::new(subagents)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if !entry.file_type().is_file() || p.extension().map(|x| x != "jsonl").unwrap_or(true) {
+                continue;
+            }
+            let p = entry.into_path();
+            if seen.insert(p.clone()) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+fn claude_project_dir_name(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c.is_whitespace() {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// Whether a non-archived Codex rollout is recent enough to still count as "present"
 /// on the radar (hybrid stale policy). Codex has no process/termination signal, so a
 /// rollout the user never archived would linger forever; we hide one idle longer than
@@ -1090,13 +1614,22 @@ mod codex_stale_tests {
     #[test]
     fn keeps_recent_drops_stale_handles_unknown_and_disabled() {
         assert!(codex_fresh(Some(60), 21_600), "1m ago within 6h → keep");
-        assert!(!codex_fresh(Some(7 * 3600), 21_600), "7h ago past 6h → drop");
-        assert!(codex_fresh(Some(21_600), 21_600), "exactly at cutoff → keep (<=)");
+        assert!(
+            !codex_fresh(Some(7 * 3600), 21_600),
+            "7h ago past 6h → drop"
+        );
+        assert!(
+            codex_fresh(Some(21_600), 21_600),
+            "exactly at cutoff → keep (<=)"
+        );
         assert!(
             codex_fresh(None, 21_600),
             "unknown mtime → keep (never drop on a missing stat)"
         );
-        assert!(codex_fresh(Some(999_999), 0), "cutoff disabled (0) → keep all");
+        assert!(
+            codex_fresh(Some(999_999), 0),
+            "cutoff disabled (0) → keep all"
+        );
     }
 }
 
@@ -1137,7 +1670,9 @@ fn live_codex_rollout_paths(sessions_dir: &Path, archived_dir: &Path) -> Vec<std
         .filter_map(|e| e.ok())
     {
         if is_rollout(&entry) {
-            archived.insert(crate::ingest::codex::external_id_from_filename(entry.path()));
+            archived.insert(crate::ingest::codex::external_id_from_filename(
+                entry.path(),
+            ));
         }
     }
     // Live rollouts: under sessions/, not archived, and not stale. The freshness
@@ -1176,9 +1711,6 @@ mod tests {
     use crate::ir::*;
     use chrono::Utc;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Seed a session with the given id/external/harness and an optional last
     /// `TokenUsage` event (so size/composition populate).
@@ -1331,6 +1863,63 @@ mod tests {
         assert_eq!(state.agents[0].child_count, 0);
     }
 
+    #[test]
+    fn assemble_prefers_root_transcript_over_subagent_duplicate_external_id() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let session = |id: &str, external: &str, source: &str, started_at: DateTime<Utc>| Session {
+            id: id.into(),
+            harness: Harness::ClaudeCode,
+            external_id: external.into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/tmp/WARDEN"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec![],
+            started_at,
+            ended_at: None,
+            source_path: PathBuf::from(source),
+            raw_hash: 0,
+            ingested_at: started_at,
+            meta: serde_json::json!({}),
+        };
+        let root = session("root", "root-ext", "/tmp/proj/root-ext.jsonl", now);
+        let duplicate = session(
+            "duplicate-subagent-row",
+            "root-ext",
+            "/tmp/proj/root-ext/subagents/agent-child.jsonl",
+            now + chrono::Duration::seconds(10),
+        );
+        let child = session(
+            "child",
+            "agent-child",
+            "/tmp/proj/root-ext/subagents/agent-child.jsonl",
+            now + chrono::Duration::seconds(20),
+        );
+        store.upsert_session_batch(&root, &[], &[], 0).unwrap();
+        store.upsert_session_batch(&duplicate, &[], &[], 0).unwrap();
+        store.upsert_session_batch(&child, &[], &[], 0).unwrap();
+        store.link_child_session("child", "root").unwrap();
+
+        let reg = claude_registry(&[(100, "root-ext")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+
+        assert!(
+            state.agents.iter().any(|a| a.id == "root"),
+            "the real root transcript must remain the canonical root"
+        );
+        assert!(
+            state
+                .agents
+                .iter()
+                .all(|a| a.id != "duplicate-subagent-row"),
+            "a stale subagent-path duplicate must not replace the root"
+        );
+        let child = state.agents.iter().find(|a| a.id == "child").unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some("root"));
+    }
+
     /// Fix #3 — INCREMENTAL token cache: re-assembling an UNCHANGED store must NOT
     /// re-tokenize. The first assemble tokenizes (cache miss) and persists the raw
     /// sums keyed by the session's content hash; the second assemble hits the cache
@@ -1435,13 +2024,32 @@ mod tests {
             "the cwd basename is still exposed for the folder subtitle"
         );
         assert_eq!(root.context_tokens, 345_007, "2+13761+331244");
-        assert!((root.fill_pct - 1.0).abs() < 1e-9, "clamped to 1.0");
+        assert!(
+            (root.fill_pct - 0.345_007).abs() < 1e-6,
+            "345007 / 1M Opus window ≈ 0.345 (not clamped against the old 200k)"
+        );
         assert_eq!(root.composition.exact.cache_read, 331_244);
         assert_eq!(root.composition.exact.fresh, 2 + 13_761);
         assert_eq!(root.composition.exact.output, 2_620);
         assert!(
             root.composition.estimated.is_some(),
             "a turn-1 baseline yields an estimated composition"
+        );
+        assert_eq!(root.context_breakdown.used_tokens, 345_007);
+        assert_eq!(root.context_breakdown.max_tokens, 1_000_000);
+        assert!(
+            root.context_breakdown
+                .rows
+                .iter()
+                .any(|r| r.key == "messages" && r.tokens > 0),
+            "context window rows must include live message occupancy"
+        );
+        assert!(
+            root.context_breakdown
+                .rows
+                .iter()
+                .any(|r| r.key == "free_space" && r.tokens == 1_000_000 - 345_007),
+            "context window rows must include free space against the real max window"
         );
         assert!(root.est_cost_usd.is_some(), "opus model → a cost estimate");
 
@@ -1457,19 +2065,25 @@ mod tests {
         // Contract: camelCase keys present in the serialized payload.
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"fillPct\""), "camelCase fillPct");
-        assert!(json.contains("\"contextTokens\""), "camelCase contextTokens");
+        assert!(
+            json.contains("\"contextTokens\""),
+            "camelCase contextTokens"
+        );
+        assert!(
+            json.contains("\"contextBreakdown\""),
+            "camelCase contextBreakdown"
+        );
         assert!(json.contains("\"parentId\""), "camelCase parentId");
         assert!(json.contains("\"childCount\""), "camelCase childCount");
         assert!(json.contains("\"cacheRead\""), "camelCase nested cacheRead");
         assert!(json.contains("\"generatedAt\""), "camelCase generatedAt");
     }
 
-    /// Finding 2: a Codex Desktop subagent inserted into the store WITHOUT any
-    /// pre-run linkage pass is linked (non-NULL parent, appears as a child in the
-    /// forest) after `recompute_radar_state` — recompute re-derives linkage over the
-    /// current store sessions, so a tree that forms after startup is not flat.
+    /// A Codex Desktop subagent inserted into the store WITHOUT any pre-run linkage
+    /// pass is linked by the explicit relink boundary (startup/live ingest), then
+    /// appears as a child in the forest. Steady recomputes are read-only.
     #[test]
-    fn recompute_relinks_codex_subagent_without_pre_pass() {
+    fn explicit_relink_links_codex_subagent_without_pre_pass() {
         let store = Store::memory().unwrap();
         let now = Utc::now();
         let mk = |id: &str, ext: &str, meta: serde_json::Value| Session {
@@ -1488,7 +2102,11 @@ mod tests {
         // Parent Codex Desktop session.
         store
             .upsert_session_batch(
-                &mk("cx-parent", "thread-parent", serde_json::json!({ "originator": "Codex Desktop" })),
+                &mk(
+                    "cx-parent",
+                    "thread-parent",
+                    serde_json::json!({ "originator": "Codex Desktop" }),
+                ),
                 &[],
                 &[],
                 0,
@@ -1552,14 +2170,87 @@ mod tests {
         assert_eq!(parent.child_count, 1, "parent shows one child");
     }
 
-    /// Regression: a Codex rollout that was already open before WARDEN started must
-    /// appear on the first radar recompute even when the store is empty/stale. The
-    /// recompute path must pull live Codex tails before assembling the forest;
-    /// otherwise the live-id scan sees the file but `assemble` has no stored session
-    /// or events to render, so the UI shows absent/stale/idle context.
     #[test]
-    fn recompute_refreshes_live_codex_rollout_before_assembling() {
-        let _guard = ENV_LOCK.lock().unwrap();
+    fn steady_recompute_does_not_relink_without_new_ingest() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old_sessions = std::env::var_os("WARDEN_CODEX_SESSIONS");
+        let old_archived = std::env::var_os("WARDEN_CODEX_ARCHIVED_SESSIONS");
+
+        let sessions_root = tempfile::tempdir().unwrap();
+        let archived_root = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDEN_CODEX_SESSIONS", sessions_root.path());
+        std::env::set_var("WARDEN_CODEX_ARCHIVED_SESSIONS", archived_root.path());
+
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let mk = |id: &str, ext: &str, meta: serde_json::Value| Session {
+            id: id.into(),
+            harness: Harness::Codex,
+            external_id: ext.into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: PathBuf::from(format!("/tmp/{id}.jsonl")),
+            raw_hash: 0,
+            ingested_at: now,
+            meta,
+        };
+        store
+            .upsert_session_batch(
+                &mk(
+                    "cx-parent",
+                    "thread-parent",
+                    serde_json::json!({ "originator": "Codex Desktop" }),
+                ),
+                &[],
+                &[],
+                0,
+            )
+            .unwrap();
+        store
+            .upsert_session_batch(
+                &mk(
+                    "cx-child",
+                    "thread-child",
+                    serde_json::json!({
+                        "thread_source": "subagent",
+                        "parent_thread_id": "thread-parent",
+                        "originator": "Codex Desktop",
+                    }),
+                ),
+                &[],
+                &[],
+                0,
+            )
+            .unwrap();
+
+        let registry = tempfile::tempdir().unwrap();
+        let _ = recompute_radar_state(&store, registry.path());
+
+        match old_sessions {
+            Some(v) => std::env::set_var("WARDEN_CODEX_SESSIONS", v),
+            None => std::env::remove_var("WARDEN_CODEX_SESSIONS"),
+        }
+        match old_archived {
+            Some(v) => std::env::set_var("WARDEN_CODEX_ARCHIVED_SESSIONS", v),
+            None => std::env::remove_var("WARDEN_CODEX_ARCHIVED_SESSIONS"),
+        }
+
+        assert_eq!(
+            store.parent_of("cx-child").unwrap(),
+            None,
+            "heartbeat/read recomputes must not run the whole-store relinker when no new bytes were ingested"
+        );
+    }
+
+    #[test]
+    fn steady_recompute_does_not_ingest_live_codex_rollout_without_explicit_refresh() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let old_sessions = std::env::var_os("WARDEN_CODEX_SESSIONS");
         let old_archived = std::env::var_os("WARDEN_CODEX_ARCHIVED_SESSIONS");
 
@@ -1570,19 +2261,16 @@ mod tests {
 
         let live_dir = sessions_root.path().join("2026/06/25");
         std::fs::create_dir_all(&live_dir).unwrap();
-        let path = live_dir.join(
-            "rollout-2026-06-25T00-00-00-019efd6c-8f60-7f42-8da1-3977122aa6be.jsonl",
-        );
+        let path =
+            live_dir.join("rollout-2026-06-25T00-00-00-019efd6c-8f60-7f42-8da1-3977122aa6be.jsonl");
         let now = Utc::now();
         let t0 = now.to_rfc3339();
         let t1 = (now + chrono::Duration::milliseconds(100)).to_rfc3339();
-        let t2 = (now + chrono::Duration::milliseconds(200)).to_rfc3339();
         std::fs::write(
             &path,
             format!(
                 "{{\"timestamp\":\"{t0}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"019efd6c-8f60-7f42-8da1-3977122aa6be\",\"cwd\":\"/tmp/LiveCodex\",\"model_provider\":\"openai\",\"originator\":\"Codex Desktop\"}}}}\n\
-                 {{\"timestamp\":\"{t1}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\"}}}}\n\
-                 {{\"timestamp\":\"{t2}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"keep tracking this live codex context\"}}}}\n",
+                 {{\"timestamp\":\"{t1}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"do not ingest me on heartbeat\"}}}}\n",
             ),
         )
         .unwrap();
@@ -1600,6 +2288,69 @@ mod tests {
             None => std::env::remove_var("WARDEN_CODEX_ARCHIVED_SESSIONS"),
         }
 
+        assert!(
+            store.sessions().unwrap().is_empty(),
+            "steady heartbeat/read recompute must not ingest transcript bytes"
+        );
+        assert!(
+            state.agents.is_empty(),
+            "without an explicit live refresh or backfill, recompute should only assemble the persisted store"
+        );
+    }
+
+    /// Regression: a Codex rollout that was already open before WARDEN started must
+    /// appear after the explicit startup/cold-read refresh even when the store is
+    /// empty/stale. The refresh path pulls live Codex tails before assembly; ordinary
+    /// heartbeat recompute remains read-only.
+    #[test]
+    fn explicit_refresh_ingests_live_codex_rollout_before_assembling() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old_sessions = std::env::var_os("WARDEN_CODEX_SESSIONS");
+        let old_archived = std::env::var_os("WARDEN_CODEX_ARCHIVED_SESSIONS");
+
+        let sessions_root = tempfile::tempdir().unwrap();
+        let archived_root = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDEN_CODEX_SESSIONS", sessions_root.path());
+        std::env::set_var("WARDEN_CODEX_ARCHIVED_SESSIONS", archived_root.path());
+
+        let live_dir = sessions_root.path().join("2026/06/25");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let path =
+            live_dir.join("rollout-2026-06-25T00-00-00-019efd6c-8f60-7f42-8da1-3977122aa6be.jsonl");
+        let now = Utc::now();
+        let t0 = now.to_rfc3339();
+        let t1 = (now + chrono::Duration::milliseconds(100)).to_rfc3339();
+        let t2 = (now + chrono::Duration::milliseconds(200)).to_rfc3339();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"timestamp\":\"{t0}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"019efd6c-8f60-7f42-8da1-3977122aa6be\",\"cwd\":\"/tmp/LiveCodex\",\"model_provider\":\"openai\",\"originator\":\"Codex Desktop\"}}}}\n\
+                 {{\"timestamp\":\"{t1}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\"}}}}\n\
+                 {{\"timestamp\":\"{t2}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"keep tracking this live codex context\"}}}}\n",
+            ),
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        let claude_registry = tempfile::tempdir().unwrap();
+        let refreshed = refresh_live_context(&store, claude_registry.path());
+        let state = recompute_radar_state(&store, claude_registry.path());
+
+        match old_sessions {
+            Some(v) => std::env::set_var("WARDEN_CODEX_SESSIONS", v),
+            None => std::env::remove_var("WARDEN_CODEX_SESSIONS"),
+        }
+        match old_archived {
+            Some(v) => std::env::set_var("WARDEN_CODEX_ARCHIVED_SESSIONS", v),
+            None => std::env::remove_var("WARDEN_CODEX_ARCHIVED_SESSIONS"),
+        }
+
+        assert!(
+            refreshed > 0,
+            "explicit live refresh should ingest the live Codex rollout before assembly"
+        );
         let codex = state
             .agents
             .iter()
@@ -1614,6 +2365,94 @@ mod tests {
                 .any(|a| a.label.contains("keep tracking this live codex context")),
             "freshly ingested Codex activity should drive the live log: {:?}",
             codex.recent_activity
+        );
+    }
+
+    /// Regression: a Claude Code session that was already running before WARDEN
+    /// started must have its transcript tail pulled by the explicit startup/cold-read
+    /// refresh before the live forest is assembled. The liveness registry alone can
+    /// say the PID/session is open, but without a fresh store row RADAR has no
+    /// context/logs to render and the globe is absent or stale until a later
+    /// watcher/backfill catches up.
+    #[test]
+    fn explicit_refresh_ingests_live_claude_transcript_before_assembling() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old_claude_projects = std::env::var_os("WARDEN_CLAUDE_PROJECTS");
+        let old_codex_sessions = std::env::var_os("WARDEN_CODEX_SESSIONS");
+        let old_codex_archived = std::env::var_os("WARDEN_CODEX_ARCHIVED_SESSIONS");
+
+        let claude_projects = tempfile::tempdir().unwrap();
+        let codex_sessions = tempfile::tempdir().unwrap();
+        let codex_archived = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDEN_CLAUDE_PROJECTS", claude_projects.path());
+        std::env::set_var("WARDEN_CODEX_SESSIONS", codex_sessions.path());
+        std::env::set_var("WARDEN_CODEX_ARCHIVED_SESSIONS", codex_archived.path());
+
+        let session_id = "live-claude-session";
+        let project_dir = claude_projects.path().join("-tmp-LiveClaude");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let transcript = project_dir.join(format!("{session_id}.jsonl"));
+        let now = Utc::now();
+        let t0 = now.to_rfc3339();
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"{session_id}\",\"timestamp\":\"{t0}\",\"cwd\":\"/tmp/LiveClaude\",\"message\":{{\"role\":\"user\",\"content\":\"track this live claude context before startup backfill\"}}}}\n",
+            ),
+        )
+        .unwrap();
+
+        let registry = tempfile::tempdir().unwrap();
+        let pid = std::process::id();
+        std::fs::write(
+            registry.path().join(format!("{pid}.json")),
+            serde_json::json!({
+                "pid": pid,
+                "sessionId": session_id,
+                "cwd": "/tmp/LiveClaude",
+                "entrypoint": "claude-desktop"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        let refreshed = refresh_live_context(&store, registry.path());
+        let state = recompute_radar_state(&store, registry.path());
+
+        match old_claude_projects {
+            Some(v) => std::env::set_var("WARDEN_CLAUDE_PROJECTS", v),
+            None => std::env::remove_var("WARDEN_CLAUDE_PROJECTS"),
+        }
+        match old_codex_sessions {
+            Some(v) => std::env::set_var("WARDEN_CODEX_SESSIONS", v),
+            None => std::env::remove_var("WARDEN_CODEX_SESSIONS"),
+        }
+        match old_codex_archived {
+            Some(v) => std::env::set_var("WARDEN_CODEX_ARCHIVED_SESSIONS", v),
+            None => std::env::remove_var("WARDEN_CODEX_ARCHIVED_SESSIONS"),
+        }
+
+        assert!(
+            refreshed > 0,
+            "explicit live refresh should ingest the live Claude transcript before assembly"
+        );
+        let claude = state
+            .agents
+            .iter()
+            .find(|a| a.harness == "claude_code")
+            .expect("live Claude transcript should render on first recompute");
+        assert_eq!(claude.status, "working");
+        assert_eq!(claude.cwd.as_deref(), Some("LiveClaude"));
+        assert!(
+            claude
+                .recent_activity
+                .iter()
+                .any(|a| a.label.contains("track this live claude context")),
+            "freshly ingested Claude activity should drive the live log: {:?}",
+            claude.recent_activity
         );
     }
 
@@ -1712,6 +2551,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn recent_activity_orders_by_timestamp_not_storage_order() {
+        let now = Utc::now();
+        let turn = Turn {
+            id: "t".into(),
+            session_id: "s".into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let mk = |id: &str, ts: DateTime<Utc>, event: Event| {
+            (
+                turn.clone(),
+                EventRecord {
+                    id: id.into(),
+                    turn_id: "t".into(),
+                    session_id: "s".into(),
+                    ts,
+                    event,
+                    raw_ref: RawRef {
+                        source_path: PathBuf::from("/x.jsonl"),
+                        offset: 0,
+                        line: 1,
+                    },
+                },
+            )
+        };
+        let events = vec![
+            mk(
+                "new",
+                now,
+                Event::AssistantText {
+                    text: "newest final answer".into(),
+                },
+            ),
+            mk(
+                "old",
+                now - chrono::Duration::seconds(10),
+                Event::ToolCall {
+                    tool: "Bash".into(),
+                    input: serde_json::json!({"command":"old command"}),
+                    call_id: "c1".into(),
+                    kind: ToolKind::Builtin,
+                },
+            ),
+        ];
+
+        let acts = recent_activity(&events);
+        assert_eq!(
+            acts.first().map(|a| a.label.as_str()),
+            Some("newest final answer")
+        );
+    }
+
     /// Naming: a Claude ROOT agent is named by its originating task (its first
     /// non-meta user prompt), not merely the cwd basename — so several live sessions
     /// in the same repo are differentiated by what each is doing. The folder basename
@@ -1729,7 +2625,11 @@ mod tests {
         );
         let reg = claude_registry(&[(100, "r-ext")]);
         let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
-        let a = state.agents.iter().find(|a| a.id == "r").expect("root present");
+        let a = state
+            .agents
+            .iter()
+            .find(|a| a.id == "r")
+            .expect("root present");
         assert_eq!(
             a.label, "WARDEN",
             "a Claude root is named by its project folder (B1), not its originating task"
@@ -1775,9 +2675,7 @@ mod tests {
                 "agentType": "Explore",
             }),
         };
-        store
-            .upsert_session_batch(&child, &[], &[], 0)
-            .unwrap();
+        store.upsert_session_batch(&child, &[], &[], 0).unwrap();
         store.link_child_session("c-sid", "p-sid").unwrap();
 
         let reg = claude_registry(&[(100, "p-ext")]);
@@ -1800,7 +2698,11 @@ mod tests {
         // Root is labeled by its project folder; its folder is still exposed as `cwd`.
         let p = state.agents.iter().find(|a| a.id == "p-sid").unwrap();
         assert_eq!(p.label, "MyRepo", "root label is its project folder (B1)");
-        assert_eq!(p.cwd.as_deref(), Some("MyRepo"), "root still exposes its cwd");
+        assert_eq!(
+            p.cwd.as_deref(),
+            Some("MyRepo"),
+            "root still exposes its cwd"
+        );
     }
 
     /// `est_cost_usd` bills cache reads ~10× cheaper than fresh input: for opus
@@ -1836,7 +2738,10 @@ mod tests {
         );
 
         // Cache reads are strictly cheaper than the same volume of fresh input.
-        assert!(cost < fresh_cost, "cache reads must be cheaper than fresh input");
+        assert!(
+            cost < fresh_cost,
+            "cache reads must be cheaper than fresh input"
+        );
 
         // Unknown model stays nullable.
         assert_eq!(est_cost_usd(&Some("mystery".into()), &cache_only), None);
@@ -1848,11 +2753,20 @@ mod tests {
     fn assemble_session_without_usage_is_zeroed_and_unestimated() {
         let store = Store::memory().unwrap();
         seed(&store, "s", "e", Harness::Codex, Some("/tmp/proj"), None);
-        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &codex_all_open,
+            Utc::now(),
+        );
         let a = &state.agents[0];
         assert_eq!(a.context_tokens, 0);
         assert_eq!(a.fill_pct, 0.0);
-        assert!(a.composition.estimated.is_none(), "no baseline → null estimate");
+        assert!(
+            a.composition.estimated.is_none(),
+            "no baseline → null estimate"
+        );
         assert_eq!(a.est_cost_usd, None, "no model → no cost");
     }
 
@@ -1866,16 +2780,37 @@ mod tests {
     fn claude_forest_includes_only_registry_open_sessions() {
         let store = Store::memory().unwrap();
         // Historical/backfill session: ingested long ago, no live registry entry.
-        seed(&store, "hist", "hist-ext", Harness::ClaudeCode, Some("/tmp/old"), None);
+        seed(
+            &store,
+            "hist",
+            "hist-ext",
+            Harness::ClaudeCode,
+            Some("/tmp/old"),
+            None,
+        );
         // Currently-open session: a live `<pid>.json` references its session id.
-        seed(&store, "live", "live-ext", Harness::ClaudeCode, Some("/tmp/now"), None);
+        seed(
+            &store,
+            "live",
+            "live-ext",
+            Harness::ClaudeCode,
+            Some("/tmp/now"),
+            None,
+        );
 
         let reg = claude_registry(&[(100, "live-ext")]);
         let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
 
-        assert_eq!(state.agents.len(), 1, "only the registry-open session is in the forest");
+        assert_eq!(
+            state.agents.len(),
+            1,
+            "only the registry-open session is in the forest"
+        );
         let a = &state.agents[0];
-        assert_eq!(a.id, "live", "the open session is the live one, not the backfill");
+        assert_eq!(
+            a.id, "live",
+            "the open session is the live one, not the backfill"
+        );
         assert_eq!(
             a.status, "working",
             "last event is a fresh unanswered UserPrompt → working (Fault B: conversation-state, not mtime)"
@@ -1952,7 +2887,14 @@ mod tests {
             .upsert_session_batch(&done_session, &[done_turn], &[done_event], 0)
             .unwrap();
         // working-sess: last event is an unanswered UserPrompt (a strong working signal).
-        seed(&store, "working-sess", "working-ext", Harness::ClaudeCode, Some("/tmp/b"), None);
+        seed(
+            &store,
+            "working-sess",
+            "working-ext",
+            Harness::ClaudeCode,
+            Some("/tmp/b"),
+            None,
+        );
 
         // Both are registry-open WITHOUT an authoritative `status` field, so the
         // conversation-state fallback decides. Evaluate 60s in the FUTURE relative to the
@@ -1986,11 +2928,97 @@ mod tests {
         // Determinism: a second assemble on the UNCHANGED store at the SAME instant
         // yields identical statuses (no mtime, no flicker).
         let s2 = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
-        assert_eq!(st(&s2, "idle-sess"), st(&s1, "idle-sess"), "idle status stable across reads");
+        assert_eq!(
+            st(&s2, "idle-sess"),
+            st(&s1, "idle-sess"),
+            "idle status stable across reads"
+        );
         assert_eq!(
             st(&s2, "working-sess"),
             st(&s1, "working-sess"),
             "working status stable across reads"
+        );
+    }
+
+    #[test]
+    fn codex_stale_uningested_tail_does_not_stay_working() {
+        let store = Store::memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("rollout-2026-06-25T00-00-00-019f1111-1111-7111-8111-111111111111.jsonl");
+        std::fs::write(
+            &path,
+            "{\"timestamp\":\"2026-06-25T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"go\"}}\n\
+             {\"timestamp\":\"2026-06-25T00:00:20Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"done\",\"phase\":\"final_answer\"}}\n",
+        )
+        .unwrap();
+
+        let base = Utc::now();
+        let session = Session {
+            id: "codex-stale-tail".into(),
+            harness: Harness::Codex,
+            external_id: "019f1111-1111-7111-8111-111111111111".into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/tmp/StaleTail"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec!["openai".into()],
+            started_at: base,
+            ended_at: None,
+            source_path: path.clone(),
+            raw_hash: 1,
+            ingested_at: base,
+            meta: serde_json::json!({ "originator": "Codex Desktop" }),
+        };
+        let turn = Turn {
+            id: "codex-stale-tail-turn".into(),
+            session_id: session.id.clone(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: base,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let event = EventRecord {
+            id: "codex-stale-tail-user".into(),
+            turn_id: turn.id.clone(),
+            session_id: session.id.clone(),
+            ts: base,
+            event: Event::UserPrompt {
+                text: "go".into(),
+                attachments: vec![],
+                is_meta: false,
+            },
+            raw_ref: RawRef {
+                source_path: path.clone(),
+                offset: 0,
+                line: 1,
+            },
+        };
+        store
+            .upsert_session_batch(&session, &[turn], &[event], 10)
+            .unwrap();
+
+        let registry = tempfile::tempdir().unwrap();
+        let state = assemble(
+            &store,
+            registry.path(),
+            &|_| true,
+            &codex_all_open,
+            base + chrono::Duration::seconds(60),
+        );
+
+        let codex = state
+            .agents
+            .iter()
+            .find(|a| a.id == "codex-stale-tail")
+            .expect("open Codex session is rendered");
+        assert_eq!(
+            codex.status, "idle",
+            "a stale store row whose source file grew past its watermark must not stay working"
         );
     }
 
@@ -2002,14 +3030,38 @@ mod tests {
     #[test]
     fn codex_forest_excludes_archived_sessions() {
         let store = Store::memory().unwrap();
-        seed(&store, "open-cx", "open-uuid", Harness::Codex, Some("/tmp/p1"), None);
-        seed(&store, "done-cx", "done-uuid", Harness::Codex, Some("/tmp/p2"), None);
+        seed(
+            &store,
+            "open-cx",
+            "open-uuid",
+            Harness::Codex,
+            Some("/tmp/p1"),
+            None,
+        );
+        seed(
+            &store,
+            "done-cx",
+            "done-uuid",
+            Harness::Codex,
+            Some("/tmp/p2"),
+            None,
+        );
 
         // Only `open-uuid` currently lives under sessions/ (done-uuid was archived).
         let is_codex_open = |s: &Session| s.external_id == "open-uuid";
-        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, Utc::now());
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &is_codex_open,
+            Utc::now(),
+        );
 
-        assert_eq!(state.agents.len(), 1, "only the non-archived Codex session is open");
+        assert_eq!(
+            state.agents.len(),
+            1,
+            "only the non-archived Codex session is open"
+        );
         assert_eq!(state.agents[0].id, "open-cx");
         assert!(
             !state.agents.iter().any(|a| a.id == "done-cx"),
@@ -2025,12 +3077,40 @@ mod tests {
     fn closed_root_drops_orphaned_subagents_no_dangling_parent() {
         let store = Store::memory().unwrap();
         // Open tree: root `op-root` (in registry) + Claude subagent `op-sub`.
-        seed(&store, "op-root", "op-root-ext", Harness::ClaudeCode, Some("/tmp/a"), None);
-        seed(&store, "op-sub", "op-sub-ext", Harness::ClaudeCode, None, None);
+        seed(
+            &store,
+            "op-root",
+            "op-root-ext",
+            Harness::ClaudeCode,
+            Some("/tmp/a"),
+            None,
+        );
+        seed(
+            &store,
+            "op-sub",
+            "op-sub-ext",
+            Harness::ClaudeCode,
+            None,
+            None,
+        );
         store.link_child_session("op-sub", "op-root").unwrap();
         // Closed tree: root `cl-root` (NOT in registry) + subagent `cl-sub`.
-        seed(&store, "cl-root", "cl-root-ext", Harness::ClaudeCode, Some("/tmp/b"), None);
-        seed(&store, "cl-sub", "cl-sub-ext", Harness::ClaudeCode, None, None);
+        seed(
+            &store,
+            "cl-root",
+            "cl-root-ext",
+            Harness::ClaudeCode,
+            Some("/tmp/b"),
+            None,
+        );
+        seed(
+            &store,
+            "cl-sub",
+            "cl-sub-ext",
+            Harness::ClaudeCode,
+            None,
+            None,
+        );
         store.link_child_session("cl-sub", "cl-root").unwrap();
 
         // Only the open root is registered alive.
@@ -2038,16 +3118,30 @@ mod tests {
         let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
 
         // The open tree survives, nested and counted.
-        let root = state.agents.iter().find(|a| a.id == "op-root").expect("open root present");
+        let root = state
+            .agents
+            .iter()
+            .find(|a| a.id == "op-root")
+            .expect("open root present");
         assert_eq!(root.depth, 0);
         assert_eq!(root.parent_id, None);
-        assert_eq!(root.child_count, 1, "open root counts its one open subagent");
-        let sub = state.agents.iter().find(|a| a.id == "op-sub").expect("open subagent present");
+        assert_eq!(
+            root.child_count, 1,
+            "open root counts its one open subagent"
+        );
+        let sub = state
+            .agents
+            .iter()
+            .find(|a| a.id == "op-sub")
+            .expect("open subagent present");
         assert_eq!(sub.depth, 1, "subagent rides on its open root, nested");
         assert_eq!(sub.parent_id.as_deref(), Some("op-root"));
 
         // The closed tree is gone entirely (root AND its orphaned subagent).
-        assert!(!state.agents.iter().any(|a| a.id == "cl-root"), "closed root excluded");
+        assert!(
+            !state.agents.iter().any(|a| a.id == "cl-root"),
+            "closed root excluded"
+        );
         assert!(
             !state.agents.iter().any(|a| a.id == "cl-sub"),
             "a subagent under a closed root is excluded, not orphaned"
@@ -2071,6 +3165,14 @@ mod tests {
     /// Build a `(Turn, EventRecord)` carrying a single `ToolResult` for `call_id` at
     /// timestamp `ts` — the parent-side termination fact `subagent_terminated_at` reads.
     fn mk_tool_result_event(call_id: &str, ts: DateTime<Utc>) -> (Turn, EventRecord) {
+        mk_tool_result_event_with_summary(call_id, ts, None)
+    }
+
+    fn mk_tool_result_event_with_summary(
+        call_id: &str,
+        ts: DateTime<Utc>,
+        summary: Option<&str>,
+    ) -> (Turn, EventRecord) {
         let turn = Turn {
             id: "p-t".into(),
             session_id: "parent".into(),
@@ -2090,7 +3192,37 @@ mod tests {
                 call_id: call_id.into(),
                 status: ToolStatus::Ok,
                 bytes: 0,
-                summary: None,
+                summary: summary.map(str::to_string),
+            },
+            raw_ref: RawRef {
+                source_path: PathBuf::from("/tmp/parent.jsonl"),
+                offset: 0,
+                line: 1,
+            },
+        };
+        (turn, rec)
+    }
+
+    fn mk_user_prompt_event(text: &str, ts: DateTime<Utc>) -> (Turn, EventRecord) {
+        let turn = Turn {
+            id: "p-u".into(),
+            session_id: "parent".into(),
+            parent_id: None,
+            role: Role::User,
+            index: 2,
+            started_at: ts,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let rec = EventRecord {
+            id: "prompt".into(),
+            turn_id: "p-u".into(),
+            session_id: "parent".into(),
+            ts,
+            event: Event::UserPrompt {
+                text: text.into(),
+                attachments: vec![],
+                is_meta: false,
             },
             raw_ref: RawRef {
                 source_path: PathBuf::from("/tmp/parent.jsonl"),
@@ -2134,18 +3266,68 @@ mod tests {
         assert_eq!(subagent_terminated_at(None, &[], None, now, 90_000), None);
     }
 
+    #[test]
+    fn subagent_terminated_at_ignores_async_launch_ack() {
+        let now = Utc::now();
+        let parent_events = vec![mk_tool_result_event_with_summary(
+            "toolu_async",
+            now - chrono::Duration::seconds(1),
+            Some("Async agent launched successfully.\nThe agent is working in the background."),
+        )];
+
+        assert_eq!(
+            subagent_terminated_at(Some("toolu_async"), &parent_events, Some(now), now, 90_000),
+            None,
+            "the launch acknowledgment starts a background subagent; it is not the completion signal"
+        );
+    }
+
+    #[test]
+    fn subagent_terminated_at_uses_async_task_completion_notification() {
+        let now = Utc::now();
+        let completed_ts = now - chrono::Duration::seconds(1);
+        let text = "<task-notification>\n\
+<task-id>a04f87f14f439d3f3</task-id>\n\
+<tool-use-id>toolu_done</tool-use-id>\n\
+<status>completed</status>\n\
+<summary>Agent came to rest</summary>\n\
+</task-notification>";
+        let parent_events = vec![mk_user_prompt_event(text, completed_ts)];
+
+        assert_eq!(
+            subagent_terminated_at(Some("toolu_done"), &parent_events, Some(now), now, 90_000),
+            Some(completed_ts),
+            "Claude async subagents finish via the parent task-notification completion record"
+        );
+    }
+
     // ── B1: folder/subagent naming ───────────────────────────────────────────────
     #[test]
     fn display_label_names_root_by_folder_and_subagent_by_ordinal() {
         // root with a folder → the folder name
-        assert_eq!(display_label(0, Some("WARDEN"), None, None, "fallback"), "WARDEN");
+        assert_eq!(
+            display_label(0, Some("WARDEN"), None, None, "fallback"),
+            "WARDEN"
+        );
         // a second live root in the same folder → circled disambiguator (oldest keeps bare name)
-        assert_eq!(display_label(0, Some("WARDEN"), None, Some(2), "fallback"), "WARDEN ②");
-        assert_eq!(display_label(0, Some("WARDEN"), None, Some(1), "fallback"), "WARDEN");
+        assert_eq!(
+            display_label(0, Some("WARDEN"), None, Some(2), "fallback"),
+            "WARDEN ②"
+        );
+        assert_eq!(
+            display_label(0, Some("WARDEN"), None, Some(1), "fallback"),
+            "WARDEN"
+        );
         // root with no folder → falls back to the identity label
-        assert_eq!(display_label(0, None, None, None, "diagnose the bug"), "diagnose the bug");
+        assert_eq!(
+            display_label(0, None, None, None, "diagnose the bug"),
+            "diagnose the bug"
+        );
         // subagent → strictly "subagent N", regardless of any role/description
-        assert_eq!(display_label(1, Some("WARDEN"), Some(1), None, "Explore"), "subagent 1");
+        assert_eq!(
+            display_label(1, Some("WARDEN"), Some(1), None, "Explore"),
+            "subagent 1"
+        );
         assert_eq!(display_label(2, None, Some(3), None, "x"), "subagent 3");
     }
 
@@ -2224,8 +3406,12 @@ mod tests {
             ingested_at: result_ts,
             meta: serde_json::json!({}),
         };
-        store.upsert_session_batch(&sub_session, &[], &[], 0).unwrap();
-        store.merge_session_meta(sub, &serde_json::json!({ "toolUseId": call_id })).unwrap();
+        store
+            .upsert_session_batch(&sub_session, &[], &[], 0)
+            .unwrap();
+        store
+            .merge_session_meta(sub, &serde_json::json!({ "toolUseId": call_id }))
+            .unwrap();
         store.link_child_session(sub, root).unwrap();
     }
 

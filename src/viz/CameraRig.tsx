@@ -22,6 +22,7 @@ import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode } from './orbTypes';
 import { frameDistance, type Bounds } from './cameraFraming';
+import { cameraTargetForOrbitOverview } from './useOrbCamera';
 
 // Pulled back from the old 9.4 so the (now more widely spaced) constellation
 // opens with room to breathe instead of filling the frame.
@@ -64,12 +65,14 @@ function easeInOutExpo(t: number): number {
 export function CameraRig({
   selected,
   focusBounds = null,
+  homeSignal = 0,
 }: {
   selected: LayoutNode | null;
   // Fly-to target: when non-null we frame this bounded subtree; when it returns
   // to null we ease back to the overview/home pose. Defaults to null so callers
   // that don't drive it yet (and the type-checker) are happy.
   focusBounds?: Bounds | null;
+  homeSignal?: number;
 }) {
   // OrbitControls instance — typed loosely to avoid importing three's controls type.
   const controls = useRef<any>(null);
@@ -94,6 +97,7 @@ export function CameraRig({
   // Edge detector for focusBounds (compare by value — center + radius — so a
   // re-rendered-but-identical Bounds object doesn't retrigger the flight).
   const lastFocusKey = useRef<string | null>(null);
+  const lastHomeSignal = useRef(homeSignal);
 
   // Kick off a timed fly-to toward the current goal poses (already set by the
   // caller below). Captures the live pose as the interpolation start.
@@ -204,6 +208,21 @@ export function CameraRig({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusBounds]);
+
+  useEffect(() => {
+    if (homeSignal === lastHomeSignal.current) return;
+    lastHomeSignal.current = homeSignal;
+
+    const home = cameraTargetForOrbitOverview();
+    targetGoal.current.set(home.lookAt.x, home.lookAt.y, home.lookAt.z);
+    posGoal.current.set(home.position.x, home.position.y, home.position.z);
+    homeTarget.current.copy(targetGoal.current);
+    homePos.current = new THREE.Vector3(home.position.x, home.position.y, home.position.z);
+    wasSelected.current = false;
+    lastFocusKey.current = null;
+    beginFly();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homeSignal]);
 
   useFrame((_, dtRaw) => {
     const c = controls.current;

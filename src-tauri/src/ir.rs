@@ -289,10 +289,88 @@ pub struct Diagnosis {
     pub detector_only: bool,
 }
 
+/// M4 Forge: a reversible "apply" of a guardrail block to a target config file
+/// (e.g. `~/.claude/CLAUDE.md`). Staged PENDING from a fix preview, written on
+/// `apply` (with a backed-up pre-image), and undone on `revert`. The row is the
+/// single source of truth for what to write and how to undo it, so apply/revert
+/// never re-derive the pattern. Serialized camelCase for the FACE contract.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Artifact {
+    pub id: String,
+    /// Source finding/issue id; null for staging paths without a persisted finding.
+    pub finding_id: Option<String>,
+    /// What kind of edit this is, e.g. `"claude_md_guardrail"`.
+    pub kind: String,
+    /// Resolved absolute target file path.
+    pub target_path: String,
+    /// Display-only unified diff captured at stage time.
+    pub diff: String,
+    /// The literal guardrail block apply must ensure is present.
+    pub block: String,
+    /// `pending` → `applied` → `reverted`.
+    pub status: String,
+    /// RFC3339 timestamp when applied (null until applied).
+    pub applied_at: Option<String>,
+    /// Sibling backup file holding the pre-image bytes (null until a changing apply).
+    pub backup_path: Option<String>,
+    /// SHA-256 (hex) of the pre-image content backed up (null for the no-op path).
+    pub pre_image_sha256: Option<String>,
+    /// SHA-256 (hex) of the content WARDEN wrote at apply time (the post-image). Set
+    /// on every successful apply (changing or no-op). Revert refuses if the target
+    /// no longer matches this hash — proof the user (or another tool) edited the
+    /// file out-of-band since apply, so blindly restoring the pre-image would clobber
+    /// those edits. Null until applied.
+    pub post_image_sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RunScope {
     pub harness: Option<String>,
     pub query: Option<String>,
     pub force: Option<bool>,
     pub max_files: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_round_trips_camelcase_through_serde() {
+        let a = Artifact {
+            id: "art-1".into(),
+            finding_id: Some("find-1".into()),
+            kind: "claude_md_guardrail".into(),
+            target_path: "/tmp/CLAUDE.md".into(),
+            diff: "--- a\n+++ b\n@@\n+line\n".into(),
+            block: "\n## WARDEN guardrail — X\n- rule\n".into(),
+            status: "pending".into(),
+            applied_at: None,
+            backup_path: None,
+            pre_image_sha256: None,
+            post_image_sha256: None,
+        };
+        let json = serde_json::to_value(&a).unwrap();
+        // Frozen contract: backend MUST serialize these exact camelCase names.
+        assert!(json.get("findingId").is_some(), "expected findingId key");
+        assert!(json.get("targetPath").is_some(), "expected targetPath key");
+        assert!(json.get("appliedAt").is_some(), "expected appliedAt key");
+        assert!(json.get("backupPath").is_some(), "expected backupPath key");
+        assert!(
+            json.get("preImageSha256").is_some(),
+            "expected preImageSha256 key"
+        );
+        assert!(
+            json.get("postImageSha256").is_some(),
+            "expected postImageSha256 key"
+        );
+        assert!(json.get("finding_id").is_none(), "snake_case must not leak");
+
+        let back: Artifact = serde_json::from_value(json).unwrap();
+        assert_eq!(back.id, a.id);
+        assert_eq!(back.finding_id, a.finding_id);
+        assert_eq!(back.target_path, a.target_path);
+        assert_eq!(back.status, a.status);
+    }
 }

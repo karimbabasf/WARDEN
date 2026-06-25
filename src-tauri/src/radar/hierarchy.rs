@@ -4,7 +4,9 @@
 //! store: the caller (the ingest path) persists the returned `(child, parent)`
 //! pairs via `Store::link_child_session`.
 
-use crate::ingest::claude_code::{subagent_agent_id, SubagentMeta};
+use crate::ingest::claude_code::{
+    is_subagent_session_path, subagent_agent_id, subagent_root_external_id, SubagentMeta,
+};
 use crate::ingest::SessionBatch;
 use crate::ir::{Event, Session};
 use serde_json::Value;
@@ -33,17 +35,16 @@ pub fn link_claude_subagents(
     let mut call_to_parent: HashMap<&str, &str> = HashMap::new();
     // agent_id (from the subagent transcript filename) → child session id.
     let mut agent_to_child: HashMap<String, &str> = HashMap::new();
+    // root external session id → parent session id, used by Claude workflow subagents
+    // whose sidecar has no toolUseId.
+    let mut root_external_to_parent: HashMap<&str, &str> = HashMap::new();
 
     for b in batches {
-        let is_subagent = b
-            .session
-            .source_path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n == "subagents")
-            .unwrap_or(false);
+        let is_subagent = is_subagent_session_path(&b.session.source_path);
         if is_subagent {
             agent_to_child.insert(subagent_agent_id(&b.session.source_path), b.session.id.as_str());
+        } else {
+            root_external_to_parent.insert(b.session.external_id.as_str(), b.session.id.as_str());
         }
         for e in &b.events {
             if let Event::ToolCall { tool, call_id, .. } = &e.event {
@@ -56,10 +57,20 @@ pub fn link_claude_subagents(
 
     let mut pairs = Vec::new();
     for m in metas {
-        if let (Some(parent), Some(child)) = (
-            call_to_parent.get(m.tool_use_id.as_str()),
-            agent_to_child.get(&m.agent_id),
-        ) {
+        let Some(child) = agent_to_child.get(&m.agent_id) else {
+            continue;
+        };
+        let parent = call_to_parent
+            .get(m.tool_use_id.as_str())
+            .copied()
+            .or_else(|| {
+                batches
+                    .iter()
+                    .find(|b| b.session.id == **child)
+                    .and_then(|b| subagent_root_external_id(&b.session.source_path))
+                    .and_then(|root| root_external_to_parent.get(root.as_str()).copied())
+            });
+        if let Some(parent) = parent {
             pairs.push((child.to_string(), parent.to_string()));
         }
     }

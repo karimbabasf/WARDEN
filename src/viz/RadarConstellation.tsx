@@ -21,13 +21,13 @@ import * as THREE from 'three';
 import type { LayoutNode, OrbLayout } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 import { layoutRadarScene, type RadarCluster } from './radarLayout';
-import { radarHarness, heatColor } from './radarTheme';
+import { radarHarness } from './radarTheme';
 import { AgentCore } from './AgentCore';
 import { StarCatalog } from './StarCatalog';
 import { FoldGroup } from './Transition';
 import { CameraRig } from './CameraRig';
 import { frameloopFor } from './WarRoom';
-import { reconcileLifecycle, pruneGone, isVisible, type LifecycleMap, type LiveId } from './radarLifecycle';
+import { reconcileLifecycle, pruneGone, isVisible, type LifecycleEntry, type LifecycleMap, type LiveId } from './radarLifecycle';
 import { RadarHoverCard } from './RadarHoverCard';
 import { radarCanvasCamera } from './useOrbCamera';
 import { targetDim, matchesFilter, type EmphasisFilter } from './emphasis';
@@ -36,13 +36,24 @@ const BG = '#020403';
 const WHITE = new THREE.Color('#ffffff');
 
 /**
- * The colour of a radar globe: the agent's harness hue heated by its fill level.
- * Pure + exported so it is unit-tested without WebGL (the house pattern).
+ * The colour of a radar globe: its harness hue, FLAT. Colour is identity only —
+ * never load and never liveness. Fill drives SIZE (the layout radius) and working
+ * drives BRIGHTNESS (the per-frame blaze), so the hue itself stays constant and a
+ * harness reads the same whether it's busy or idle. Pure + exported so it is
+ * unit-tested without WebGL (the house pattern).
  */
 export function radarNodeColor(agent: RadarAgent): string {
-  return heatColor(radarHarness(agent.harness).color, agent.fillPct);
+  return radarHarness(agent.harness).color;
 }
 
+/**
+ * The glow TARGET a globe damps toward — the single brightness signal, and it is
+ * LIVENESS, full stop. A working globe blazes (a big `liveLift`); an idle/closed one
+ * falls back to a deliberately dim resting floor so it sinks below the bloom
+ * threshold and the working ones are the only things that light the room. Fill is
+ * intentionally absent: context is the SIZE channel, not the brightness channel.
+ * Selection/hover/legend-emphasis add on top so the focused globe still pops.
+ */
 export function radarGlowTarget({
   agent,
   isRoot,
@@ -50,24 +61,23 @@ export function radarGlowTarget({
   selected,
   hovered,
 }: {
-  agent: Pick<RadarAgent, 'fillPct' | 'status'>;
+  agent: Pick<RadarAgent, 'status'>;
   isRoot: boolean;
   emphasis: boolean;
   selected: boolean;
   hovered: boolean;
 }): number {
   const working = agent.status === 'working';
-  const fillGlow = 0.18 + agent.fillPct * 0.45;
-  const liveLift = working ? 3.15 : 0;
-  const idlePenalty = working ? 0 : 0.55;
+  // Dim resting floor (idle) vs a strong live blaze (working). The ~9× gap is what
+  // makes a running agent unmistakable against the dulled-down rest of the forest.
+  const restFloor = isRoot ? 0.22 : 0.16;
+  const liveLift = working ? 2.7 : 0;
   return Math.max(
-    0.08,
-    (isRoot ? 0.5 : 0.4) +
-      fillGlow +
-      liveLift -
-      idlePenalty +
-      (emphasis ? 0.5 : 0) +
-      (selected ? 0.9 : hovered ? 0.35 : 0),
+    0.05,
+    restFloor +
+      liveLift +
+      (emphasis ? 0.6 : 0) +
+      (selected ? 1.0 : hovered ? 0.4 : 0),
   );
 }
 
@@ -85,6 +95,28 @@ const DIM_LAMBDA = 1 / 0.3;
 // geometry/position are never touched.
 function dimScale(dim: number, floor: number): number {
   return 1 - dim * (1 - floor);
+}
+
+/** Colour-only liveness scale for material hues: idle recedes, working restores full colour. */
+export function radarLivenessColorScale(liveK: number): number {
+  const k = Math.min(1, Math.max(0, liveK));
+  return 0.62 + k * 0.38;
+}
+
+type LinkFadeEndpoint = {
+  entry?: LifecycleEntry;
+  gone?: boolean;
+};
+
+function endpointFadeFactor({ entry, gone = false }: LinkFadeEndpoint): number {
+  if (gone || entry?.phase === 'gone') return 0;
+  if (!entry) return 1;
+  const scale = Math.max(0, Math.min(1, entry.scale));
+  return entry.phase === 'imploding' ? Math.pow(scale, 1.4) : scale;
+}
+
+export function radarLinkFadeFactor(source: LinkFadeEndpoint, target: LinkFadeEndpoint): number {
+  return Math.min(endpointFadeFactor(source), endpointFadeFactor(target));
 }
 
 // drei's <Wireframe geometry=..> renders a private <mesh><meshWireframeMaterial/>
@@ -184,6 +216,10 @@ function RadarGlobe({
   const color = useMemo(() => new THREE.Color(baseHex), [baseHex]);
   const innerColor = useMemo(() => color.clone().lerp(WHITE, 0.24), [color]);
   const nodeColor = useMemo(() => color.clone().lerp(WHITE, 0.16), [color]);
+  // Far-hemisphere lattice lines: a very dark tint of the globe's OWN hue (never the
+  // old phosphor green) so the back of the sphere reads as a dim echo of the front,
+  // not a chartreuse cast where it blends with the orange/cyan front lines + bloom.
+  const backStroke = useMemo(() => `#${color.clone().multiplyScalar(0.16).getHexString()}`, [color]);
 
   // Shell/inner BASE colour (hover/select + the boolean `dimmed`). The eased
   // legend dim multiplies ON TOP of these every frame in useFrame — colour only.
@@ -218,17 +254,24 @@ function RadarGlobe({
     [outerGeo, innerGeo, gemGeo, nodeGeo],
   );
 
-  const sim = useRef({ scale: 0.0001, glow: 0.5, dim: 0, colorDim: 0, pos: { ...node.position } });
+  // `live` is the eased liveness factor (0 idle .. 1 working) — the brightness
+  // channel. `glow` is the damped emissive target; `colorDim` the legend filter.
+  const sim = useRef({ scale: 0.0001, glow: 0.5, live: working ? 1 : 0, dim: 0, colorDim: 0, pos: { ...node.position } });
 
   useFrame((state, dtRaw) => {
     const dt = Math.min(dtRaw, 0.05);
     const t = state.clock.elapsedTime;
     const s = sim.current;
 
-    // breathing: working = a faint quick shimmer; idle = a slow, deeper breath.
-    const breatheAmp = working ? 0.02 : 0.045;
-    const breatheRate = working ? 1.6 : 0.5;
-    const breathe = 1 + Math.sin(t * breatheRate + seed * 6.28) * breatheAmp;
+    // The slow, smooth "alive" pulse — a calm ~4.2s sine (deliberately NOT snappy)
+    // that only a working globe rides. It drives a SYNCED scale + halo + glow swell
+    // below, so a running agent reads as softly breathing light — the wow that makes
+    // "this is working" unmistakable. Per-globe `seed` phases it so the forest breathes
+    // organically rather than strobing in lockstep.
+    const PULSE_RATE = 1.5; // rad/s → ~4.2s period
+    const pulseWave = Math.sin(t * PULSE_RATE + seed * 6.28); // -1..1 (gated by liveK below)
+    // idle keeps a slow, deep ambient breath; working swaps to the synced pulse.
+    const idleBreath = Math.sin(t * 0.5 + seed * 6.28) * 0.045;
     const boost = selected ? 0.22 : hovered ? 0.07 : 0;
 
     // lifecycle scale (0..1) is the spawn-in / implode-out factor from the pure
@@ -236,19 +279,26 @@ function RadarGlobe({
     // A missing entry means full scale (a fresh, not-yet-reconciled node) EXCEPT
     // for an already-closed agent: it is dead, so an absent entry (e.g. just pruned
     // as `gone`) reads 0, never a one-frame full-scale flash before it unmounts.
-    const lifecycleScale = lifecycleRef.current[node.id]?.scale ?? (agent.status === 'closed' ? 0 : 1);
+    const lifecycleEntry = lifecycleRef.current[node.id];
+    const lifecycleScale = lifecycleEntry?.scale ?? (agent.status === 'closed' || agent.status === 'terminated' ? 0 : 1);
     const targetScale = node.radius * (1 + boost) * Math.max(0, lifecycleScale);
-    // Liveness is the DOMINANT brightness signal: a running agent (root OR subagent)
-    // blazes; an idle one falls back to a dim ember. Fill only modulates within that.
+    // BRIGHTNESS = LIVENESS. `live` eases toward 1 while working, 0 while idle, and
+    // drives the whole blaze (emissive, halo, white-hot core, lattice brightness).
+    // `glow` is the damped emissive target from radarGlowTarget (also liveness-led).
+    // Neither reads fill — context is the SIZE channel only (targetScale above).
+    const targetLive = working ? 1 : 0;
     const targetGlow = radarGlowTarget({ agent, isRoot, emphasis, selected, hovered });
     const targetDim = dimmed ? 1 : 0;
-    const idleColorDim = working ? 0 : 0.45; // idle also DESATURATES toward a cool ember
-    const targetColorDim = Math.max(targetDim, Math.min(1, Math.max(0, dimTarget)), idleColorDim);
+    // colourDim = the legend filter OR the boolean other-selected dim, whichever is
+    // stronger. Idle dullness is NOT folded in here (it lives in `live`), so the two
+    // signals stay cleanly separable.
+    const targetColorDim = Math.max(targetDim, Math.min(1, Math.max(0, dimTarget)));
 
     // spawn eases in fast; implode collapses fast — both damped (never snap).
-    const scaleLambda = lifecycleScale < 0.999 ? 10 : 6;
+    const scaleLambda = lifecycleEntry?.phase === 'imploding' ? 18 : lifecycleScale < 0.999 ? 10 : 6;
     s.scale = damp(s.scale, targetScale, scaleLambda, dt);
     s.glow = damp(s.glow, targetGlow, 5, dt);
+    s.live = damp(s.live, targetLive, 3.5, dt);
     s.dim = damp(s.dim, targetDim, 6, dt);
     s.colorDim = damp(s.colorDim, targetColorDim, DIM_LAMBDA, dt);
     // damp the node toward its layout position so re-layouts glide, not jump.
@@ -256,41 +306,64 @@ function RadarGlobe({
     s.pos.y = damp(s.pos.y, node.position.y, 4, dt);
     s.pos.z = damp(s.pos.z, node.position.z, 4, dt);
 
+    const liveK = s.live; // 0 idle .. 1 working — the brightness channel
+    const pulse = liveK * pulseWave; // gated by liveness: 0 when idle, ±liveK when working
+
+    // scale: the idle ambient breath fades out as the globe wakes; working rides a
+    // gentle synced swell of the slow pulse instead (smooth, ~±4.5%).
+    const breathe = 1 + idleBreath * (1 - liveK) + pulse * 0.045;
     group.current.scale.setScalar(s.scale * breathe);
     group.current.position.set(s.pos.x, s.pos.y + Math.sin(t * 0.6 + seed * 6.28) * 0.05, s.pos.z);
     group.current.rotation.y += dt * (isRoot ? 0.08 : 0.14);
-    halo.current.scale.setScalar((isRoot ? 0.74 : 0.58) * (working ? 1.85 + Math.sin(t * 4.8 + seed * 6.28) * 0.1 : 1));
+
+    // halo: comes alive with liveness, then breathes IN and OUT on the slow pulse —
+    // the soft aura swelling and receding is the most visible "this is working" tell.
+    halo.current.scale.setScalar((isRoot ? 0.74 : 0.58) * (1 + liveK * 0.95 + pulse * 0.45));
 
     innerCage.current.rotation.y -= dt * 0.18;
     innerCage.current.rotation.x += dt * 0.1;
     gem.current.rotation.y += dt * 0.28;
     gem.current.rotation.x += dt * 0.12;
 
-    // dimK (opacity/intensity) stays bound to the boolean-dim track only — the
-    // legend colour-dim must NOT change opacity, so it is deliberately excluded.
+    // ── brightness = liveness ───────────────────────────────────────────────
+    // dimK: boolean other-selected opacity track. litK: the legend filter ALSO
+    // crushes opacity/emissive (not just colour) so a filtered-out globe sinks below
+    // the bloom threshold → near-dark, while a match keeps its full halo + blooms.
     const dimK = 1 - s.dim * 0.6;
-    gemMat.current.emissiveIntensity = (0.75 + s.glow * (working ? 1.35 : 0.9)) * dimK;
-    haloMat.current.opacity = Math.min(1, (0.16 + s.glow * 0.34) * (working ? 1.25 : 1) * dimK);
-    nodeMat.current.opacity = Math.min(1, (0.42 + s.glow * 0.34) * (working ? 1.18 : 1) * dimK);
+    const litK = 1 - s.colorDim * 0.86;
+    // the SAME slow pulse swells the emissive + halo + nodes together, so the whole
+    // globe brightens and dims as one calm breath of light (working only — `pulse` is
+    // 0 when idle, so idle globes hold perfectly steady and the contrast is obvious).
+    const pulseGlow = 1 + pulse * 0.3;
+    gemMat.current.emissiveIntensity = (0.3 + s.glow * 1.05) * dimK * litK * pulseGlow;
+    haloMat.current.opacity = Math.min(1, (0.05 + s.glow * 0.34) * dimK * litK * (1 + pulse * 0.45));
+    nodeMat.current.opacity = Math.min(1, (0.16 + s.glow * 0.32) * dimK * litK * pulseGlow);
 
-    // ── eased legend dim, COLOUR ONLY ───────────────────────────────────────
-    // Copy each material's base colour, scale by the eased dim, write it back
-    // (copy-then-scale so the dim never compounds frame to frame).
-    const shellScaleC = dimScale(s.colorDim, 0.2);
-    const innerScaleC = dimScale(s.colorDim, 0.24);
+    // ── colour: hue dulls when idle, blazes white-hot when working ───────────
+    // Copy each material's base colour, fold in liveness (idle = a dim hue, working
+    // = brighter + lerped toward white-hot), then scale by the eased legend dim — its
+    // floor is low so a filtered-out globe goes dark. Copy-first so nothing compounds.
+    const shellScaleC = dimScale(s.colorDim, 0.08);
+    const innerScaleC = dimScale(s.colorDim, 0.1);
+    const shellLit = 0.32 + liveK * 0.68; // idle lattices dim, working full
+    const colorQuiet = radarLivenessColorScale(liveK);
+    const whiteHot = liveK * 0.5 + pulse * 0.12; // working core, whitening a touch on each pulse peak
     if (!shellMat.current) shellMat.current = findWireframeMaterial(shellGroup.current);
     if (!cageMat.current) cageMat.current = findWireframeMaterial(innerGroup.current);
     if (shellMat.current) {
-      shellMat.current.uniforms.stroke.value.copy(shellBase).multiplyScalar(shellScaleC);
+      shellMat.current.uniforms.stroke.value
+        .copy(shellBase)
+        .lerp(WHITE, whiteHot * 0.4)
+        .multiplyScalar(shellScaleC * shellLit);
     }
     if (cageMat.current) {
       const u = cageMat.current.uniforms;
-      u.stroke.value.copy(innerBase).multiplyScalar(innerScaleC);
-      u.fill.value.copy(shellBase).multiplyScalar(shellScaleC); // fill reuses shell colour
+      u.stroke.value.copy(innerBase).lerp(WHITE, whiteHot * 0.4).multiplyScalar(innerScaleC * shellLit);
+      u.fill.value.copy(shellBase).lerp(WHITE, whiteHot * 0.4).multiplyScalar(shellScaleC * shellLit);
     }
-    nodeMat.current.color.copy(nodeColor).multiplyScalar(shellScaleC);
-    haloMat.current.color.copy(color).multiplyScalar(shellScaleC);
-    gemMat.current.emissive.copy(color).multiplyScalar(shellScaleC);
+    nodeMat.current.color.copy(nodeColor).lerp(WHITE, whiteHot).multiplyScalar(shellScaleC * colorQuiet);
+    haloMat.current.color.copy(color).lerp(WHITE, whiteHot).multiplyScalar(shellScaleC * colorQuiet);
+    gemMat.current.emissive.copy(color).lerp(WHITE, whiteHot).multiplyScalar(shellScaleC * colorQuiet);
   });
 
   return (
@@ -327,8 +400,13 @@ function RadarGlobe({
           thickness={isRoot ? 0.02 : 0.016}
           dash={!isRoot}
           dashRepeats={isRoot ? 1 : 4}
+          // drei's Wireframe defaults `fill` to PURE GREEN (#00ff00); even at
+          // fillOpacity 0 it bleeds through the triangle faces and tints every
+          // lattice (orange+green → the chartreuse cast on Claude globes). Point it
+          // at the globe's own hue so the face-fill can never reintroduce green.
+          fill={shellStroke}
           fillOpacity={0}
-          backfaceStroke="#06150d"
+          backfaceStroke={backStroke}
         />
       </group>
 
@@ -388,7 +466,7 @@ function RadarGlobe({
           orbiting subagent moons, so it wears the same gyro cradle + brand heart as
           its Habits hub. Subagents stay bare lattices. Heat-coloured to match. */}
       {isRoot && (
-        <AgentCore harness={agent.harness} color={color} dimmed={dimmed} active={working || selected || hovered} />
+        <AgentCore harness={agent.harness} color={color} dimmed={dimmed} active={working || selected || hovered} working={working} />
       )}
     </group>
   );
@@ -399,7 +477,15 @@ function RadarGlobe({
 // brightness is multiplied every frame by min(parentScale, childScale) read live
 // from the SAME lifecycle map the globes use, so a link to an imploding/gone globe
 // fades out in lockstep with it (no dangling full-brightness glow to an empty point).
-function RadarLinks({ layout, lifecycleRef }: { layout: OrbLayout; lifecycleRef: MutableRefObject<LifecycleMap> }) {
+function RadarLinks({
+  layout,
+  lifecycleRef,
+  goneIdsRef,
+}: {
+  layout: OrbLayout;
+  lifecycleRef: MutableRefObject<LifecycleMap>;
+  goneIdsRef: MutableRefObject<Set<string>>;
+}) {
   const byId = useMemo(() => new Map(layout.nodes.map((n) => [n.id, n])), [layout]);
   const links = useMemo(() => layout.links.filter((l) => byId.has(l.source) && byId.has(l.target)), [layout, byId]);
 
@@ -498,7 +584,10 @@ function RadarLinks({ layout, lifecycleRef }: { layout: OrbLayout; lifecycleRef:
 
       // fade a link out in lockstep with whichever endpoint globe is shrinking
       // (imploding/gone). Live link (both endpoints alive) → factor 1 → unchanged.
-      const factor = Math.min(lc[m.sourceId]?.scale ?? 1, lc[m.targetId]?.scale ?? 1);
+      const factor = radarLinkFadeFactor(
+        { entry: lc[m.sourceId], gone: goneIdsRef.current.has(m.sourceId) },
+        { entry: lc[m.targetId], gone: goneIdsRef.current.has(m.targetId) },
+      );
       const l = i * stride;
       for (let k = 0; k < stride; k++) lineArr[l + k] = baseLine[l + k] * factor;
       const d = i * 3;
@@ -548,6 +637,12 @@ export type RadarConstellationProps = {
   onSelect: (node: LayoutNode) => void;
   onClear: () => void;
 };
+
+export function radarModelWithoutGone(model: RadarSceneModel, goneIds: ReadonlySet<string>): RadarSceneModel {
+  if (goneIds.size === 0) return model;
+  const agents = model.agents.filter((a) => !goneIds.has(a.id));
+  return agents.length === model.agents.length ? model : { ...model, agents };
+}
 
 // Steps the PURE lifecycle reconciler once per frame into a ref the globes read
 // live (no re-render on tween). Must live inside the Canvas to get useFrame's dt.
@@ -669,8 +764,6 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
   // colour-only dim itself is computed by the shared pure `emphasis.targetDim`.
   const radarFilter: EmphasisFilter = emphasisFilter?.kind === 'harness' ? emphasisFilter : null;
 
-  const layout = useMemo(() => layoutRadarScene(model), [model]);
-
   // Persistent lifecycle map (frame-stepped) + a cache of the last layout node per
   // id, so an imploding agent keeps rendering at its last position until it has
   // fully collapsed-into-self (spec §8 — removals never just pop out).
@@ -682,6 +775,8 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
   const goneIdsRef = useRef<Set<string>>(new Set());
   const [renderTick, setRenderTick] = useState(0);
   const nodeCache = useRef<Map<string, LayoutNode>>(new Map());
+  const layoutModel = useMemo(() => radarModelWithoutGone(model, goneIdsRef.current), [model, renderTick]);
+  const layout = useMemo(() => layoutRadarScene(layoutModel), [layoutModel]);
   // Intentional mid-render write: append-only + idempotent. We record each live
   // node's latest layout so an imploding node keeps its last position after it
   // leaves `model.agents`. Writing the same id twice with the current layout is a
@@ -736,7 +831,7 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
       {/* The whole forest folds as one on a tab swap (Transition.tsx). */}
       <FoldGroup scaleRef={sref}>
         <group onPointerMissed={onClear}>
-          <RadarLinks layout={layout} lifecycleRef={lifecycleRef} />
+          <RadarLinks layout={layout} lifecycleRef={lifecycleRef} goneIdsRef={goneIdsRef} />
           {renderNodes.map((node) => (
             <RadarGlobe
               key={node.id}
@@ -789,13 +884,13 @@ export function RadarSceneBody(props: RadarConstellationProps) {
       <color attach="background" args={[BG]} />
       <fogExp2 attach="fog" args={[BG, 0.014]} />
 
-      <ambientLight intensity={0.1} />
-      <directionalLight position={[5, 6, 4]} intensity={2.2} color="#e6fff0" />
-      <directionalLight position={[-6, -1, -2]} intensity={0.7} color="#9fd0ff" />
+      <ambientLight intensity={0.085} />
+      <directionalLight position={[5, 6, 4]} intensity={2.1} color="#fff3e9" />
+      <directionalLight position={[-6, -1, -2]} intensity={0.65} color="#bfe2ff" />
       <Environment resolution={128}>
-        {/* warm + cool formers so both Claude-orange and Codex-violet gems glint */}
-        <Lightformer form="rect" intensity={1.8} color="#ffd9b8" position={[-5, 3, -3]} scale={[7, 7, 1]} />
-        <Lightformer form="rect" intensity={1.3} color="#cab8ff" position={[5, 1, -4]} scale={[6, 6, 1]} />
+        {/* warm + cool formers so Claude tangerine + Codex cyan gems both glint */}
+        <Lightformer form="rect" intensity={1.7} color="#ffcaa0" position={[-5, 3, -3]} scale={[7, 7, 1]} />
+        <Lightformer form="rect" intensity={1.4} color="#bfeaff" position={[5, 1, -4]} scale={[6, 6, 1]} />
         <Lightformer form="ring" intensity={1.2} color="#ffffff" position={[2, 4, 2]} scale={[2, 2, 1]} />
       </Environment>
 
@@ -805,8 +900,8 @@ export function RadarSceneBody(props: RadarConstellationProps) {
       <RadarForest {...props} />
 
       <EffectComposer multisampling={4}>
-        <Bloom intensity={1.05} luminanceThreshold={0.22} luminanceSmoothing={0.95} mipmapBlur radius={0.78} />
-        <Vignette eskil={false} offset={0.2} darkness={0.92} />
+        <Bloom intensity={1.3} luminanceThreshold={0.22} luminanceSmoothing={0.9} mipmapBlur radius={0.85} />
+        <Vignette eskil={false} offset={0.22} darkness={0.95} />
       </EffectComposer>
     </>
   );

@@ -27,6 +27,13 @@ export function cameraTargetForOverview(): CameraTarget {
   };
 }
 
+export function cameraTargetForOrbitOverview(): CameraTarget {
+  return {
+    position: { x: 0, y: 1, z: 12.6 },
+    lookAt: { x: 0, y: 0, z: 0 },
+  };
+}
+
 /**
  * RADAR overview pose. The live agent forest spreads wider than a single Habits
  * cluster (multiple root planets on a ring, each with orbiting moons), so the

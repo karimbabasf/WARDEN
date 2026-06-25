@@ -275,16 +275,28 @@ describe('bridge reducer', () => {
     bridge.ingest('warden_dismiss', {});
     expect(snapshot(bridge).summoned).toBe(false);
   });
+
+  it('clears the minimized pause when the overlay is summoned again', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('warden_hotkey', {});
+    bridge.ingest('warden_minimized', {});
+
+    bridge.ingest('warden_hotkey', {});
+
+    const s = snapshot(bridge);
+    expect(s.summoned).toBe(true);
+    expect(s.minimized).toBe(false);
+  });
 });
 
 describe('harnessTheme', () => {
-  it('maps codex to its electric blue mark', () => {
-    expect(harnessTheme('codex').color).toBe('#2e8bff');
+  it('maps codex to its cyan-ice mark', () => {
+    expect(harnessTheme('codex').color).toBe('#4fc9ff');
     expect(harnessTheme('codex').glyph).toBe('▣');
   });
 
-  it('maps claude_code to its vivid-orange brand colour', () => {
-    expect(harnessTheme('claude_code').color).toBe('#ff7a18');
+  it('maps claude_code to its tangy-tangerine brand colour', () => {
+    expect(harnessTheme('claude_code').color).toBe('#ff8636');
   });
 
   it('falls back to a neutral theme for unknown harnesses', () => {

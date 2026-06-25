@@ -39,6 +39,22 @@ export type RadarComposition = {
   estimated: RadarEstComposition | null;
 };
 
+export type RadarContextRow = {
+  key: string;
+  label: string;
+  tokens: number;
+  percent: number;
+  count: number | null;
+  muted?: boolean;
+};
+
+export type RadarContextBreakdown = {
+  usedTokens: number;
+  maxTokens: number;
+  fillPct: number;
+  rows: RadarContextRow[];
+};
+
 /** One node in the forest — a root agent or a (sub-)subagent. */
 export type RadarAgent = {
   id: string;
@@ -55,6 +71,7 @@ export type RadarAgent = {
   contextTokens: number; // exact live occupancy
   maxTokens: number; // model window (0 if unknown)
   fillPct: number; // contextTokens/maxTokens clamped [0,1]; 0 if maxTokens==0
+  contextBreakdown?: RadarContextBreakdown;
   composition: RadarComposition;
   recentActivity: RadarActivity[];
   childCount: number;
@@ -150,6 +167,31 @@ function normalizeActivity(v: any): RadarActivity {
   };
 }
 
+function normalizeContextRow(v: any): RadarContextRow | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const key = str(v.key);
+  const label = str(v.label);
+  if (!key || !label) return null;
+  const rawCount = v.count;
+  return {
+    key,
+    label,
+    tokens: Math.max(0, num(v.tokens)),
+    percent: clamp01(num(v.percent)),
+    count: typeof rawCount === 'number' && Number.isFinite(rawCount) ? Math.max(0, Math.round(rawCount)) : null,
+    muted: v.muted === true,
+  };
+}
+
+function normalizeContextBreakdown(v: any): RadarContextBreakdown {
+  return {
+    usedTokens: Math.max(0, num(v?.usedTokens ?? v?.used_tokens)),
+    maxTokens: Math.max(0, num(v?.maxTokens ?? v?.max_tokens)),
+    fillPct: clamp01(num(v?.fillPct ?? v?.fill_pct)),
+    rows: arr(v?.rows).map(normalizeContextRow).filter((row): row is RadarContextRow => row !== null),
+  };
+}
+
 function normalizeAgent(a: any): RadarAgent {
   const comp = a?.composition;
   return {
@@ -167,6 +209,7 @@ function normalizeAgent(a: any): RadarAgent {
     contextTokens: num(a?.contextTokens ?? a?.context_tokens),
     maxTokens: num(a?.maxTokens ?? a?.max_tokens),
     fillPct: clamp01(num(a?.fillPct ?? a?.fill_pct)),
+    contextBreakdown: normalizeContextBreakdown(a?.contextBreakdown ?? a?.context_breakdown),
     composition: {
       exact: normalizeExact(comp?.exact),
       estimated: normalizeEstimated(comp?.estimated),

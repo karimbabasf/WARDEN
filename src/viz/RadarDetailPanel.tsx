@@ -3,22 +3,18 @@
 // Mounted by WarRoom as a right-dock glass panel (the `wd-detail` / `wd-inspector`
 // look from the Habits inspector, NOT forked from it), opened when a radar globe is
 // selected and the camera has dived in. Four honest sections:
-//   1. Context gauge + composition  (Task 19)
+//   1. Live context window          (Task 19)
 //   2. Live activity feed           (Task 20)
 //   3. Children roster              (Task 21)
 //   4. Identity + cost              (Task 21)
 //
-// HONEST COMPOSITION is the load-bearing rule: the EXACT lens (cache-stable / fresh
-// / output — anchored in the transcript's token accounting) is ALWAYS shown; the
-// SEMANTIC lens (Preamble · Conversation · Tool-output · Thinking) is a local
-// ESTIMATE, shown ONLY when `composition.estimated` is present and ALWAYS labeled
-// "est."; when it is null the panel prints "—" and renders no semantic bar. An
-// estimate is never dressed up as exact, and a missing one is never fabricated.
+// The context window is a static readout fed by live `radar_state`; rows come from
+// the backend when available, and fall back to honest occupancy/free-space rows.
 
 import type { CSSProperties } from 'react';
-import type { RadarAgent } from './radarTypes';
+import type { RadarAgent, RadarContextRow } from './radarTypes';
 import { radarSubtitle } from './radarTypes';
-import { radarHarness, heatColor } from './radarTheme';
+import { radarHarness } from './radarTheme';
 
 // ── small pure formatters ──────────────────────────────────────────────────────
 function pct(fill: number): string {
@@ -28,8 +24,14 @@ function pct(fill: number): string {
 /** Compact token magnitude: 172000 → "172k", 940 → "940". */
 function tokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`;
   return String(Math.round(n));
+}
+
+function rowPct(p: number): string {
+  if (!Number.isFinite(p)) return '0.0%';
+  return `${(Math.max(0, Math.min(1, p)) * 100).toFixed(1)}%`;
 }
 
 const STATUS_LABEL: Record<RadarAgent['status'], string> = {
@@ -89,106 +91,87 @@ function activityKind(kind: string): { glyph: string; label: string } {
   return ACTIVITY_KIND[kind] ?? { glyph: '•', label: kind || 'Event' };
 }
 
-// ── one stacked composition bar ────────────────────────────────────────────────
-type Segment = { key: string; label: string; value: number; color: string };
+function fallbackContextRows(agent: RadarAgent): RadarContextRow[] {
+  const max = Math.max(0, agent.maxTokens);
+  const used = Math.max(0, agent.contextTokens);
+  const usedPct = max > 0 ? Math.min(1, used / max) : 0;
+  const rows: RadarContextRow[] = [
+    {
+      key: 'context',
+      label: 'Context',
+      tokens: used,
+      percent: usedPct,
+      count: null,
+      muted: false,
+    },
+  ];
+  if (max > 0) {
+    rows.push({
+      key: 'free_space',
+      label: 'Free space',
+      tokens: Math.max(0, max - used),
+      percent: Math.max(0, 1 - usedPct),
+      count: null,
+      muted: true,
+    });
+  }
+  return rows;
+}
 
-/**
- * A horizontal stacked bar whose segment widths are proportional to token counts.
- * Each segment carries `data-{attr}-seg="key"` so the honest contract is testable
- * and so screen-readers get a per-segment title (colour is never the only signal).
- */
-function CompositionBar({ segments, segAttr }: { segments: Segment[]; segAttr: string }) {
-  const total = segments.reduce((s, x) => s + Math.max(0, x.value), 0);
+function contextRows(agent: RadarAgent): RadarContextRow[] {
+  const rows = activeBreakdown(agent)?.rows ?? [];
+  return rows.length > 0 ? rows : fallbackContextRows(agent);
+}
+
+function activeBreakdown(agent: RadarAgent) {
+  const breakdown = agent.contextBreakdown;
+  return breakdown && breakdown.rows.length > 0 ? breakdown : null;
+}
+
+// ── Section 1: screenshot-style context window (live, static readout) ─────────
+function ContextSection({ agent }: { agent: RadarAgent }) {
+  // Flat harness hue — the gauge's fill is shown by the BAR WIDTH below, not by
+  // tinting the colour (colour no longer encodes load anywhere in the radar).
+  const heat = radarHarness(agent.harness).color;
+  const breakdown = activeBreakdown(agent);
+  const used = breakdown?.usedTokens ?? agent.contextTokens;
+  const max = breakdown?.maxTokens ?? agent.maxTokens;
+  const fill = breakdown?.fillPct ?? agent.fillPct;
+  const rows = contextRows(agent);
+
   return (
-    <>
-      <div className="wd-radar-bar" role="img">
-        {segments.map((seg) => {
-          const frac = total > 0 ? Math.max(0, seg.value) / total : 0;
-          return (
-            <span
-              key={seg.key}
-              className="wd-radar-bar-seg"
-              data-seg={seg.key}
-              {...{ [`data-${segAttr}-seg`]: seg.key }}
-              title={`${seg.label}: ${tokens(seg.value)} (${Math.round(frac * 100)}%)`}
-              style={{ width: `${frac * 100}%`, '--seg': seg.color } as CSSProperties}
-            />
-          );
-        })}
+    <section className="wd-radar-section wd-context-window" data-context-window style={{ '--heat': heat } as CSSProperties}>
+      <div className="wd-context-head">
+        <span className="wd-context-head-label">Context window</span>
+        <span className="wd-context-head-value">
+          {tokens(used)} / {max > 0 ? tokens(max) : '∞'} ({pct(fill)})
+        </span>
+        <span className="wd-context-head-caret" aria-hidden>
+          ˅
+        </span>
       </div>
-      <ul className="wd-radar-legend">
-        {segments.map((seg) => (
-          <li key={seg.key}>
-            <span className="wd-radar-legend-dot" style={{ '--seg': seg.color } as CSSProperties} aria-hidden />
-            <span className="wd-radar-legend-label">{seg.label}</span>
-            <span className="wd-radar-legend-val">{tokens(seg.value)}</span>
+      <div className="wd-context-track" aria-hidden>
+        <div className="wd-context-fill" style={{ width: `${Math.round(fill * 100)}%` }} />
+      </div>
+      <ul className="wd-context-rows">
+        {rows.map((row) => (
+          <li
+            key={row.key}
+            className={`wd-context-row${row.muted ? ' is-muted' : ''}`}
+            data-context-row={row.key}
+            style={{ '--row-fill': row.muted ? 'var(--ink-faint)' : heat } as CSSProperties}
+          >
+            <span className="wd-context-dot" aria-hidden />
+            <span className="wd-context-label">{row.label}</span>
+            <span className="wd-context-tokens">{tokens(row.tokens)}</span>
+            <span className="wd-context-percent">{rowPct(row.percent)}</span>
+            {row.count == null ? null : <span className="wd-context-count">{row.count}</span>}
           </li>
         ))}
       </ul>
-    </>
-  );
-}
-
-// ── Section 1: context gauge + composition (Task 19) ───────────────────────────
-function ContextSection({ agent }: { agent: RadarAgent }) {
-  const base = radarHarness(agent.harness).color;
-  // gauge fill matches the globe: harness hue heated by fill (one honest signal).
-  const heat = heatColor(base, agent.fillPct);
-  const exact = agent.composition.exact;
-  const est = agent.composition.estimated;
-
-  const exactSegments: Segment[] = [
-    { key: 'cacheRead', label: 'Cache-stable', value: exact.cacheRead, color: '#3a7d63' },
-    { key: 'fresh', label: 'Fresh', value: exact.fresh, color: base },
-    { key: 'output', label: 'Output', value: exact.output, color: '#ffd166' },
-  ];
-
-  const estSegments: Segment[] | null = est
-    ? [
-        { key: 'preamble', label: 'Preamble', value: est.preamble, color: '#5f8a6f' },
-        { key: 'conversation', label: 'Conversation', value: est.conversation, color: base },
-        { key: 'toolOutput', label: 'Tool-output', value: est.toolOutput, color: '#7bd3ff' },
-        { key: 'thinking', label: 'Thinking', value: est.thinking, color: '#b98cff' },
-      ]
-    : null;
-
-  return (
-    <section className="wd-radar-section wd-radar-context">
-      {/* heat-matched gauge: contextTokens / maxTokens, fill % */}
-      <div className="wd-radar-gauge" style={{ '--heat': heat } as CSSProperties}>
-        <div className="wd-radar-gauge-track">
-          <div className="wd-radar-gauge-fill" style={{ width: `${Math.round(agent.fillPct * 100)}%` }} />
-        </div>
-        <div className="wd-radar-gauge-meta">
-          <span className="wd-radar-gauge-pct">{pct(agent.fillPct)}</span>
-          <span className="wd-radar-gauge-abs">
-            {tokens(agent.contextTokens)} / {agent.maxTokens > 0 ? tokens(agent.maxTokens) : '∞'}
-          </span>
-        </div>
-      </div>
-
-      {/* EXACT lens — always shown (API-anchored) */}
-      <div className="wd-radar-comp" data-composition="exact">
-        <div className="wd-radar-comp-head">
-          <span className="wd-card-kicker">Exact</span>
-          <span className="wd-radar-comp-note">API-anchored</span>
-        </div>
-        <CompositionBar segments={exactSegments} segAttr="exact" />
-      </div>
-
-      {/* SEMANTIC lens — estimate, shown only when present, always labeled "est." */}
-      <div className="wd-radar-comp" data-composition="estimated">
-        <div className="wd-radar-comp-head">
-          <span className="wd-card-kicker">Semantic</span>
-          <span className="wd-radar-comp-note wd-radar-est">est.</span>
-        </div>
-        {estSegments ? (
-          <CompositionBar segments={estSegments} segAttr="est" />
-        ) : (
-          <div className="wd-radar-empty" aria-label="No estimate available">
-            —
-          </div>
-        )}
+      <div className="wd-context-source">
+        <span>Live</span>
+        <span>{radarHarness(agent.harness).label}</span>
       </div>
     </section>
   );
@@ -328,14 +311,15 @@ export type RadarDetailPanelProps = {
 
 export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: RadarDetailPanelProps) {
   const theme = radarHarness(agent.harness);
-  const heat = heatColor(theme.color, agent.fillPct);
   const title = agent.label || agent.nickname || agent.id;
   const subtitle = radarSubtitle(agent);
 
+  // Accent is the flat harness hue — colour no longer encodes fill (that's the
+  // globe's SIZE channel). CSS resolves `--heat` → `--harness` via its fallback.
   return (
     <aside
       className="wd-detail wd-radar-detail"
-      style={{ '--harness': theme.color, '--heat': heat } as CSSProperties}
+      style={{ '--harness': theme.color } as CSSProperties}
       aria-label={`Agent ${title}`}
     >
       <div className="wd-detail-head">

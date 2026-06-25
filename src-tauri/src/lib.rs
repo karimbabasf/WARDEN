@@ -39,9 +39,8 @@ use tauri::{ActivationPolicy, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 /// Reveal the persistent overlay window: show, focus, and signal the frontend to
-/// animate in. Native window chrome (titleBarStyle: Overlay) now owns sizing — the
-/// user fills the screen with the green traffic-light button or a title-bar
-/// double-click — so we show the window at its own size rather than force-maximizing.
+/// animate in. Native macOS chrome owns drag, zoom, and resize, so we show the
+/// window at its own size rather than force-maximizing.
 /// Idempotent — safe to call when already visible.
 fn summon_overlay(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("overlay") {
@@ -81,23 +80,7 @@ pub fn run() {
 
             let state = AppState::init().map_err(|e| format!("state init: {e}"))?;
 
-            // 2) Live FSEvents watchers (one per adapter root). Best-effort: a watch
-            //    failure logs and never aborts startup — backfill + on-ask ingest
-            //    still work. Watchers must outlive setup(), so park them in state.
-            let watch_registry =
-                std::sync::Arc::new(ingest::AdapterRegistry::new(state.store.clone()));
-            match scheduler::spawn_watchers(
-                watch_registry,
-                state.store.clone(),
-                app.handle().clone(),
-            ) {
-                Ok(watchers) => {
-                    app.manage(scheduler::WatcherGuard::new(watchers));
-                }
-                Err(e) => tracing::warn!(error=%format!("{e:#}"), "live watchers failed to start"),
-            }
-
-            // 2b) RADAR liveness watchers: the Claude `~/.claude/sessions` registry
+            // 2) RADAR liveness watchers: the Claude `~/.claude/sessions` registry
             //     (bloom/implode) + the Codex live/archived roots (archive-move =
             //     done). On any change the whole forest is recomputed and pushed as
             //     `radar_state`. Best-effort, same isolation as the ingest watchers.
@@ -114,6 +97,7 @@ pub fn run() {
                 util::default_claude_sessions_dir(),
                 radar_roots,
                 app.handle().clone(),
+                state.radar_state.clone(),
             ) {
                 Ok((watchers, worker, tick, signal)) => {
                     radar_signal = Some(signal.clone());
@@ -127,6 +111,25 @@ pub fn run() {
                 Err(e) => {
                     tracing::warn!(error=%format!("{e:#}"), "radar watchers failed to start")
                 }
+            }
+
+            // 2b) Live FSEvents watchers (one per adapter root). Best-effort: a watch
+            //     failure logs and never aborts startup — backfill + on-ask ingest
+            //     still work. A successful live ingest also kicks RADAR's dirty signal,
+            //     so the overlay updates from the ingested tail without waiting for a
+            //     second watcher event or the heartbeat tick.
+            let watch_registry =
+                std::sync::Arc::new(ingest::AdapterRegistry::new(state.store.clone()));
+            match scheduler::spawn_watchers(
+                watch_registry,
+                state.store.clone(),
+                app.handle().clone(),
+                radar_signal.clone(),
+            ) {
+                Ok(watchers) => {
+                    app.manage(scheduler::WatcherGuard::new(watchers));
+                }
+                Err(e) => tracing::warn!(error=%format!("{e:#}"), "live watchers failed to start"),
             }
 
             // 3) One-shot startup backfill so the HUD has data immediately. Runs off
@@ -286,8 +289,11 @@ pub fn run() {
             get_fix_preview,
             get_orb_fix_preview,
             resolve_evidence,
+            stage_artifact,
             apply_artifact,
             revert_artifact,
+            get_artifact,
+            list_artifacts,
             start_voice,
             stop_voice,
             capture_screen,

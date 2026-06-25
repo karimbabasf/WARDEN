@@ -37,6 +37,20 @@ function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
     contextTokens: 172_000,
     maxTokens: 200_000,
     fillPct: 0.86,
+    contextBreakdown: {
+      usedTokens: 172_000,
+      maxTokens: 200_000,
+      fillPct: 0.86,
+      rows: [
+        { key: 'messages', label: 'Messages', tokens: 118_000, percent: 0.59, count: null },
+        { key: 'skills', label: 'Skills', tokens: 18_000, percent: 0.09, count: null },
+        { key: 'mcp_tools', label: 'MCP tools', tokens: 11_000, percent: 0.055, count: 12 },
+        { key: 'memory_files', label: 'Memory files', tokens: 4_000, percent: 0.02, count: 3 },
+        { key: 'system_prompt', label: 'System prompt', tokens: 3_000, percent: 0.015, count: null },
+        { key: 'custom_agents', label: 'Custom agents', tokens: 2_000, percent: 0.01, count: 2 },
+        { key: 'free_space', label: 'Free space', tokens: 28_000, percent: 0.14, count: null, muted: true },
+      ],
+    },
     composition,
     recentActivity: [],
     childCount: 0,
@@ -64,47 +78,80 @@ afterEach(() => {
   container = null;
 });
 
-// ── Task 19: gauge + composition ──────────────────────────────────────────────
-describe('RadarDetailPanel — context gauge + composition', () => {
-  it('renders the gauge fill %, the exact bar, and the labeled estimated bar', () => {
+// ── Task 19: live context window ───────────────────────────────────────────────
+describe('RadarDetailPanel — live context window', () => {
+  it('renders a static live context-window breakdown with the screenshot-style header and rows', () => {
     const el = render(<RadarDetailPanel agent={agentFixture()} />);
-    const text = el.textContent ?? '';
-    expect(text).toContain('86%'); // gauge fill %
-
-    // exact bar (always): the three API-anchored segments are present + named.
-    expect(el.querySelector('[data-exact-seg="cacheRead"]')).toBeTruthy();
-    expect(el.querySelector('[data-exact-seg="fresh"]')).toBeTruthy();
-    expect(el.querySelector('[data-exact-seg="output"]')).toBeTruthy();
-
-    // semantic (estimated) bar: present, explicitly labeled "est.", four segments.
-    const sem = el.querySelector('[data-composition="estimated"]');
-    expect(sem).toBeTruthy();
-    expect((sem?.textContent ?? '').toLowerCase()).toContain('est.');
-    expect(el.querySelector('[data-est-seg="preamble"]')).toBeTruthy();
-    expect(el.querySelector('[data-est-seg="conversation"]')).toBeTruthy();
-    expect(el.querySelector('[data-est-seg="toolOutput"]')).toBeTruthy();
-    expect(el.querySelector('[data-est-seg="thinking"]')).toBeTruthy();
+    const section = el.querySelector('[data-context-window]');
+    expect(section).toBeTruthy();
+    expect((section?.textContent ?? '')).toContain('Context window');
+    expect((section?.textContent ?? '')).toContain('172k / 200k (86%)');
+    expect((section?.textContent ?? '')).toContain('Messages');
+    expect((section?.textContent ?? '')).toContain('118k');
+    expect((section?.textContent ?? '')).toContain('59.0%');
+    expect((section?.textContent ?? '')).toContain('MCP tools');
+    expect((section?.textContent ?? '')).toContain('12');
+    expect((section?.textContent ?? '')).toContain('Free space');
+    expect((section?.textContent ?? '')).toContain('28k');
+    expect(section?.querySelector('button, select, input')).toBeFalsy();
   });
 
-  it('omits the semantic bar (shows a dash) when estimated is null, but keeps the exact bar', () => {
+  it('updates the context-window numbers when the selected live agent payload changes', () => {
+    const first = agentFixture();
+    const second = agentFixture({
+      contextTokens: 66_000,
+      maxTokens: 100_000,
+      fillPct: 0.66,
+      contextBreakdown: {
+        usedTokens: 66_000,
+        maxTokens: 100_000,
+        fillPct: 0.66,
+        rows: [
+          { key: 'messages', label: 'Messages', tokens: 40_000, percent: 0.4, count: null },
+          { key: 'free_space', label: 'Free space', tokens: 34_000, percent: 0.34, count: null, muted: true },
+        ],
+      },
+    });
+
+    const el = render(<RadarDetailPanel agent={first} />);
+    expect((el.querySelector('[data-context-window]')?.textContent ?? '')).toContain('172k / 200k (86%)');
+
+    act(() => root!.render(<RadarDetailPanel agent={second} />));
+
+    const section = el.querySelector('[data-context-window]');
+    expect((section?.textContent ?? '')).toContain('66k / 100k (66%)');
+    expect((section?.textContent ?? '')).toContain('34k');
+    expect((section?.textContent ?? '')).not.toContain('172k / 200k');
+  });
+
+  it('falls back to occupancy and free-space rows when no breakdown is present', () => {
     const el = render(
       <RadarDetailPanel
-        agent={agentFixture({ composition: { exact: { cacheRead: 1, fresh: 2, output: 3 }, estimated: null } })}
+        agent={{
+          ...agentFixture({ fillPct: 0.25, contextTokens: 25_000, maxTokens: 100_000 }),
+          contextBreakdown: undefined,
+        }}
       />,
     );
-    // exact bar still shown.
-    expect(el.querySelector('[data-exact-seg="fresh"]')).toBeTruthy();
-    // no estimated segments fabricated; a dash placeholder stands in.
-    expect(el.querySelector('[data-est-seg="conversation"]')).toBeFalsy();
-    const sem = el.querySelector('[data-composition="estimated"]');
-    expect((sem?.textContent ?? '')).toContain('—');
+    const section = el.querySelector('[data-context-window]');
+    expect((section?.textContent ?? '')).toContain('25k / 100k (25%)');
+    expect((section?.textContent ?? '')).toContain('Context');
+    expect((section?.textContent ?? '')).toContain('Free space');
   });
 
-  it('matches the gauge fill to the agent percentage even at 0%', () => {
-    const el = render(<RadarDetailPanel agent={agentFixture({ fillPct: 0, contextTokens: 0 })} />);
-    expect((el.textContent ?? '')).toContain('0%');
-    // exact bar is always present regardless of fill.
-    expect(el.querySelector('[data-exact-seg="cacheRead"]')).toBeTruthy();
+  it('treats an empty normalized breakdown as absent for both header and rows', () => {
+    const el = render(
+      <RadarDetailPanel
+        agent={{
+          ...agentFixture({ fillPct: 0.94, contextTokens: 188_000, maxTokens: 200_000 }),
+          contextBreakdown: { usedTokens: 0, maxTokens: 0, fillPct: 0, rows: [] },
+        }}
+      />,
+    );
+    const section = el.querySelector('[data-context-window]');
+    expect((section?.textContent ?? '')).toContain('188k / 200k (94%)');
+    expect((section?.textContent ?? '')).toContain('Free space');
+    expect((section?.textContent ?? '')).not.toContain('0 / ∞');
   });
 });
 

@@ -12,6 +12,7 @@ import { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createBridge } from './bridge';
 import { WarRoom } from './WarRoom';
+import REAL_RADAR from './preview/realRadar.json';
 import './../style.css';
 
 // listen is unused here (we drive ingest directly) — pass a no-op.
@@ -56,6 +57,7 @@ function DevApp() {
         { harness: 'codex', sessions: 12, events: 411 },
       ],
     });
+    bridge.ingest('radar_scene_ready', REAL_RADAR);
   }, []);
 
   // forceIntro=false: skip the branded boot, go straight to the constellation.

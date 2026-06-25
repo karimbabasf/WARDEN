@@ -84,10 +84,7 @@ pub fn partition_claude(
             .and_then(|s| s.as_str())
             .unwrap_or_default()
             .to_string();
-        let model = v
-            .get("model")
-            .and_then(|s| s.as_str())
-            .map(str::to_string);
+        let model = v.get("model").and_then(|s| s.as_str()).map(str::to_string);
         let status = match v.get("status").and_then(|s| s.as_str()) {
             Some("busy") => AgentStatus::Working,
             Some(_) => AgentStatus::Idle,
@@ -170,35 +167,49 @@ pub fn status_from_last_event(
     now: DateTime<Utc>,
     stale_secs: u64,
 ) -> Option<AgentStatus> {
-    // The last real ACTION decides working vs idle. Skip bookkeeping/non-action events
-    // (TokenUsage/Thinking/SystemNotice/ModeChange/FileSnapshot) — a trailing TokenUsage
-    // accompanies every assistant message and would otherwise mask the true last action.
-    let last = events.iter().rev().find(|(_, e)| {
-        matches!(
-            e.event,
-            Event::UserPrompt { .. }
-                | Event::ToolCall { .. }
-                | Event::ToolResult { .. }
-                | Event::AssistantText { .. }
-        )
-    })?;
+    // The newest real ACTION decides working vs idle. Use timestamp/offset rather
+    // than Vec order: Claude incremental tail parses can reset turn indexes, and the
+    // store's `(turn.idx, ts)` ordering may put an older tool-result after a newer
+    // final assistant message.
+    let last = events
+        .iter()
+        .filter(|(_, e)| action_priority(&e.event).is_some())
+        .max_by(|(_, a), (_, b)| {
+            a.ts.cmp(&b.ts)
+                .then(a.raw_ref.offset.cmp(&b.raw_ref.offset))
+                .then(action_priority(&a.event).cmp(&action_priority(&b.event)))
+                .then(a.id.cmp(&b.id))
+        })?;
 
     // A completed assistant turn (text-only `end_turn`) is the ONLY idle tail; every
     // other action (operator prompt, tool in flight, tool just returned) is mid-step.
-    if matches!(last.1.event, Event::AssistantText { .. }) {
+    if matches!(last.1.event, Event::AssistantText { .. })
+        || matches!(&last.1.event, Event::UserPrompt { text, .. } if is_completed_task_notification(text))
+    {
         return Some(AgentStatus::Idle);
     }
 
     // Backstop: a Working tail older than the stale window is a wedged step → Idle.
-    let age_secs = now
-        .signed_duration_since(last.1.ts)
-        .num_seconds()
-        .max(0) as u64;
+    let age_secs = now.signed_duration_since(last.1.ts).num_seconds().max(0) as u64;
     Some(if age_secs > stale_secs {
         AgentStatus::Idle
     } else {
         AgentStatus::Working
     })
+}
+
+fn action_priority(event: &Event) -> Option<u8> {
+    match event {
+        Event::UserPrompt { .. } => Some(3),
+        Event::ToolCall { .. } => Some(3),
+        Event::ToolResult { .. } => Some(2),
+        Event::AssistantText { .. } => Some(1),
+        _ => None,
+    }
+}
+
+fn is_completed_task_notification(text: &str) -> bool {
+    text.contains("<task-notification>") && text.contains("<status>completed</status>")
 }
 
 /// Read every `<pid>.json` in the Claude liveness registry dir into `(pid, json)`
@@ -258,12 +269,15 @@ mod tests {
     #[test]
     fn partition_claude_classifies_working_idle_and_drops_dead() {
         let files = vec![
-            (100u32, json!({"sessionId":"s-working","cwd":"/a","pid":100})),
+            (
+                100u32,
+                json!({"sessionId":"s-working","cwd":"/a","pid":100}),
+            ),
             (200u32, json!({"sessionId":"s-idle","cwd":"/b","pid":200})),
             (300u32, json!({"sessionId":"s-dead","cwd":"/c","pid":300})),
         ];
         let is_alive = |pid: u32| pid != 300; // 300 is dead
-        // The injected fallback decides status when the registry has no `status` field.
+                                              // The injected fallback decides status when the registry has no `status` field.
         let fallback = |sid: &str| match sid {
             "s-working" => AgentStatus::Working,
             "s-idle" => AgentStatus::Idle,
@@ -303,9 +317,18 @@ mod tests {
     #[test]
     fn partition_claude_prefers_registry_status_over_mtime() {
         let files = vec![
-            (10u32, json!({"sessionId":"busy-stale","cwd":"/a","pid":10,"status":"busy"})),
-            (20u32, json!({"sessionId":"idle-fresh","cwd":"/b","pid":20,"status":"idle"})),
-            (30u32, json!({"sessionId":"nostatus-fresh","cwd":"/c","pid":30})),
+            (
+                10u32,
+                json!({"sessionId":"busy-stale","cwd":"/a","pid":10,"status":"busy"}),
+            ),
+            (
+                20u32,
+                json!({"sessionId":"idle-fresh","cwd":"/b","pid":20,"status":"idle"}),
+            ),
+            (
+                30u32,
+                json!({"sessionId":"nostatus-fresh","cwd":"/c","pid":30}),
+            ),
         ];
         let is_alive = |_pid: u32| true;
         // Fallback would call busy-stale/idle-fresh Working, but the registry `status`
@@ -443,16 +466,47 @@ mod tests {
 
         // (a) trailing completed AssistantText (end_turn) → idle (the agent finished).
         let done = vec![
-            ev(1, t(60), Event::UserPrompt { text: "go".into(), attachments: vec![], is_meta: false }),
-            ev(2, t(40), Event::AssistantText { text: "done".into() }),
+            ev(
+                1,
+                t(60),
+                Event::UserPrompt {
+                    text: "go".into(),
+                    attachments: vec![],
+                    is_meta: false,
+                },
+            ),
+            ev(
+                2,
+                t(40),
+                Event::AssistantText {
+                    text: "done".into(),
+                },
+            ),
         ];
-        assert_eq!(status_from_last_event(&done, now, stale), Some(AgentStatus::Idle));
+        assert_eq!(
+            status_from_last_event(&done, now, stale),
+            Some(AgentStatus::Idle)
+        );
 
         // (a2) the SAME completed tail but RECENT → STILL idle. A completed assistant turn
         // means the agent stopped and is waiting on the operator, regardless of how recent.
         let done_recent = vec![
-            ev(1, t(8), Event::UserPrompt { text: "go".into(), attachments: vec![], is_meta: false }),
-            ev(2, t(4), Event::AssistantText { text: "all done".into() }),
+            ev(
+                1,
+                t(8),
+                Event::UserPrompt {
+                    text: "go".into(),
+                    attachments: vec![],
+                    is_meta: false,
+                },
+            ),
+            ev(
+                2,
+                t(4),
+                Event::AssistantText {
+                    text: "all done".into(),
+                },
+            ),
         ];
         assert_eq!(
             status_from_last_event(&done_recent, now, stale),
@@ -463,63 +517,102 @@ mod tests {
         // (b) last event is a UserPrompt (asked, not yet answered) → working.
         let asked = vec![
             ev(1, t(6), Event::AssistantText { text: "hi".into() }),
-            ev(2, t(2), Event::UserPrompt { text: "now do X".into(), attachments: vec![], is_meta: false }),
+            ev(
+                2,
+                t(2),
+                Event::UserPrompt {
+                    text: "now do X".into(),
+                    attachments: vec![],
+                    is_meta: false,
+                },
+            ),
         ];
-        assert_eq!(status_from_last_event(&asked, now, stale), Some(AgentStatus::Working));
+        assert_eq!(
+            status_from_last_event(&asked, now, stale),
+            Some(AgentStatus::Working)
+        );
 
         // (c) a ToolCall with NO following ToolResult → working (tool in flight).
-        let in_flight = vec![
-            ev(1, t(3), Event::ToolCall {
+        let in_flight = vec![ev(
+            1,
+            t(3),
+            Event::ToolCall {
                 tool: "Bash".into(),
                 input: serde_json::json!({"command":"cargo build"}),
                 call_id: "c1".into(),
                 kind: ToolKind::Builtin,
-            }),
-        ];
-        assert_eq!(status_from_last_event(&in_flight, now, stale), Some(AgentStatus::Working));
+            },
+        )];
+        assert_eq!(
+            status_from_last_event(&in_flight, now, stale),
+            Some(AgentStatus::Working)
+        );
 
         // (d) a trailing ToolResult (a tool just returned; the agent is about to continue)
         // → working. Even an older one (50s) is mid-step — only the stale backstop (180s)
         // settles it. (The old recency rule wrongly called this idle.)
         let tool_returned = vec![
-            ev(1, t(55), Event::ToolCall {
-                tool: "Bash".into(),
-                input: serde_json::json!({"command":"cargo build"}),
-                call_id: "c1".into(),
-                kind: ToolKind::Builtin,
-            }),
-            ev(2, t(50), Event::ToolResult {
-                call_id: "c1".into(),
-                status: ToolStatus::Ok,
-                bytes: 10,
-                summary: None,
-            }),
+            ev(
+                1,
+                t(55),
+                Event::ToolCall {
+                    tool: "Bash".into(),
+                    input: serde_json::json!({"command":"cargo build"}),
+                    call_id: "c1".into(),
+                    kind: ToolKind::Builtin,
+                },
+            ),
+            ev(
+                2,
+                t(50),
+                Event::ToolResult {
+                    call_id: "c1".into(),
+                    status: ToolStatus::Ok,
+                    bytes: 10,
+                    summary: None,
+                },
+            ),
         ];
-        assert_eq!(status_from_last_event(&tool_returned, now, stale), Some(AgentStatus::Working));
+        assert_eq!(
+            status_from_last_event(&tool_returned, now, stale),
+            Some(AgentStatus::Working)
+        );
 
         // (d2) a bookkeeping TokenUsage trailing the action is SKIPPED — the ToolResult
         // still decides (without this skip every assistant message would mask its action).
         let tool_then_usage = vec![
-            ev(1, t(5), Event::ToolCall {
-                tool: "Read".into(),
-                input: serde_json::json!({"file_path":"/x.rs"}),
-                call_id: "c1".into(),
-                kind: ToolKind::Builtin,
-            }),
-            ev(2, t(3), Event::ToolResult {
-                call_id: "c1".into(),
-                status: ToolStatus::Ok,
-                bytes: 10,
-                summary: None,
-            }),
-            ev(3, t(3), Event::TokenUsage {
-                input: 5,
-                output: 9,
-                cache_creation: 0,
-                cache_read: 0,
-                model: "claude-opus-4-8".into(),
-                orchestration: None,
-            }),
+            ev(
+                1,
+                t(5),
+                Event::ToolCall {
+                    tool: "Read".into(),
+                    input: serde_json::json!({"file_path":"/x.rs"}),
+                    call_id: "c1".into(),
+                    kind: ToolKind::Builtin,
+                },
+            ),
+            ev(
+                2,
+                t(3),
+                Event::ToolResult {
+                    call_id: "c1".into(),
+                    status: ToolStatus::Ok,
+                    bytes: 10,
+                    summary: None,
+                },
+            ),
+            ev(
+                3,
+                t(3),
+                Event::TokenUsage {
+                    input: 5,
+                    output: 9,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    model: "claude-opus-4-8".into(),
+                    orchestration: None,
+                },
+            ),
         ];
         assert_eq!(
             status_from_last_event(&tool_then_usage, now, stale),
@@ -528,8 +621,87 @@ mod tests {
         );
 
         // (e) no usable action events → None (caller falls back to mtime).
-        let none = vec![ev(1, t(1), Event::SystemNotice { subtype: "x".into(), data: serde_json::json!({}) })];
+        let none = vec![ev(
+            1,
+            t(1),
+            Event::SystemNotice {
+                subtype: "x".into(),
+                data: serde_json::json!({}),
+            },
+        )];
         assert_eq!(status_from_last_event(&none, now, stale), None);
+    }
+
+    /// Claude incremental tail parses can carry reset/partial turn indexes, so store
+    /// order is not always chronological. A finished assistant message newer than an
+    /// older tool-result must settle the agent to idle even if the older result sorts
+    /// later in storage order.
+    #[test]
+    fn status_from_last_event_uses_newest_action_timestamp_not_storage_order() {
+        let now = Utc::now();
+        let older = now - chrono::Duration::seconds(20);
+        let newer = now - chrono::Duration::seconds(5);
+        let events = vec![
+            ev(
+                2,
+                newer,
+                Event::AssistantText {
+                    text: "all done".into(),
+                },
+            ),
+            ev(
+                3,
+                older,
+                Event::ToolResult {
+                    call_id: "c1".into(),
+                    status: ToolStatus::Ok,
+                    bytes: 10,
+                    summary: None,
+                },
+            ),
+        ];
+
+        assert_eq!(
+            status_from_last_event(&events, now, 180),
+            Some(AgentStatus::Idle),
+            "newer AssistantText wins over an older ToolResult even when storage order is inverted"
+        );
+    }
+
+    #[test]
+    fn status_from_last_event_treats_completed_task_notification_as_idle() {
+        let now = Utc::now();
+        let completed = "<task-notification>\n\
+<tool-use-id>toolu_done</tool-use-id>\n\
+<status>completed</status>\n\
+</task-notification>";
+        let events = vec![
+            ev(
+                1,
+                now - chrono::Duration::seconds(20),
+                Event::ToolResult {
+                    call_id: "toolu_done".into(),
+                    status: ToolStatus::Ok,
+                    bytes: 20,
+                    summary: Some("Async agent launched successfully.".into()),
+                },
+            ),
+            ev(
+                2,
+                now - chrono::Duration::seconds(1),
+                Event::UserPrompt {
+                    text: completed.into(),
+                    attachments: vec![],
+                    is_meta: false,
+                },
+            ),
+        ];
+
+        assert_eq!(
+            status_from_last_event(&events, now, 180),
+            Some(AgentStatus::Idle),
+            "a completed async subagent notification is not a new operator prompt"
+        );
     }
 
     /// Backstop: a Working verdict (e.g. a trailing UserPrompt) on an action older than
@@ -543,16 +715,30 @@ mod tests {
         let stuck = vec![ev(
             1,
             now - chrono::Duration::seconds(600),
-            Event::UserPrompt { text: "go".into(), attachments: vec![], is_meta: false },
+            Event::UserPrompt {
+                text: "go".into(),
+                attachments: vec![],
+                is_meta: false,
+            },
         )];
-        assert_eq!(status_from_last_event(&stuck, now, stale), Some(AgentStatus::Idle));
+        assert_eq!(
+            status_from_last_event(&stuck, now, stale),
+            Some(AgentStatus::Idle)
+        );
         // The same prompt 5s ago → still working.
         let fresh = vec![ev(
             1,
             now - chrono::Duration::seconds(5),
-            Event::UserPrompt { text: "go".into(), attachments: vec![], is_meta: false },
+            Event::UserPrompt {
+                text: "go".into(),
+                attachments: vec![],
+                is_meta: false,
+            },
         )];
-        assert_eq!(status_from_last_event(&fresh, now, stale), Some(AgentStatus::Working));
+        assert_eq!(
+            status_from_last_event(&fresh, now, stale),
+            Some(AgentStatus::Working)
+        );
     }
 
     /// Determinism: the same events evaluated at the same instant return the SAME status
@@ -560,14 +746,16 @@ mod tests {
     #[test]
     fn status_from_last_event_is_deterministic_across_reads() {
         let now = Utc::now();
-        let events = vec![
-            ev(1, now - chrono::Duration::seconds(3), Event::ToolCall {
+        let events = vec![ev(
+            1,
+            now - chrono::Duration::seconds(3),
+            Event::ToolCall {
                 tool: "Read".into(),
                 input: serde_json::json!({"file_path":"/x.rs"}),
                 call_id: "c1".into(),
                 kind: ToolKind::Builtin,
-            }),
-        ];
+            },
+        )];
         let a = status_from_last_event(&events, now, 180);
         let b = status_from_last_event(&events, now, 180);
         assert_eq!(a, b, "identical inputs must yield identical status");

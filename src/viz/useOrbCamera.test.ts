@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   cameraTargetForFocus,
+  cameraTargetForOrbitOverview,
   cameraTargetForOverview,
   cameraTargetForRadarOverview,
   radarCanvasCamera,
@@ -11,6 +12,13 @@ describe('useOrbCamera helpers', () => {
   it('returns a stable overview target', () => {
     expect(cameraTargetForOverview()).toEqual({
       position: { x: 0, y: 0.4, z: 9.2 },
+      lookAt: { x: 0, y: 0, z: 0 },
+    });
+  });
+
+  it('returns the canonical OrbitControls overview pose used by double-click home', () => {
+    expect(cameraTargetForOrbitOverview()).toEqual({
+      position: { x: 0, y: 1, z: 12.6 },
       lookAt: { x: 0, y: 0, z: 0 },
     });
   });
@@ -51,4 +59,3 @@ describe('useOrbCamera helpers', () => {
     expect(next.z).toBeGreaterThan(-5);
   });
 });
-

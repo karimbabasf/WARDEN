@@ -13,7 +13,6 @@ import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react
 import type { SceneState } from './bridge';
 import { harnessTheme, severityColor } from './harnessTheme';
 import type { LayoutNode, OrbIssue, OrbSceneModel } from './orbTypes';
-import type { EmphasisFilter } from './emphasis';
 import type { ConstellationTab } from './NavBar';
 
 export type FixPreview = {
@@ -24,29 +23,62 @@ export type FixPreview = {
   applied: boolean;
 };
 
+// The reversible write record (M4 Forge). Mirrors the FROZEN IPC CONTRACT exactly
+// — these camelCase names are what the backend serializes for every artifact
+// command (stage / apply / revert / get / list). Drive ALL applied/reverted UI
+// from `status`; never fabricate it client-side.
+export type ArtifactStatus = 'pending' | 'applied' | 'reverted';
+export type Artifact = {
+  id: string;
+  findingId: string | null;
+  kind: string;
+  targetPath: string;
+  diff: string;
+  block: string;
+  status: ArtifactStatus;
+  appliedAt: string | null;
+  backupPath: string | null;
+  preImageSha256: string | null;
+  // SHA-256 of what WARDEN wrote at apply time. Revert refuses if the target has
+  // drifted from this, so the user's out-of-band edits are never clobbered.
+  postImageSha256: string | null;
+};
+
+// ── pure diff-line classification (unit-tested) ──────────────────────────────
+// The unified diff is DISPLAY-ONLY; we only colour it. Each line maps to one
+// phosphor role: add-lines blaze green, removals burn amber, hunk headers dim,
+// file headers faint, context plain. Pure so the colour logic is testable
+// without a DOM.
+export type DiffLineKind = 'add' | 'del' | 'hunk' | 'file' | 'ctx';
+
+export function classifyDiffLine(line: string): DiffLineKind {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'file';
+  if (line.startsWith('@@')) return 'hunk';
+  if (line.startsWith('+')) return 'add';
+  if (line.startsWith('-')) return 'del';
+  return 'ctx';
+}
+
+const DIFF_LINE_CLASS: Record<DiffLineKind, string> = {
+  add: 'wd-diff-add',
+  del: 'wd-diff-del',
+  hunk: 'wd-diff-hunk',
+  file: 'wd-diff-file',
+  ctx: 'wd-diff-ctx',
+};
+
+// Path tail for the provenance header — show the resolved home (~) + the last
+// two segments so the operator reads "…/.claude/CLAUDE.md" without a wall of
+// absolute path. The full absolute path stays in the title attribute.
+export function provenanceLabel(targetPath: string): string {
+  if (!targetPath) return 'unknown target';
+  const parts = targetPath.split('/').filter(Boolean);
+  if (parts.length <= 2) return targetPath;
+  return `…/${parts.slice(-2).join('/')}`;
+}
+
 const PIPELINE_STAGES = ['Diagnostician', 'Coach', 'Verifier'] as const;
 const DEFAULT_QUERY = "what's wrong with how I use my agents?";
-
-// Severity buckets the legend exposes as filter chips. The bucket id matches
-// `EmphasisFilter` ('low'|'med'|'high'|'crit'); `sev` is the representative
-// numeric severity fed to `severityColor` so the swatch agrees with the orbs
-// and detail meters (one colour source). Glyphs grow with danger for a
-// colour-blind-legible ramp.
-type SevBucket = EmphasisFilter & { kind: 'severity' };
-const SEVERITY_CHIPS: ReadonlyArray<{ bucket: SevBucket['bucket']; label: string; sev: number; glyph: string }> = [
-  { bucket: 'low', label: 'Low', sev: 2, glyph: '○' },
-  { bucket: 'med', label: 'Watch', sev: 3, glyph: '◔' },
-  { bucket: 'high', label: 'High', sev: 4, glyph: '◑' },
-  { bucket: 'crit', label: 'Critical', sev: 5, glyph: '●' },
-];
-
-/** True when `filter` is the same chip the user just rendered (used for toggle + aria-pressed). */
-function isSeverityActive(filter: EmphasisFilter, bucket: SevBucket['bucket']): boolean {
-  return filter?.kind === 'severity' && filter.bucket === bucket;
-}
-function isHarnessActive(filter: EmphasisFilter, harness: string): boolean {
-  return filter?.kind === 'harness' && filter.harness === harness;
-}
 
 function fmtCount(n: number | undefined): string {
   return typeof n === 'number' && Number.isFinite(n) ? Math.round(n).toLocaleString() : '—';
@@ -192,89 +224,6 @@ function PipelineRail({ scene, running }: { scene: SceneState; running: boolean 
   );
 }
 
-// ── interactive legend: filter chips (the dim is wired in WarRoom) ───────────
-// The legend is no longer a static key — each entry is a real <button> that
-// toggles a single `EmphasisFilter`. Clicking a chip emphasises matching orbs
-// (siblings dim, wired in WarRoom); clicking the lit chip clears the filter.
-// Honest-viz contract is preserved: chips pair colour + glyph + text label so
-// the signal is never colour-only (a11y), and harness chips key off the *real*
-// snake_case harness id so `matchesFilter` lines up with the scene nodes.
-// Severity is a per-habit signal, so those chips appear on the Habits tab only;
-// harness chips appear on both tabs.
-function Legend({
-  tab,
-  model,
-  filter,
-  onFilter,
-}: {
-  tab: ConstellationTab;
-  model: OrbSceneModel;
-  filter: EmphasisFilter;
-  onFilter: (f: EmphasisFilter) => void;
-}) {
-  // Harness chips reflect the agents actually present; fall back to a quiet
-  // Unknown chip so the legend is never empty (and never fabricates a harness).
-  const agents = model.agents.length
-    ? model.agents
-    : [{ id: 'unknown', harness: 'unknown', label: 'Unknown', glyph: '●', color: '#76ff9d', sessions: 0, eventCount: 0, totalLoad: 0 }];
-  // De-dupe by real harness id (multiple hubs can share one harness).
-  const harnesses = Array.from(new Map(agents.map((a) => [a.harness, a])).values());
-
-  return (
-    <div className="wd-legend" role="group" aria-label="Emphasis filter">
-      {tab === 'habits' && (
-        <div className="wd-legend-group" aria-label="severity">
-          <span className="wd-legend-key">severity</span>
-          {SEVERITY_CHIPS.map((c) => {
-            const active = isSeverityActive(filter, c.bucket);
-            const next: EmphasisFilter = active ? null : { kind: 'severity', bucket: c.bucket };
-            return (
-              <button
-                type="button"
-                key={c.bucket}
-                className={`wd-chip wd-chip-sev${active ? ' is-active' : ''}`}
-                aria-pressed={active}
-                aria-label={`${active ? 'Clear' : 'Show only'} ${c.label} severity habits`}
-                title={`${c.label} severity${active ? ' (active — click to clear)' : ''}`}
-                onClick={() => onFilter(next)}
-                style={{ '--chip': severityColor(c.sev) } as CSSProperties}
-              >
-                <span className="wd-chip-swatch" aria-hidden="true" />
-                <span className="wd-chip-glyph" aria-hidden="true">{c.glyph}</span>
-                <span className="wd-chip-label">{c.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      <div className="wd-legend-group" aria-label="harness">
-        <span className="wd-legend-key">harness</span>
-        {harnesses.map((a) => {
-          const t = harnessTheme(a.harness);
-          const active = isHarnessActive(filter, a.harness);
-          const next: EmphasisFilter = active ? null : { kind: 'harness', harness: a.harness };
-          return (
-            <button
-              type="button"
-              key={a.harness}
-              className={`wd-chip wd-chip-harness${active ? ' is-active' : ''}`}
-              aria-pressed={active}
-              aria-label={`${active ? 'Clear' : 'Show only'} ${t.label} agents`}
-              title={`${t.label}${active ? ' (active — click to clear)' : ''}`}
-              onClick={() => onFilter(next)}
-              style={{ '--chip': t.color } as CSSProperties}
-            >
-              <span className="wd-chip-swatch" aria-hidden="true" />
-              <span className="wd-chip-glyph" aria-hidden="true">{t.glyph}</span>
-              <span className="wd-chip-label">{t.label}</span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 // ── breadcrumb: the radar focus path (Overview › agent › …) ──────────────────
 // Renders from WarRoom's `focusStack` (agent ids). "Overview" clears focus;
 // each crumb pops focus to that depth. Renders nothing when the stack is empty
@@ -319,44 +268,6 @@ function Breadcrumb({
   );
 }
 
-// ── bottom status deck: a READ-ONLY instrument readout ───────────────────────
-// Harnesses present · live telemetry (habits/agents/sessions/events/findings) ·
-// a "watching" pulse. The severity/harness key it used to carry is now the
-// interactive `Legend` (rendered separately). There are no inputs here — the
-// conversational "ask WARDEN" surface is a separate chat interface, added later.
-// pointer-events are off in CSS so the deck never intercepts the orbit camera.
-// Honest-viz: every figure is a real field (counts fall back to "—").
-function StatusDeck({ scene, model }: { scene: SceneState; model: OrbSceneModel }) {
-  const p = scene.profile;
-  const habits = model.issues.length;
-  const phaseLabel = scene.running ? 'scanning' : scene.phase === 'reveal' ? 'diagnosis ready' : 'watching';
-  return (
-    <div className="wd-deck" role="status" aria-label="WARDEN status">
-      <div className="wd-deck-group wd-deck-stats">
-        <DeckStat value={String(habits)} label={habits === 1 ? 'habit' : 'habits'} />
-        <DeckStat value={String(model.agents.length)} label={model.agents.length === 1 ? 'agent' : 'agents'} />
-        <DeckStat value={fmtCount(p?.sessions)} label="sessions" />
-        <DeckStat value={fmtCount(p?.events)} label="events" />
-        <DeckStat value={fmtCount(p?.findings)} label="findings" />
-      </div>
-      <span className="wd-deck-div" aria-hidden="true" />
-      <div className="wd-deck-group wd-deck-live">
-        <span className={`wd-deck-pulse${scene.running ? ' is-live' : ''}`} aria-hidden="true" />
-        <span className="wd-deck-phase">{phaseLabel}</span>
-      </div>
-    </div>
-  );
-}
-
-function DeckStat({ value, label }: { value: string; label: string }) {
-  return (
-    <span className="wd-deck-stat">
-      <span className="wd-deck-stat-val">{value}</span>
-      <span className="wd-deck-stat-key">{label}</span>
-    </span>
-  );
-}
-
 // ── hover preview (screen-space card) ──────────────────────────────────────
 function PreviewCard({ node }: { node: LayoutNode }) {
   const t = harnessTheme(node.harness);
@@ -381,20 +292,220 @@ function PreviewCard({ node }: { node: LayoutNode }) {
   );
 }
 
+// ── line-typed unified diff (display-only, phosphor-coloured) ────────────────
+// Upgrades the flat <pre> to per-line typed spans so add-lines blaze green on
+// the phosphor bg. Pure render off `classifyDiffLine`; no state.
+function DiffView({ diff }: { diff: string }) {
+  const lines = diff.length ? diff.split('\n') : [];
+  return (
+    <pre className="wd-fix-diff" data-fix-diff aria-label="proposed unified diff">
+      {lines.length === 0 ? (
+        <span className="wd-diff-ctx">No diff — this guardrail is already present.</span>
+      ) : (
+        lines.map((line, i) => {
+          const kind = classifyDiffLine(line);
+          return (
+            <span className={DIFF_LINE_CLASS[kind]} data-diff-kind={kind} key={i}>
+              {line || ' '}
+              {'\n'}
+            </span>
+          );
+        })
+      )}
+    </pre>
+  );
+}
+
+// ── the apply / diff / revert approval flow (M4 Forge) ───────────────────────
+// The cinematic write-approval surface, rendered below the diff. Panel-by-panel:
+//   (1) provenance header — the resolved absolute CLAUDE.md path, so the write is
+//       never a surprise;
+//   (2) the line-typed diff;
+//   (3) the action row — APPLY (acid CTA, amber-pulse on hover = "this writes")
+//       when pending; a locked APPLIED badge + REVERT once `status === 'applied'`.
+// Every visible state is driven by the real `Artifact.status`, never faked. When
+// the staged diff is empty the block is already-applied and Apply is inert.
+function FixApprovalBlock({
+  preview,
+  artifact,
+  applying,
+  reverting,
+  onApply,
+  onRevert,
+}: {
+  preview: FixPreview;
+  artifact?: Artifact;
+  applying: boolean;
+  reverting: boolean;
+  onApply: () => void;
+  onRevert: () => void;
+}) {
+  // The resolved write target — prefer the artifact's recorded path (the row the
+  // backend actually wrote), fall back to the preview's resolved path.
+  const target = artifact?.targetPath || preview.target_path;
+  const diff = artifact?.diff ?? preview.diff;
+  const status: ArtifactStatus | 'preview' = artifact?.status ?? 'preview';
+  const applied = status === 'applied';
+  const reverted = status === 'reverted';
+  // Empty diff at stage time = the guardrail is already in the file. Apply is a
+  // harmless no-op, so present it as inert "ALREADY APPLIED" rather than a CTA.
+  const emptyDiff = (artifact?.diff ?? preview.diff).trim().length === 0;
+  const browserQa = target === 'WARDEN overlay';
+
+  return (
+    <div
+      className={`wd-fix-foot is-${status}`}
+      data-fix-foot
+      data-status={status}
+    >
+      <div className="wd-fix-target" data-fix-target title={target}>
+        <span className="wd-fix-target-glyph" aria-hidden="true">⌖</span>
+        <span className="wd-fix-target-label">writes to</span>
+        <code className="wd-fix-target-path">{target}</code>
+      </div>
+
+      <DiffView diff={diff} />
+
+      {browserQa ? (
+        <div className="wd-fix-note" data-fix-note>
+          Preview only — this browser QA stage never writes or applies fixes.
+        </div>
+      ) : applied ? (
+        <div className="wd-fix-applied" data-fix-applied>
+          <div className="wd-fix-applied-badge" data-applied-badge>
+            <span className="wd-fix-lock" aria-hidden="true">⬢</span>
+            <span className="wd-fix-applied-text">
+              GUARDRAIL APPLIED
+              {artifact?.appliedAt ? <em className="wd-fix-applied-at">{shortStamp(artifact.appliedAt)}</em> : null}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="wd-fix-revert"
+            data-fix-revert
+            onClick={onRevert}
+            disabled={reverting}
+          >
+            {reverting ? 'REVERTING…' : 'REVERT'}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="wd-fix-apply"
+          data-fix-apply
+          onClick={onApply}
+          disabled={applying || emptyDiff}
+          aria-label={emptyDiff ? 'Guardrail already applied' : 'Apply guardrail to your agent config'}
+        >
+          {applying ? 'APPLYING…' : emptyDiff ? 'ALREADY APPLIED' : reverted ? 'RE-APPLY GUARDRAIL' : 'APPLY GUARDRAIL'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Compact RFC3339 → "Jun 25 · 14:32" for the applied badge. Never NaN: an
+// unparseable stamp yields '' so the badge simply omits it.
+export function shortStamp(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  const mon = d.toLocaleString('en-US', { month: 'short' });
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${mon} ${d.getDate()} · ${hh}:${mm}`;
+}
+
+// ── the guardrail ledger (history of applied + reverted writes) ──────────────
+// A visible audit trail: every artifact that ever reached applied/reverted, so
+// the operator can see (and undo) what WARDEN wrote. Pure off `list_artifacts`
+// data threaded from WarRoom. Reverting from here re-points the same revert path.
+function isHistoric(a: Artifact): boolean {
+  return a.status === 'applied' || a.status === 'reverted';
+}
+
+function Ledger({
+  artifacts,
+  reverting,
+  onRevert,
+  onClose,
+}: {
+  artifacts: Artifact[];
+  reverting: boolean;
+  onRevert: (id: string) => void;
+  onClose: () => void;
+}) {
+  const rows = artifacts.filter(isHistoric);
+  return (
+    <aside className="wd-ledger" data-ledger>
+      <div className="wd-ledger-head">
+        <div className="wd-card-kicker">guardrail ledger</div>
+        <button type="button" className="wd-detail-close" onClick={onClose} aria-label="Close ledger">✕</button>
+      </div>
+      {rows.length === 0 ? (
+        <div className="wd-ledger-empty" data-ledger-empty>
+          No guardrails written yet. Apply a fix to start the trail.
+        </div>
+      ) : (
+        <ul className="wd-ledger-list">
+          {rows.map((a) => (
+            <li className={`wd-ledger-row is-${a.status}`} data-ledger-row data-status={a.status} key={a.id}>
+              <span className="wd-ledger-state" aria-hidden="true">
+                {a.status === 'applied' ? '⬢' : '↺'}
+              </span>
+              <div className="wd-ledger-meta">
+                <code className="wd-ledger-path" title={a.targetPath}>{provenanceLabel(a.targetPath)}</code>
+                <span className="wd-ledger-sub">
+                  {a.status === 'applied' ? 'applied' : 'reverted'}
+                  {a.appliedAt ? ` · ${shortStamp(a.appliedAt)}` : ''}
+                </span>
+              </div>
+              {a.status === 'applied' ? (
+                <button
+                  type="button"
+                  className="wd-ledger-revert"
+                  onClick={() => onRevert(a.id)}
+                  disabled={reverting}
+                >
+                  revert
+                </button>
+              ) : (
+                <span className="wd-ledger-tag">reverted</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </aside>
+  );
+}
+
 // ── selected detail (the drill-in: real WARDEN data + read-only fix preview) ─
 function DetailPanel({
   node,
   model,
   fixPreview,
   loadingFix,
+  artifact,
+  applying,
+  reverting,
   onRequestFix,
+  onApplyFix,
+  onRevertFix,
   onClose,
 }: {
   node: LayoutNode;
   model: OrbSceneModel;
   fixPreview?: FixPreview;
   loadingFix: boolean;
+  /** The reversible write record for the open finding (M4). Drives applied/revert UI. */
+  artifact?: Artifact;
+  applying: boolean;
+  reverting: boolean;
   onRequestFix: (issue: OrbIssue) => void;
+  onApplyFix: (issue: OrbIssue) => void;
+  onRevertFix: (id: string) => void;
   onClose: () => void;
 }) {
   const t = harnessTheme(node.harness);
@@ -466,11 +577,20 @@ function DetailPanel({
           )}
         </div>
       )}
-      <button className="wd-fix-button" type="button" onClick={() => onRequestFix(issue)} disabled={loadingFix}>
-        {loadingFix ? 'LOADING PREVIEW' : 'FIX PREVIEW (read-only)'}
-      </button>
+      {!fixPreview && (
+        <button className="wd-fix-button" type="button" onClick={() => onRequestFix(issue)} disabled={loadingFix}>
+          {loadingFix ? 'LOADING PREVIEW' : 'PREVIEW GUARDRAIL'}
+        </button>
+      )}
       {fixPreview && (
-        <pre className="wd-fix-diff">{fixPreview.diff || 'No diff: this guardrail already appears to be present.'}</pre>
+        <FixApprovalBlock
+          preview={fixPreview}
+          artifact={artifact}
+          applying={applying}
+          reverting={reverting}
+          onApply={() => onApplyFix(issue)}
+          onRevert={() => artifact && onRevertFix(artifact.id)}
+        />
       )}
     </aside>
   );
@@ -512,17 +632,23 @@ export function Chrome({
   tab,
   hoveredNode,
   selectedNode,
-  emphasisFilter,
   focusStack,
   running,
   error,
   fixPreview,
   loadingFix,
+  artifact,
+  artifacts,
+  applying,
+  reverting,
+  ledgerOpen,
   onAsk,
   onRequestFix,
+  onApplyFix,
+  onRevertFix,
+  onToggleLedger,
   onClearSelection,
   onDismiss,
-  onFilter,
   onPopFocus,
   onClearFocus,
 }: {
@@ -531,25 +657,34 @@ export function Chrome({
   tab: ConstellationTab;
   hoveredNode: LayoutNode | null;
   selectedNode: LayoutNode | null;
-  emphasisFilter: EmphasisFilter;
   focusStack: string[];
   running: boolean;
   error: string | null;
   fixPreview?: FixPreview;
   loadingFix: boolean;
+  /** Reversible write record for the open finding (M4 Forge). */
+  artifact?: Artifact;
+  /** Full guardrail history (applied + reverted) for the ledger. */
+  artifacts: Artifact[];
+  applying: boolean;
+  reverting: boolean;
+  ledgerOpen: boolean;
   onAsk: (q: string) => void;
   onRequestFix: (issue: OrbIssue) => void;
+  onApplyFix: (issue: OrbIssue) => void;
+  onRevertFix: (id: string) => void;
+  onToggleLedger: () => void;
   onClearSelection: () => void;
   onDismiss: () => void;
-  onFilter: (f: EmphasisFilter) => void;
   onPopFocus: (index: number) => void;
   onClearFocus: () => void;
 }) {
-  // The bottom is a read-only StatusDeck (no inputs) plus the interactive
-  // emphasis Legend. The radar focus trail (Breadcrumb) sits at the top of the
-  // chrome on the Radar tab. The HUD + conversational ask bar are intentionally
-  // not rendered yet — Hud/Console/EmptyState stay defined and wired so the
-  // later chat interface drops straight in.
+  const ledgerCount = artifacts.filter(isHistoric).length;
+  // Chrome now carries only the radar focus trail (Breadcrumb, top of the chrome
+  // on the Radar tab) and the orb inspector. The emphasis filter is its own
+  // bottom-centre `FilterBar` dock and the old bottom `StatusDeck` was removed
+  // (its agent count now lives in the roster Sidebar header). The HUD +
+  // conversational ask bar stay defined-but-dormant for the later chat interface.
   return (
     <div className="wd-chrome">
       {tab === 'radar' && (
@@ -561,10 +696,6 @@ export function Chrome({
         />
       )}
 
-      <Legend tab={tab} model={model} filter={emphasisFilter} onFilter={onFilter} />
-
-      <StatusDeck scene={scene} model={model} />
-
       <div className={`wd-inspector ${selectedNode || hoveredNode ? 'is-open' : ''}`}>
         {selectedNode ? (
           <DetailPanel
@@ -572,11 +703,42 @@ export function Chrome({
             model={model}
             fixPreview={fixPreview}
             loadingFix={loadingFix}
+            artifact={artifact}
+            applying={applying}
+            reverting={reverting}
             onRequestFix={onRequestFix}
+            onApplyFix={onApplyFix}
+            onRevertFix={onRevertFix}
             onClose={onClearSelection}
           />
         ) : hoveredNode ? (
           <PreviewCard node={hoveredNode} />
+        ) : null}
+      </div>
+
+      {/* Guardrail ledger — a visible, reversible history of every write WARDEN
+          made to your agent config. Toggle lives bottom-right; the panel slides
+          up from the corner. Counts only applied/reverted artifacts (honest). */}
+      <button
+        type="button"
+        className={`wd-ledger-toggle${ledgerOpen ? ' is-open' : ''}`}
+        aria-expanded={ledgerOpen}
+        aria-controls="wd-ledger"
+        title="Guardrail ledger"
+        onClick={onToggleLedger}
+      >
+        <span className="wd-ledger-toggle-glyph" aria-hidden="true">⬢</span>
+        LEDGER
+        {ledgerCount > 0 ? <span className="wd-ledger-toggle-count">{ledgerCount}</span> : null}
+      </button>
+      <div className={`wd-ledger-dock${ledgerOpen ? ' is-open' : ''}`} id="wd-ledger">
+        {ledgerOpen ? (
+          <Ledger
+            artifacts={artifacts}
+            reverting={reverting}
+            onRevert={onRevertFix}
+            onClose={onToggleLedger}
+          />
         ) : null}
       </div>
     </div>

@@ -18,13 +18,30 @@
 //! byte-offset”).
 
 use crate::ingest::AdapterRegistry;
+use crate::ir::Harness;
 use crate::store::Store;
 use crate::util::hash64;
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+pub type RadarStateCache = Arc<std::sync::RwLock<Option<crate::radar::RadarState>>>;
+
+pub fn new_radar_state_cache() -> RadarStateCache {
+    Arc::new(std::sync::RwLock::new(None))
+}
+
+pub fn cache_radar_state(cache: &RadarStateCache, state: crate::radar::RadarState) {
+    if let Ok(mut cached) = cache.write() {
+        *cached = Some(state);
+    }
+}
+
+pub fn latest_cached_radar_state(cache: &RadarStateCache) -> Option<crate::radar::RadarState> {
+    cache.read().ok().and_then(|cached| cached.clone())
+}
 
 /// Debounce window for coalescing FSEvents bursts on a single file.
 /// Override with `WARDEN_WATCH_DEBOUNCE_MS` (mirrors the `util.rs` env pattern).
@@ -36,6 +53,43 @@ fn debounce() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// RADAR recompute latency knob. Unlike ingest, RADAR should emit immediately by
+/// default; the dirty flag already coalesces bursts and serializes recomputes.
+/// Override with `WARDEN_RADAR_DEBOUNCE_MS` only when debugging event storms.
+fn radar_recompute_debounce() -> Duration {
+    let ms = std::env::var("WARDEN_RADAR_DEBOUNCE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    Duration::from_millis(ms)
+}
+
+#[derive(Clone, Copy)]
+struct LivePathSeen {
+    at: Instant,
+    len: Option<u64>,
+}
+
+fn file_len(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| m.len())
+}
+
+fn should_handle_live_path(
+    path: &Path,
+    last: &mut HashMap<PathBuf, LivePathSeen>,
+    now: Instant,
+    debounce: Duration,
+) -> bool {
+    let len = file_len(path);
+    if let Some(prev) = last.get(path) {
+        if now.duration_since(prev.at) < debounce && prev.len == len {
+            return false;
+        }
+    }
+    last.insert(path.to_path_buf(), LivePathSeen { at: now, len });
+    true
+}
+
 /// True when `path` lives under (or is) one of `root`'s subtrees.
 fn path_under(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
@@ -43,8 +97,9 @@ fn path_under(path: &Path, root: &Path) -> bool {
 
 /// Ingest the new bytes of a single transcript file, advancing its watermark.
 ///
-/// Returns the number of events ingested (0 when nothing new). This is the
-/// testable core invoked by the watcher and reusable for an on-ask trigger.
+/// Returns the amount of live-ingest activity (0 when nothing new): parsed events
+/// plus newly persisted sessions that do not have events yet. This is the testable
+/// core invoked by the watcher and reusable for an on-ask trigger.
 ///
 /// Algorithm (brief §Task 4):
 /// * `len` = current file length; `off` = saved byte watermark (0 if unseen).
@@ -52,11 +107,7 @@ fn path_under(path: &Path, root: &Path) -> bool {
 /// * `len  < off` (file rewritten/truncated) → reset `off = 0`, full reparse.
 /// * otherwise read `bytes[off..]` and `parse_range(path, slice, off, hash)`.
 /// * persist each batch with `watermark_offset = len` (the new EOF).
-pub fn ingest_file_once(
-    registry: &AdapterRegistry,
-    store: &Store,
-    path: &Path,
-) -> Result<usize> {
+pub fn ingest_file_once(registry: &AdapterRegistry, store: &Store, path: &Path) -> Result<usize> {
     // Only transcript files are ingestible.
     if path.extension().map(|x| x != "jsonl").unwrap_or(true) {
         return Ok(0);
@@ -78,6 +129,9 @@ pub fn ingest_file_once(
         Err(_) => return Ok(0),
     };
     let len = bytes.len() as u64;
+    if len == 0 {
+        return Ok(0);
+    }
     let hash = hash64(&bytes);
     let mut off = store.watermark_offset(path)?;
 
@@ -103,13 +157,18 @@ pub fn ingest_file_once(
         .parse_range(path, slice, off, hash)
         .with_context(|| format!("parse_range {} @ {off}", path.display()))?;
 
-    let mut events = 0usize;
+    let existing_session_ids: HashSet<String> =
+        store.sessions()?.into_iter().map(|s| s.id).collect();
+    let mut activity = 0usize;
     for b in &batches {
-        events += b.events.len();
+        activity += b.events.len();
+        if !existing_session_ids.contains(&b.session.id) {
+            activity += 1;
+        }
         // Persist with the absolute EOF as the new watermark.
         store.upsert_session_batch(&b.session, &b.turns, &b.events, len)?;
     }
-    Ok(events)
+    Ok(activity)
 }
 
 /// Owns the live `RecommendedWatcher`s so they outlive `setup()`. A bare
@@ -130,7 +189,8 @@ impl WatcherGuard {
 
 /// Spawn one filesystem watcher per adapter root. On a debounced `*.jsonl`
 /// create/modify, [`ingest_file_once`] runs and an `ingest_progress` event is
-/// emitted (`{harness, path, events, phase:"live"}`).
+/// emitted (`{harness, path, activity, phase:"live"}`; `events` is retained as a
+/// compatibility alias).
 ///
 /// The returned watchers must be kept alive for the lifetime of the app (drop =
 /// stop watching), so callers store them in long-lived state (see
@@ -139,6 +199,7 @@ pub fn spawn_watchers(
     registry: Arc<AdapterRegistry>,
     store: Store,
     app: tauri::AppHandle,
+    radar_signal: Option<RadarDirtySignal>,
 ) -> Result<Vec<notify::RecommendedWatcher>> {
     use notify::{EventKind, RecursiveMode, Watcher};
     use tauri::Emitter;
@@ -164,62 +225,59 @@ pub fn spawn_watchers(
         let registry = registry.clone();
         let store = store.clone();
         let app = app.clone();
+        let radar_signal = radar_signal.clone();
         let debounce = debounce();
-        // Per-file last-handled timestamp for debouncing coalesced bursts.
-        let mut last: HashMap<PathBuf, Instant> = HashMap::new();
+        // Per-file last-handled timestamp + length for debouncing coalesced bursts.
+        let mut last: HashMap<PathBuf, LivePathSeen> = HashMap::new();
 
-        let mut watcher = notify::recommended_watcher(
-            move |res: notify::Result<notify::Event>| {
-                let event = match res {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!(error=?e, "fs watch error");
-                        return;
-                    }
-                };
-                // Only creations and content modifications matter.
-                if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let event = match res {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(error=?e, "fs watch error");
                     return;
                 }
-                for path in event.paths {
-                    if path.extension().map(|x| x != "jsonl").unwrap_or(true) {
-                        continue;
-                    }
-                    // Debounce: skip if we handled this exact path within the window.
-                    let now = Instant::now();
-                    if let Some(prev) = last.get(&path) {
-                        if now.duration_since(*prev) < debounce {
-                            continue;
-                        }
-                    }
-                    last.insert(path.clone(), now);
+            };
+            // Only creations and content modifications matter.
+            if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+                return;
+            }
+            for path in event.paths {
+                if path.extension().map(|x| x != "jsonl").unwrap_or(true) {
+                    continue;
+                }
+                // Debounce duplicate same-size bursts only. If the file grew inside
+                // the debounce window (common create-empty -> append startup path),
+                // ingest immediately so a new subagent appears on the first bytes.
+                if !should_handle_live_path(&path, &mut last, Instant::now(), debounce) {
+                    continue;
+                }
 
-                    match ingest_file_once(&registry, &store, &path) {
-                        Ok(events) if events > 0 => {
-                            let harness = registry
-                                .adapters()
-                                .iter()
-                                .find(|a| a.roots().iter().any(|r| path.starts_with(r)))
-                                .map(|a| a.harness().as_str().to_string())
-                                .unwrap_or_default();
-                            let _ = app.emit(
-                                "ingest_progress",
-                                serde_json::json!({
-                                    "harness": harness,
-                                    "path": path.to_string_lossy(),
-                                    "events": events,
-                                    "phase": "live",
-                                }),
-                            );
-                        }
-                        Ok(_) => {} // nothing new
-                        Err(e) => {
-                            tracing::warn!(path=%path.display(), error=?e, "live ingest failed")
-                        }
+                match ingest_file_once(&registry, &store, &path) {
+                    Ok(activity) if activity > 0 => {
+                        relink_after_live_ingest(&registry, &store, &path);
+                        kick_radar_after_live_ingest(activity, radar_signal.as_ref());
+                        let harness = harness_for_live_path(&registry, &path)
+                            .map(|h| h.as_str().to_string())
+                            .unwrap_or_default();
+                        let _ = app.emit(
+                            "ingest_progress",
+                            serde_json::json!({
+                                "harness": harness,
+                                "path": path.to_string_lossy(),
+                                "activity": activity,
+                                "events": activity,
+                                "phase": "live",
+                            }),
+                        );
+                    }
+                    Ok(_) => {} // nothing new
+                    Err(e) => {
+                        tracing::warn!(path=%path.display(), error=?e, "live ingest failed")
                     }
                 }
-            },
-        )
+            }
+        })
         .context("create fs watcher")?;
 
         watcher
@@ -231,6 +289,42 @@ pub fn spawn_watchers(
     Ok(watchers)
 }
 
+fn kick_radar_after_live_ingest(activity: usize, radar_signal: Option<&RadarDirtySignal>) {
+    if activity > 0 {
+        if let Some(signal) = radar_signal {
+            signal.mark_dirty();
+        }
+    }
+}
+
+fn kick_radar_after_watch_event(signal: &RadarDirtySignal) {
+    signal.mark_dirty_with_live_refresh();
+}
+
+fn harness_for_live_path(registry: &AdapterRegistry, path: &Path) -> Option<Harness> {
+    registry
+        .adapters()
+        .iter()
+        .find(|a| a.roots().iter().any(|r| path.starts_with(r)))
+        .map(|a| a.harness())
+}
+
+fn relink_after_live_ingest(registry: &AdapterRegistry, store: &Store, path: &Path) {
+    match harness_for_live_path(registry, path) {
+        Some(Harness::ClaudeCode) => {
+            if let Err(e) = crate::ingest::claude_code::link_claude_subagents_in_store(store) {
+                tracing::warn!(path=%path.display(), error=%format!("{e:#}"), "live Claude relink failed");
+            }
+        }
+        Some(Harness::Codex) => {
+            if let Err(e) = crate::ingest::codex::link_codex_subagents_in_store(store) {
+                tracing::warn!(path=%path.display(), error=%format!("{e:#}"), "live Codex relink failed");
+            }
+        }
+        _ => {}
+    }
+}
+
 /// RADAR (Task 9): recompute the live forest and emit it as `radar_state`. Thin
 /// wrapper over [`crate::radar::recompute_radar_state`] + the Tauri emit, so the
 /// watcher closure stays small.
@@ -238,8 +332,13 @@ pub fn recompute_and_emit_radar(
     store: &Store,
     sessions_dir: &std::path::Path,
     app: &tauri::AppHandle,
+    cache: &RadarStateCache,
+    refresh_live_context: bool,
 ) -> usize {
     use tauri::Emitter;
+    if refresh_live_context {
+        crate::radar::refresh_live_context(store, sessions_dir);
+    }
     let state = crate::radar::recompute_radar_state(store, sessions_dir);
     let agent_count = state.agents.len();
     // Status breakdown for the logs — so "why is everything idle?" is answerable from
@@ -261,6 +360,7 @@ pub fn recompute_and_emit_radar(
         terminated,
         "radar recompute emitted"
     );
+    cache_radar_state(cache, state.clone());
     let _ = app.emit("radar_state", &state);
     agent_count
 }
@@ -279,6 +379,7 @@ pub struct RadarDirtySignal {
 
 struct RadarDirtyInner {
     dirty: std::sync::atomic::AtomicBool,
+    refresh_live_context: std::sync::atomic::AtomicBool,
     notify: tokio::sync::Notify,
 }
 
@@ -287,6 +388,7 @@ impl RadarDirtySignal {
         Self {
             inner: Arc::new(RadarDirtyInner {
                 dirty: std::sync::atomic::AtomicBool::new(false),
+                refresh_live_context: std::sync::atomic::AtomicBool::new(false),
                 notify: tokio::sync::Notify::new(),
             }),
         }
@@ -299,6 +401,16 @@ impl RadarDirtySignal {
             .dirty
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.inner.notify.notify_one();
+    }
+
+    /// Mark the forest dirty and request a one-shot live transcript refresh before
+    /// the recompute. Used for startup/cold-read gaps only; heartbeat ticks should
+    /// call [`mark_dirty`] so they remain cheap liveness checks.
+    pub fn mark_dirty_with_live_refresh(&self) {
+        self.inner
+            .refresh_live_context
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.mark_dirty();
     }
 }
 
@@ -335,7 +447,7 @@ pub fn spawn_radar_recompute_worker<F>(
     recompute: F,
 ) -> tauri::async_runtime::JoinHandle<()>
 where
-    F: Fn() + Send + Sync + 'static,
+    F: Fn(bool) + Send + Sync + 'static,
 {
     use std::sync::atomic::Ordering;
     let recompute = Arc::new(recompute);
@@ -359,11 +471,16 @@ where
                 signal.inner.dirty.store(false, Ordering::SeqCst);
             }
 
+            let refresh_live_context = signal
+                .inner
+                .refresh_live_context
+                .swap(false, Ordering::SeqCst);
+
             // Run exactly one recompute, serialized: a blocking task we await, so the
             // loop cannot launch a second recompute until this one returns. A signal
             // raised during the run sets the flag again → exactly one follow-up.
             let job = recompute.clone();
-            if let Err(e) = tokio::task::spawn_blocking(move || job()).await {
+            if let Err(e) = tokio::task::spawn_blocking(move || job(refresh_live_context)).await {
                 tracing::warn!(error=?e, "radar recompute task failed");
             }
         }
@@ -430,6 +547,7 @@ pub fn spawn_radar_watcher(
     sessions_dir: PathBuf,
     extra_roots: Vec<PathBuf>,
     app: tauri::AppHandle,
+    cache: RadarStateCache,
 ) -> Result<(
     Vec<notify::RecommendedWatcher>,
     tauri::async_runtime::JoinHandle<()>,
@@ -455,10 +573,11 @@ pub fn spawn_radar_watcher(
         let store = store.clone();
         let app = app.clone();
         let sessions_dir = sessions_dir.clone();
+        let cache = cache.clone();
         let signal = signal.clone();
         let agent_count = agent_count.clone();
-        spawn_radar_recompute_worker(signal, debounce(), move || {
-            let n = recompute_and_emit_radar(&store, &sessions_dir, &app);
+        spawn_radar_recompute_worker(signal, radar_recompute_debounce(), move |refresh| {
+            let n = recompute_and_emit_radar(&store, &sessions_dir, &app, &cache, refresh);
             agent_count.store(n, std::sync::atomic::Ordering::SeqCst);
         })
     };
@@ -479,28 +598,28 @@ pub fn spawn_radar_watcher(
         }
         let signal = signal.clone();
 
-        let mut watcher = notify::recommended_watcher(
-            move |res: notify::Result<notify::Event>| {
-                let event = match res {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!(error=?e, "radar watch error");
-                        return;
-                    }
-                };
-                // Any create/modify/remove changes liveness; ignore access events.
-                if !matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                ) {
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let event = match res {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(error=?e, "radar watch error");
                     return;
                 }
-                // Do NOT recompute on the watcher thread — just signal the worker. The
-                // burst is coalesced + serialized there, so overlapping events across
-                // roots cannot spawn overlapping recomputes.
-                signal.mark_dirty();
-            },
-        )
+            };
+            // Any create/modify/remove changes liveness; ignore access events.
+            if !matches!(
+                event.kind,
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+            ) {
+                return;
+            }
+            // Do NOT recompute on the watcher thread — just signal the worker. The
+            // burst is coalesced + serialized there, so overlapping events across
+            // roots cannot spawn overlapping recomputes. File events also request a
+            // live transcript refresh so just-created subagent files are in the
+            // store before the forest is assembled.
+            kick_radar_after_watch_event(&signal);
+        })
         .context("create radar watcher")?;
 
         watcher
@@ -516,7 +635,7 @@ pub fn spawn_radar_watcher(
     // evaluates the live registry + persistent store immediately AND seeds `agent_count`
     // so the heartbeat begins ticking. `lib.rs` kicks it a second time once startup
     // backfill has populated the store (handles a cold/empty DB with live agents).
-    signal.mark_dirty();
+    signal.mark_dirty_with_live_refresh();
     Ok((watchers, worker, tick, signal))
 }
 
@@ -528,7 +647,10 @@ mod tests {
     use crate::ingest::AdapterRegistry;
     use crate::ir::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Fix #1 — COALESCING: a burst of N `mark_dirty()` signals must collapse to a
     /// SINGLE recompute per debounce window, and recomputes must NEVER overlap. This
@@ -547,7 +669,7 @@ mod tests {
             let runs = runs.clone();
             let in_flight = in_flight.clone();
             let max_in_flight = max_in_flight.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(40), move || {
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(40), move |_| {
                 let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 max_in_flight.fetch_max(cur, Ordering::SeqCst);
                 // Simulate a non-trivial recompute body.
@@ -604,7 +726,7 @@ mod tests {
         let signal = RadarDirtySignal::new();
         let worker = {
             let runs = runs.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move || {
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move |_| {
                 runs.fetch_add(1, Ordering::SeqCst);
             })
         };
@@ -615,6 +737,52 @@ mod tests {
             runs.load(Ordering::SeqCst),
             1,
             "the initial bootstrap signal must drive exactly one recompute at startup"
+        );
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn radar_recompute_worker_marks_live_refresh_only_when_requested() {
+        let refresh_flags = Arc::new(Mutex::new(Vec::new()));
+        let signal = RadarDirtySignal::new();
+        let worker = {
+            let refresh_flags = refresh_flags.clone();
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move |refresh| {
+                refresh_flags.lock().unwrap().push(refresh);
+            })
+        };
+
+        signal.mark_dirty_with_live_refresh();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        signal.mark_dirty();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(
+            *refresh_flags.lock().unwrap(),
+            vec![true, false],
+            "startup/cold-read signals request live refresh, heartbeat-style signals do not"
+        );
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn radar_watch_event_requests_live_refresh_before_recompute() {
+        let refresh_flags = Arc::new(Mutex::new(Vec::new()));
+        let signal = RadarDirtySignal::new();
+        let worker = {
+            let refresh_flags = refresh_flags.clone();
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move |refresh| {
+                refresh_flags.lock().unwrap().push(refresh);
+            })
+        };
+
+        kick_radar_after_watch_event(&signal);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(
+            *refresh_flags.lock().unwrap(),
+            vec![true],
+            "filesystem-triggered RADAR recomputes must ingest live transcript tails first"
         );
         worker.abort();
     }
@@ -631,7 +799,7 @@ mod tests {
         let worker = {
             let runs = runs.clone();
             let started = started.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(10), move || {
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(10), move |_| {
                 started.notify_one();
                 std::thread::sleep(Duration::from_millis(60));
                 runs.fetch_add(1, Ordering::SeqCst);
@@ -664,11 +832,15 @@ mod tests {
         let signal = RadarDirtySignal::new();
         let worker = {
             let runs = runs.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move || {
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move |_| {
                 runs.fetch_add(1, Ordering::SeqCst);
             })
         };
-        let tick = spawn_radar_tick(signal.clone(), agent_count.clone(), Duration::from_millis(20));
+        let tick = spawn_radar_tick(
+            signal.clone(),
+            agent_count.clone(),
+            Duration::from_millis(20),
+        );
 
         // Empty forest → the heartbeat must NOT fire any recompute.
         tokio::time::sleep(Duration::from_millis(120)).await;
@@ -701,6 +873,102 @@ mod tests {
         tick.abort();
     }
 
+    #[test]
+    fn live_ingest_with_new_events_marks_radar_dirty() {
+        let signal = RadarDirtySignal::new();
+        kick_radar_after_live_ingest(3, Some(&signal));
+
+        assert!(
+            signal.inner.dirty.load(Ordering::SeqCst),
+            "successful live ingest must immediately wake the radar recompute worker"
+        );
+    }
+
+    #[test]
+    fn live_ingest_relink_links_claude_subagent_before_radar_recompute() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let session = root.join("019sess");
+        let subs = session.join("subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+
+        let parent_jsonl = session.join("019sess.jsonl");
+        std::fs::write(&parent_jsonl, "{\"type\":\"assistant\",\"uuid\":\"a1\",\"sessionId\":\"019sess\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"sourceToolAssistantUuid\":\"a1\",\"message\":{\"role\":\"assistant\",\"model\":\"claude\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_live\",\"name\":\"Task\",\"input\":{}}]}}\n").unwrap();
+
+        let child_jsonl = subs.join("agent-c0ffee.jsonl");
+        std::fs::write(&child_jsonl, "{\"type\":\"user\",\"uuid\":\"cu\",\"sessionId\":\"019sess-sub\",\"isSidechain\":true,\"agentId\":\"c0ffee\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{\"content\":\"work\"}}\n").unwrap();
+        std::fs::write(
+            subs.join("agent-c0ffee.meta.json"),
+            r#"{"agentType":"Explore","description":"watch live ingest relink","toolUseId":"toolu_live"}"#,
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        let registry = AdapterRegistry::from_adapters(vec![Box::new(
+            ClaudeCodeAdapter::with_root(root, store.clone()),
+        )]);
+        ingest_file_once(&registry, &store, &parent_jsonl).unwrap();
+        ingest_file_once(&registry, &store, &child_jsonl).unwrap();
+
+        let child_sid = crate::util::stable_id(&[
+            "claude_code",
+            "agent-c0ffee",
+            &child_jsonl.to_string_lossy(),
+        ]);
+        assert_eq!(store.parent_of(&child_sid).unwrap(), None);
+
+        relink_after_live_ingest(&registry, &store, &child_jsonl);
+
+        let parent_sid =
+            crate::util::stable_id(&["claude_code", "019sess", &parent_jsonl.to_string_lossy()]);
+        assert_eq!(
+            store.parent_of(&child_sid).unwrap(),
+            Some(parent_sid),
+            "live ingest must resolve nesting before the cached radar state is refreshed"
+        );
+    }
+
+    #[test]
+    fn live_path_debounce_allows_growth_inside_window() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("live.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let mut last = HashMap::new();
+        let now = Instant::now();
+        let debounce = Duration::from_millis(250);
+
+        assert!(should_handle_live_path(&path, &mut last, now, debounce));
+        assert!(
+            !should_handle_live_path(&path, &mut last, now + Duration::from_millis(10), debounce),
+            "same-size duplicate inside debounce should still coalesce"
+        );
+
+        std::fs::write(&path, "new transcript bytes\n").unwrap();
+        assert!(
+            should_handle_live_path(&path, &mut last, now + Duration::from_millis(20), debounce),
+            "a transcript that grew inside the debounce window must be ingested immediately"
+        );
+    }
+
+    #[test]
+    fn radar_recompute_debounce_defaults_to_zero_and_ignores_ingest_debounce() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("WARDEN_WATCH_DEBOUNCE_MS", "250");
+        std::env::remove_var("WARDEN_RADAR_DEBOUNCE_MS");
+        assert_eq!(
+            radar_recompute_debounce(),
+            Duration::ZERO,
+            "RADAR emit latency must not inherit the ingest debounce"
+        );
+
+        std::env::set_var("WARDEN_RADAR_DEBOUNCE_MS", "17");
+        assert_eq!(radar_recompute_debounce(), Duration::from_millis(17));
+
+        std::env::remove_var("WARDEN_WATCH_DEBOUNCE_MS");
+        std::env::remove_var("WARDEN_RADAR_DEBOUNCE_MS");
+    }
+
     /// Build a registry over a single Codex adapter rooted at `root` (its archived
     /// root points at the same dir, harmless for these tests).
     fn codex_registry(root: &Path, store: Store) -> AdapterRegistry {
@@ -715,9 +983,7 @@ mod tests {
     /// that also appears in `session_meta.payload.id` — required so a tail parse
     /// (deriving the id from the filename) lands on the same session as backfill.
     fn write_rollout(dir: &Path, body: &str) -> PathBuf {
-        let p = dir.join(
-            "rollout-2026-06-19T16-33-00-019ee0ba-8295-7ba0-9971-c5af95e77191.jsonl",
-        );
+        let p = dir.join("rollout-2026-06-19T16-33-00-019ee0ba-8295-7ba0-9971-c5af95e77191.jsonl");
         std::fs::write(&p, body).unwrap();
         p
     }
@@ -739,7 +1005,7 @@ mod tests {
         let len = std::fs::metadata(&p).unwrap().len();
 
         let first = ingest_file_once(&registry, &store, &p).unwrap();
-        assert!(first >= 1, "first ingest must add events, got {first}");
+        assert!(first >= 1, "first ingest must report activity, got {first}");
         let (sessions, events_after_first, _) = store.counts().unwrap();
         assert_eq!(sessions, 1, "one session ingested");
         assert!(events_after_first >= 1);
@@ -751,12 +1017,58 @@ mod tests {
 
         // Re-run on the byte-identical file → resume, nothing new.
         let again = ingest_file_once(&registry, &store, &p).unwrap();
-        assert_eq!(again, 0, "unchanged file must add 0 events (watermark resume)");
+        assert_eq!(
+            again, 0,
+            "unchanged file must report 0 activity (watermark resume)"
+        );
         let (_, events_after_resume, _) = store.counts().unwrap();
         assert_eq!(
             events_after_resume, events_after_first,
             "event count unchanged after a resume run"
         );
+    }
+
+    #[test]
+    fn ingest_file_once_treats_empty_new_file_as_not_ready() {
+        let dir = tempdir().unwrap();
+        let store = Store::memory().unwrap();
+        let registry = codex_registry(dir.path(), store.clone());
+        let path = dir.path().join("rollout-2026-06-25T00-00-00-empty.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let added = ingest_file_once(&registry, &store, &path).unwrap();
+
+        assert_eq!(
+            added, 0,
+            "empty live-created transcript is not parse-ready yet"
+        );
+        assert_eq!(store.watermark_offset(&path).unwrap(), 0);
+    }
+
+    #[test]
+    fn ingest_file_once_reports_new_codex_session_even_without_events() {
+        let dir = tempdir().unwrap();
+        let store = Store::memory().unwrap();
+        let registry = codex_registry(dir.path(), store.clone());
+        let path = dir
+            .path()
+            .join("rollout-2026-06-25T00-00-00-019efd6c-8f60-7f42-8da1-3977122aa6be.jsonl");
+        let body = "{\"timestamp\":\"2026-06-25T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"019efd6c-8f60-7f42-8da1-3977122aa6be\",\"cwd\":\"/tmp/BornCodex\",\"model_provider\":\"openai\",\"originator\":\"Codex Desktop\",\"thread_source\":\"user\"}}\n";
+        std::fs::write(&path, body).unwrap();
+
+        let added = ingest_file_once(&registry, &store, &path).unwrap();
+
+        assert_eq!(
+            added, 1,
+            "a new metadata-only Codex rollout must still count as live ingest activity"
+        );
+        let (sessions, events, _) = store.counts().unwrap();
+        assert_eq!(
+            sessions, 1,
+            "the new Codex session is persisted immediately"
+        );
+        assert_eq!(events, 0, "session_meta alone does not fabricate events");
+        assert_eq!(store.watermark_offset(&path).unwrap(), body.len() as u64);
     }
 
     /// Appending one line yields exactly one new event and advances the watermark;
@@ -931,9 +1243,10 @@ mod tests {
     fn ingest_file_once_handles_claude() {
         let dir = tempdir().unwrap();
         let store = Store::memory().unwrap();
-        let registry = AdapterRegistry::for_test(vec![Box::new(
-            ClaudeCodeAdapter::with_root(dir.path().to_path_buf(), store.clone()),
-        )]);
+        let registry = AdapterRegistry::for_test(vec![Box::new(ClaudeCodeAdapter::with_root(
+            dir.path().to_path_buf(),
+            store.clone(),
+        ))]);
         // Filename stem IS the sessionId, matching the real Claude layout.
         let p = dir.path().join("019ee0ba.jsonl");
         let l1 = "{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"019ee0ba\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{\"content\":\"hi\"}}\n";

@@ -18,7 +18,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mountWarRoom, unmountWarRoom } from './mount';
-import { activeFor, frameloopFor } from './WarRoom';
+import { RADAR_VISIBLE_PULL_MS, activeFor, frameloopFor } from './WarRoom';
 
 afterEach(() => {
   // Reset module-level mount singletons so each case starts clean.
@@ -88,5 +88,11 @@ describe('activeFor — animate unless minimized (blur is irrelevant)', () => {
   it('minimize overrides everything', () => {
     expect(activeFor(false, false, true)).toBe(false);
     expect(activeFor(undefined, false, true)).toBe(false);
+  });
+});
+
+describe('RADAR visible-tab refresh', () => {
+  it('keeps the fallback pull under one second', () => {
+    expect(RADAR_VISIBLE_PULL_MS).toBeLessThanOrEqual(1000);
   });
 });

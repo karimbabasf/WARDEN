@@ -126,6 +126,9 @@ export function Orb({
   const color = useMemo(() => new THREE.Color(isHub ? theme.color : severityColor(severity)), [isHub, severity, theme.color]);
   const innerColor = useMemo(() => color.clone().lerp(WHITE, 0.24), [color]);
   const nodeColor = useMemo(() => color.clone().lerp(WHITE, 0.14), [color]);
+  // Far-hemisphere lattice: a very dark tint of the orb's OWN hue, never the old
+  // phosphor green (which blended to a chartreuse cast with warm front lines + bloom).
+  const backStroke = useMemo(() => `#${color.clone().multiplyScalar(0.16).getHexString()}`, [color]);
 
   // Shell/inner BASE colour responds to hover/select + the boolean `dimmed`
   // (other-node-selected) — these change on user action, not per frame, so they
@@ -175,7 +178,7 @@ export function Orb({
     // A legend match POPS: a real glow lift + a touch of scale so the chosen severity
     // / harness stands out, while the non-matches dim (litK) — tuned to be noticeable
     // without blowing out the bloom.
-    const emphasisGlow = emphasized ? 0.6 : 0;
+    const emphasisGlow = emphasized ? 0.9 : 0;
     const boost = (selected ? 0.22 : hovered ? 0.07 : 0) + (emphasized ? 0.08 : 0);
     const severityGlow = isHub ? 0.0 : (severity / 5) * 0.4;
     const targetScale = alive ? node.radius * (1 + boost) : 0.0001;
@@ -204,8 +207,8 @@ export function Orb({
     const dimK = 1 - s.dim * 0.6;
     // The legend filter also crushes opacity/emissive (not just colour) so a
     // filtered-out node falls below the bloom threshold → near-dark ember, while a
-    // match keeps its full halo and blooms. litK=1 when lit, ~0.18 when filtered.
-    const litK = 1 - s.colorDim * 0.82;
+    // match keeps its full halo and blooms. litK=1 when lit, ~0.1 when filtered.
+    const litK = 1 - s.colorDim * 0.9;
     gemMat.current.emissiveIntensity = (0.55 + s.glow * 0.6) * dimK * litK;
     haloMat.current.opacity = (0.2 + s.glow * 0.28) * dimK * litK;
     nodeMat.current.opacity = (0.45 + s.glow * 0.32) * dimK * litK;
@@ -213,8 +216,8 @@ export function Orb({
     // ── eased legend dim, COLOUR ONLY ───────────────────────────────────────
     // Copy each material's base colour, scale by the eased dim, write it back.
     // Copy-then-scale (never multiply in place) so the dim never compounds.
-    const shellScale = dimScale(s.colorDim, 0.18);
-    const innerScale = dimScale(s.colorDim, 0.22);
+    const shellScale = dimScale(s.colorDim, 0.08);
+    const innerScale = dimScale(s.colorDim, 0.1);
     if (!shellMat.current) shellMat.current = findWireframeMaterial(shellGroup.current);
     if (!cageMat.current) cageMat.current = findWireframeMaterial(innerGroup.current);
     if (shellMat.current) {
@@ -269,8 +272,12 @@ export function Orb({
           thickness={isHub ? 0.02 : 0.016}
           dash={!isHub}
           dashRepeats={isHub ? 1 : 4}
+          // drei's Wireframe `fill` defaults to PURE GREEN (#00ff00) and bleeds
+          // through the faces even at fillOpacity 0 — point it at the orb's own hue
+          // so the lattice can never pick up a green/chartreuse cast.
+          fill={shellStroke}
           fillOpacity={0}
-          backfaceStroke="#06150d"
+          backfaceStroke={backStroke}
         />
       </group>
 

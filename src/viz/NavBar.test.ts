@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TABS, navItemProps, type ConstellationTab } from './NavBar';
+import { PRIMARY_CONSTELLATION_TAB, TABS, navItemProps, type ConstellationTab } from './NavBar';
 
 // The NavBar component is presentational (verified live in the dev harness, like
 // the Scene render). What we CAN honestly assert in node is the pure tab model it
@@ -7,9 +7,10 @@ import { TABS, navItemProps, type ConstellationTab } from './NavBar';
 // `aria-current="page"` on exactly the active tab.
 
 describe('NavBar tab model', () => {
-  it('exposes exactly the Habits and Radar constellations, in order', () => {
-    expect(TABS.map((t) => t.id)).toEqual(['habits', 'radar']);
-    expect(TABS.map((t) => t.label)).toEqual(['Habits', 'Radar']);
+  it('exposes Radar first, with Habits as the secondary constellation', () => {
+    expect(PRIMARY_CONSTELLATION_TAB).toBe('radar');
+    expect(TABS.map((t) => t.id)).toEqual(['radar', 'habits']);
+    expect(TABS.map((t) => t.label)).toEqual(['Radar', 'Habits']);
   });
 
   it('marks only the active tab as the current page (a11y)', () => {

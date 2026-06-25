@@ -162,17 +162,7 @@ pub fn subagent_agent_id(path: &Path) -> String {
 pub fn collect_subagent_metas(paths: &[PathBuf]) -> Vec<SubagentMeta> {
     let mut metas = Vec::new();
     for p in paths {
-        let in_subagents = p
-            .parent()
-            .and_then(|d| d.file_name())
-            .map(|n| n == "subagents")
-            .unwrap_or(false);
-        let is_agent_file = p
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("agent-"))
-            .unwrap_or(false);
-        if !in_subagents || !is_agent_file {
+        if !is_subagent_session_path(p) {
             continue;
         }
         let meta_path = p.with_extension("meta.json");
@@ -231,16 +221,11 @@ pub fn ingest_all(
     {
         let mut agent_to_child: HashMap<String, &str> = HashMap::new();
         for b in &batches {
-            let is_subagent = b
-                .session
-                .source_path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n == "subagents")
-                .unwrap_or(false);
-            if is_subagent {
-                agent_to_child
-                    .insert(subagent_agent_id(&b.session.source_path), b.session.id.as_str());
+            if is_subagent_session_path(&b.session.source_path) {
+                agent_to_child.insert(
+                    subagent_agent_id(&b.session.source_path),
+                    b.session.id.as_str(),
+                );
             }
         }
         for m in &metas {
@@ -275,6 +260,7 @@ pub fn ingest_all(
     for (child, parent) in &pairs {
         store.link_child_session(child, parent)?;
     }
+    link_claude_subagents_in_store(store)?;
     Ok((sessions, events))
 }
 
@@ -285,59 +271,16 @@ pub fn ingest_all(
 pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
     let sessions = store.sessions()?;
 
-    // call_id → parent session id, scanned across every Claude session's events.
-    let mut call_to_parent: HashMap<String, String> = HashMap::new();
+    let mut candidates = Vec::new();
     for s in &sessions {
-        if !matches!(s.harness, Harness::ClaudeCode) {
+        if !matches!(s.harness, Harness::ClaudeCode) || !is_subagent_session_path(&s.source_path) {
             continue;
         }
-        for (_, e) in store.session_events(&s.id).unwrap_or_default() {
-            if let Event::ToolCall { tool, call_id, .. } = &e.event {
-                if tool == "Agent" || tool == "Task" {
-                    call_to_parent.insert(call_id.clone(), s.id.clone());
-                }
-            }
-        }
-    }
 
-    let mut recorded = 0;
-    for s in &sessions {
-        if !matches!(s.harness, Harness::ClaudeCode) {
-            continue;
-        }
-        let is_subagent = s
-            .source_path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n == "subagents")
-            .unwrap_or(false);
-        if !is_subagent {
-            continue;
-        }
-        // FAULT A: the durable `toolUseId` lives in the on-disk sidecar
-        // `agent-<id>.meta.json` next to the subagent transcript — NOT on the row.
-        // The live tail's `upsert_session_batch` REPLACEs `meta_json` with the
-        // `{"ignored_record_types":…}` parse-meta (non-empty ⇒ not the empty sentinel),
-        // clobbering any merged `toolUseId`; the scheduler path never re-runs the merge,
-        // so the row's `toolUseId` is permanently absent (0/740 on the live store).
-        // Read the sidecar from disk so linking is immune to that clobber. Fall back to
-        // the row meta for synthetic stores that never wrote a sidecar.
+        // The durable `toolUseId`/identity lives in the on-disk sidecar next to the
+        // subagent transcript. Repair the row once, then future relink calls can
+        // exit before scanning parent events.
         let sidecar = read_subagent_meta(&sidecar_path(&s.source_path)).ok();
-        let sidecar_tid = sidecar
-            .as_ref()
-            .map(|m| m.tool_use_id.as_str())
-            .filter(|t| !t.is_empty());
-        let tid = sidecar_tid.or_else(|| s.meta.get("toolUseId").and_then(|v| v.as_str()));
-        if let Some(parent) = tid.and_then(|t| call_to_parent.get(t)) {
-            if parent != &s.id {
-                store.link_child_session(&s.id, parent)?;
-                recorded += 1;
-            }
-        }
-        // Repair the durable identity fields the same clobber nulls
-        // (`toolUseId`/`agentType`/`description`), so the FACE detail-panel Role/name
-        // survive. Gate to only-when-missing to bound the write cost — once merged, the
-        // row carries them and subsequent recomputes skip the merge.
         if let Some(m) = sidecar.as_ref() {
             let row_has = |k: &str| {
                 s.meta
@@ -360,6 +303,57 @@ pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
                 )?;
             }
         }
+
+        if store.parent_of(&s.id)?.is_none() {
+            candidates.push((s, sidecar));
+        }
+    }
+
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let mut root_external_to_parent: HashMap<String, String> = HashMap::new();
+    for s in &sessions {
+        if matches!(s.harness, Harness::ClaudeCode) && !is_subagent_session_path(&s.source_path) {
+            root_external_to_parent.insert(s.external_id.clone(), s.id.clone());
+        }
+    }
+
+    // call_id → parent session id, scanned across every Claude session's events.
+    let mut call_to_parent: HashMap<String, String> = HashMap::new();
+    for s in &sessions {
+        if !matches!(s.harness, Harness::ClaudeCode) {
+            continue;
+        }
+        for (_, e) in store.session_events(&s.id).unwrap_or_default() {
+            if let Event::ToolCall { tool, call_id, .. } = &e.event {
+                if tool == "Agent" || tool == "Task" {
+                    call_to_parent.insert(call_id.clone(), s.id.clone());
+                }
+            }
+        }
+    }
+
+    let mut recorded = 0;
+    for (s, sidecar) in candidates {
+        let sidecar_tid = sidecar
+            .as_ref()
+            .map(|m| m.tool_use_id.as_str())
+            .filter(|t| !t.is_empty());
+        let tid = sidecar_tid.or_else(|| s.meta.get("toolUseId").and_then(|v| v.as_str()));
+        let parent = tid
+            .and_then(|t| call_to_parent.get(t).cloned())
+            .or_else(|| {
+                subagent_root_external_id(&s.source_path)
+                    .and_then(|root| root_external_to_parent.get(&root).cloned())
+        });
+        if let Some(parent) = parent {
+            if parent.as_str() != s.id.as_str() {
+                store.link_child_session(&s.id, &parent)?;
+                recorded += 1;
+            }
+        }
     }
     Ok(recorded)
 }
@@ -378,6 +372,33 @@ fn sidecar_path(transcript: &Path) -> PathBuf {
         Some(dir) => dir.join(format!("{stem}.meta.json")),
         None => PathBuf::from(format!("{stem}.meta.json")),
     }
+}
+
+pub fn is_subagent_session_path(path: &Path) -> bool {
+    subagent_transcript_external_id(path).is_some()
+}
+
+pub fn subagent_root_external_id(path: &Path) -> Option<String> {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    let idx = parts.iter().position(|p| p == "subagents")?;
+    if idx == 0 {
+        return None;
+    }
+    Some(parts[idx - 1].clone())
+}
+
+fn subagent_transcript_external_id(path: &Path) -> Option<String> {
+    subagent_root_external_id(path)?;
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| s.starts_with("agent-"))
+        .map(str::to_string)
 }
 
 /// Full (offset-0) parse: the first record carries `sessionId`, which resolves
@@ -426,10 +447,13 @@ fn parse_slice(
         .map(|(_, _, v)| v)
         .context("empty jsonl")?;
     let external_id = external_id_override.unwrap_or_else(|| {
-        first
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .map(str::to_string)
+        subagent_transcript_external_id(path)
+            .or_else(|| {
+                first
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()))
             .unwrap_or_else(|| stable_id(&[&path.to_string_lossy()]))
     });
@@ -975,13 +999,15 @@ mod tests {
 
         // Only the appended AssistantText event is present (the original user line is not in the slice).
         assert!(
-            b.events
-                .iter()
-                .any(|e| matches!(&e.event, Event::AssistantText { text } if text == "appended answer")),
+            b.events.iter().any(
+                |e| matches!(&e.event, Event::AssistantText { text } if text == "appended answer")
+            ),
             "appended AssistantText must be parsed"
         );
         assert!(
-            !b.events.iter().any(|e| matches!(e.event, Event::UserPrompt { .. })),
+            !b.events
+                .iter()
+                .any(|e| matches!(e.event, Event::UserPrompt { .. })),
             "the original user prompt is outside the slice and must not reappear"
         );
 
@@ -1000,6 +1026,102 @@ mod tests {
         }
         // Watermark advances to the new EOF.
         assert_eq!(b.offset, full.len() as u64, "watermark advances to new EOF");
+    }
+
+    #[test]
+    fn subagent_full_parse_and_tail_parse_use_same_agent_file_identity() {
+        let dir = tempdir().unwrap();
+        let subs = dir.path().join("root-session/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        let p = subs.join("agent-child123.jsonl");
+        let original = b"{\"type\":\"assistant\",\"uuid\":\"a1\",\"sessionId\":\"root-session\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"isSidechain\":true,\"message\":{\"role\":\"assistant\",\"model\":\"claude\",\"content\":\"starting\"}}\n";
+        std::fs::write(&p, original as &[u8]).unwrap();
+        let full = parse_file(&p, original, hash64(original)).unwrap();
+
+        let appended = b"{\"type\":\"assistant\",\"uuid\":\"a2\",\"parentUuid\":\"a1\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"isSidechain\":true,\"message\":{\"role\":\"assistant\",\"model\":\"claude\",\"content\":\"done\"}}\n";
+        let mut bytes = original.to_vec();
+        bytes.extend_from_slice(appended);
+        let store = Store::memory().unwrap();
+        let adapter = ClaudeCodeAdapter::with_root(dir.path().to_path_buf(), store);
+        let tail = adapter
+            .parse_range(&p, appended, original.len() as u64, hash64(&bytes))
+            .unwrap()
+            .remove(0);
+
+        assert_eq!(
+            full.session.external_id, "agent-child123",
+            "subagent identity must come from the transcript filename, not the root sessionId"
+        );
+        assert_eq!(
+            tail.session.id, full.session.id,
+            "full parse and incremental tail parse must update the same subagent row"
+        );
+    }
+
+    #[test]
+    fn nested_workflow_subagent_parse_uses_agent_file_identity() {
+        let dir = tempdir().unwrap();
+        let subs = dir
+            .path()
+            .join("root-session/subagents/workflows/wf_123");
+        std::fs::create_dir_all(&subs).unwrap();
+        let p = subs.join("agent-child123.jsonl");
+        let body = b"{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"root-session\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"isSidechain\":true,\"agentId\":\"child123\",\"message\":{\"role\":\"user\",\"content\":\"workflow child\"}}\n";
+        std::fs::write(&p, body as &[u8]).unwrap();
+
+        let parsed = parse_file(&p, body, hash64(body)).unwrap();
+
+        assert_eq!(
+            parsed.session.external_id, "agent-child123",
+            "nested workflow subagents must use their agent transcript filename, not the root sessionId"
+        );
+    }
+
+    #[test]
+    fn workflow_subagent_without_tool_use_links_to_root_session() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let subs = root.join("root-session/subagents/workflows/wf_123");
+        std::fs::create_dir_all(&subs).unwrap();
+
+        let parent_jsonl = root.join("root-session.jsonl");
+        std::fs::write(
+            &parent_jsonl,
+            "{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"root-session\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"spawn workflow\"}}\n",
+        )
+        .unwrap();
+
+        let child_jsonl = subs.join("agent-child123.jsonl");
+        std::fs::write(
+            &child_jsonl,
+            "{\"type\":\"user\",\"uuid\":\"cu\",\"sessionId\":\"root-session\",\"isSidechain\":true,\"agentId\":\"child123\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"workflow child\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            subs.join("agent-child123.meta.json"),
+            r#"{"agentType":"workflow-subagent","spawnDepth":1}"#,
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        ingest_all(&store, Some(root), None).unwrap();
+
+        let parent_sid = stable_id(&[
+            "claude_code",
+            "root-session",
+            &parent_jsonl.to_string_lossy(),
+        ]);
+        let child_sid = stable_id(&[
+            "claude_code",
+            "agent-child123",
+            &child_jsonl.to_string_lossy(),
+        ]);
+
+        assert_eq!(
+            store.parent_of(&child_sid).unwrap(),
+            Some(parent_sid),
+            "workflow subagents without toolUseId should still nest under their root session immediately"
+        );
     }
 
     /// Task 2 (RADAR): a subagent transcript under `<session>/subagents/` is
@@ -1038,7 +1160,10 @@ mod tests {
         assert_eq!(meta.agent_type, "Explore");
         assert_eq!(meta.description, "map frontend");
         assert_eq!(meta.tool_use_id, "toolu_01");
-        assert_eq!(meta.agent_id, "abc", "agent_id derived from agent-<id> stem");
+        assert_eq!(
+            meta.agent_id, "abc",
+            "agent_id derived from agent-<id> stem"
+        );
     }
 
     /// Task 3 end-to-end: a parent transcript that issues a `Task` tool-call
@@ -1071,14 +1196,10 @@ mod tests {
         ingest_all(&store, Some(proj.clone()), None).unwrap();
 
         // Resolve the two session ids the parser assigned (stable_id over path).
-        let parent_sid = stable_id(&[
-            "claude_code",
-            "019sess",
-            &parent_jsonl.to_string_lossy(),
-        ]);
+        let parent_sid = stable_id(&["claude_code", "019sess", &parent_jsonl.to_string_lossy()]);
         let child_sid = stable_id(&[
             "claude_code",
-            "019sess-sub",
+            "agent-deadbeef",
             &child_jsonl.to_string_lossy(),
         ]);
 
@@ -1394,7 +1515,7 @@ mod tests {
         let store = Store::memory().unwrap();
         ingest_all(&store, Some(proj), None).expect("ingest");
 
-        let child_sid = stable_id(&["claude_code", "child-sid", &child_jsonl.to_string_lossy()]);
+        let child_sid = stable_id(&["claude_code", "agent-abc", &child_jsonl.to_string_lossy()]);
         assert_eq!(
             session_meta_str(&store, &child_sid, "toolUseId").as_deref(),
             Some("toolu_99"),
