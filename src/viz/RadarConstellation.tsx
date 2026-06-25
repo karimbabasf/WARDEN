@@ -379,102 +379,116 @@ function RadarLinks({ layout, lifecycleRef }: { layout: OrbLayout; lifecycleRef:
   const baseLineColors = useRef<Float32Array>(new Float32Array(0));
   const baseDotColors = useRef<Float32Array>(new Float32Array(0));
 
-  const lineGeo = useMemo(() => {
-    const positions = new Float32Array(links.length * 6);
-    const colors = new Float32Array(links.length * 6);
-    links.forEach((link, i) => {
+  // One bowed bezier per parent→child edge, sampled into a gradient polyline — the
+  // SAME constellation treatment Habits gives its tethers (curved volume, not flat
+  // spokes), so every agent + its subagents read as one drawn figure. Tinted by each
+  // endpoint's radar heat colour and brightest at the parent, the constellation's anchor.
+  const SEG = 22;
+  const { lineGeo, dotGeo, curves, meta } = useMemo(() => {
+    const UP = new THREE.Vector3(0, 1, 0);
+    const curves: THREE.QuadraticBezierCurve3[] = [];
+    const linePos = new Float32Array(links.length * SEG * 6);
+    const lineCol = new Float32Array(links.length * SEG * 6);
+    const dotPos = new Float32Array(links.length * 3);
+    const dotCol = new Float32Array(links.length * 3);
+    const meta = links.map((link, idx) => {
       const parent = byId.get(link.source)!;
       const child = byId.get(link.target)!;
-      positions.set(
-        [parent.position.x, parent.position.y, parent.position.z, child.position.x, child.position.y, child.position.z],
-        i * 6,
-      );
-      const c = new THREE.Color(radarNodeColor(parent.radarAgent!));
-      colors.set([c.r, c.g, c.b, c.r * 0.4, c.g * 0.4, c.b * 0.4], i * 6);
-    });
-    baseLineColors.current = colors.slice();
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    return g;
-  }, [links, byId]);
+      const h = new THREE.Vector3(parent.position.x, parent.position.y, parent.position.z);
+      const c = new THREE.Vector3(child.position.x, child.position.y, child.position.z);
+      const dir = new THREE.Vector3().subVectors(c, h);
+      const len = dir.length() || 1;
+      const mid = new THREE.Vector3().addVectors(h, c).multiplyScalar(0.5);
+      // bow the cable off the straight line (perpendicular + a little lift) so the
+      // constellation has real 3D depth instead of collapsing onto flat spokes.
+      const perp = new THREE.Vector3().crossVectors(dir, UP);
+      if (perp.lengthSq() < 1e-4) perp.set(1, 0, 0);
+      perp.normalize();
+      const ctrl = mid.clone().add(perp.multiplyScalar(len * 0.16)).add(UP.clone().multiplyScalar(len * 0.06));
+      const curve = new THREE.QuadraticBezierCurve3(h, ctrl, c);
+      curves.push(curve);
 
-  const dotGeo = useMemo(() => {
-    const positions = new Float32Array(links.length * 3);
-    const colors = new Float32Array(links.length * 3);
-    links.forEach((link, i) => {
-      const c = new THREE.Color(radarNodeColor(byId.get(link.source)!.radarAgent!));
-      colors.set([c.r, c.g, c.b], i * 3);
+      const cParent = new THREE.Color(radarNodeColor(parent.radarAgent!));
+      const cChild = new THREE.Color(radarNodeColor(child.radarAgent!));
+      const pts = curve.getPoints(SEG);
+      const base = idx * SEG * 6;
+      for (let s = 0; s < SEG; s++) {
+        const ta = s / SEG;
+        const tb = (s + 1) / SEG;
+        const a = pts[s];
+        const b = pts[s + 1];
+        // brightest at the parent anchor, easing toward the child globe.
+        const ca = cParent.clone().lerp(cChild, ta).multiplyScalar(0.72 - 0.3 * ta);
+        const cb = cParent.clone().lerp(cChild, tb).multiplyScalar(0.72 - 0.3 * tb);
+        const o = base + s * 6;
+        linePos[o] = a.x; linePos[o + 1] = a.y; linePos[o + 2] = a.z;
+        linePos[o + 3] = b.x; linePos[o + 4] = b.y; linePos[o + 5] = b.z;
+        lineCol[o] = ca.r; lineCol[o + 1] = ca.g; lineCol[o + 2] = ca.b;
+        lineCol[o + 3] = cb.r; lineCol[o + 4] = cb.g; lineCol[o + 5] = cb.b;
+      }
+      dotCol[idx * 3] = cParent.r; dotCol[idx * 3 + 1] = cParent.g; dotCol[idx * 3 + 2] = cParent.b;
+      return { sourceId: link.source, targetId: link.target, phase: (idx * 0.37) % 1 };
     });
-    baseDotColors.current = colors.slice();
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    return g;
-  }, [links, byId]);
 
-  const meta = useMemo(
-    () =>
-      links.map((link, i) => ({
-        sourceId: link.source,
-        targetId: link.target,
-        parent: byId.get(link.source)!.position,
-        child: byId.get(link.target)!.position,
-        phase: (i * 0.37) % 1,
-      })),
-    [links, byId],
-  );
+    baseLineColors.current = lineCol.slice();
+    baseDotColors.current = dotCol.slice();
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+    lineGeo.setAttribute('color', new THREE.BufferAttribute(lineCol, 3));
+    const dotGeo = new THREE.BufferGeometry();
+    dotGeo.setAttribute('position', new THREE.BufferAttribute(dotPos, 3));
+    dotGeo.setAttribute('color', new THREE.BufferAttribute(dotCol, 3));
+    return { lineGeo, dotGeo, curves, meta };
+  }, [links, byId]);
 
   const lineMat = useRef<THREE.LineBasicMaterial>(null);
   const dotTex = useMemo(() => dotTexture(), []);
+  const tmp = useMemo(() => new THREE.Vector3(), []);
 
   useEffect(() => () => { lineGeo.dispose(); dotGeo.dispose(); }, [lineGeo, dotGeo]);
 
   useFrame((state) => {
     const t = state.clock.elapsedTime;
     const lc = lifecycleRef.current;
-    const dotPos = dotGeo.getAttribute('position') as THREE.BufferAttribute;
-    const lineCol = lineGeo.getAttribute('color') as THREE.BufferAttribute;
-    const dotCol = dotGeo.getAttribute('color') as THREE.BufferAttribute;
+    const dotPosAttr = dotGeo.getAttribute('position') as THREE.BufferAttribute;
+    const lineColAttr = lineGeo.getAttribute('color') as THREE.BufferAttribute;
+    const dotColAttr = dotGeo.getAttribute('color') as THREE.BufferAttribute;
     const baseLine = baseLineColors.current;
     const baseDot = baseDotColors.current;
-    const lineArr = lineCol.array as Float32Array;
-    const dotArr = dotCol.array as Float32Array;
+    const lineArr = lineColAttr.array as Float32Array;
+    const dotArr = dotColAttr.array as Float32Array;
+    const stride = SEG * 6;
 
     for (let i = 0; i < meta.length; i++) {
       const m = meta[i];
-      const tt = (t * 0.4 + m.phase) % 1; // parent → child (subagent travels out)
-      dotPos.setXYZ(
-        i,
-        m.parent.x + (m.child.x - m.parent.x) * tt,
-        m.parent.y + (m.child.y - m.parent.y) * tt,
-        m.parent.z + (m.child.z - m.parent.z) * tt,
-      );
+      const tt = (t * 0.4 + m.phase) % 1; // mote travels parent → child (subagent spawned outward)
+      curves[i].getPoint(tt, tmp);
+      dotPosAttr.setXYZ(i, tmp.x, tmp.y, tmp.z);
 
       // fade a link out in lockstep with whichever endpoint globe is shrinking
       // (imploding/gone). Live link (both endpoints alive) → factor 1 → unchanged.
       const factor = Math.min(lc[m.sourceId]?.scale ?? 1, lc[m.targetId]?.scale ?? 1);
-      const l = i * 6;
-      for (let k = 0; k < 6; k++) lineArr[l + k] = baseLine[l + k] * factor;
+      const l = i * stride;
+      for (let k = 0; k < stride; k++) lineArr[l + k] = baseLine[l + k] * factor;
       const d = i * 3;
       for (let k = 0; k < 3; k++) dotArr[d + k] = baseDot[d + k] * factor;
     }
-    dotPos.needsUpdate = true;
-    lineCol.needsUpdate = true;
-    dotCol.needsUpdate = true;
-    if (lineMat.current) lineMat.current.opacity = 0.22 + Math.sin(t * 1.4) * 0.05;
+    dotPosAttr.needsUpdate = true;
+    lineColAttr.needsUpdate = true;
+    dotColAttr.needsUpdate = true;
+    if (lineMat.current) lineMat.current.opacity = 0.4 + Math.sin(t * 1.3) * 0.08;
   });
 
   if (links.length === 0) return null;
   return (
     <group>
       <lineSegments geometry={lineGeo}>
-        <lineBasicMaterial ref={lineMat} vertexColors transparent opacity={0.24} toneMapped={false} blending={THREE.AdditiveBlending} />
+        <lineBasicMaterial ref={lineMat} vertexColors transparent opacity={0.42} depthWrite={false} toneMapped={false} blending={THREE.AdditiveBlending} />
       </lineSegments>
       <points geometry={dotGeo}>
         <pointsMaterial
           vertexColors
-          size={0.16}
+          size={0.18}
           map={dotTex}
           transparent
           opacity={0.95}
