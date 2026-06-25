@@ -98,6 +98,27 @@ pub fn radar_codex_stale_secs() -> u64 {
         .unwrap_or(6)
         * 3600
 }
+/// RADAR: how long a subagent may be silent (no transcript writes) while its parent
+/// is still alive before it is treated as terminated — a BACKSTOP only; the primary
+/// signal is the parent's tool-result for the subagent's call. `WARDEN_RADAR_SUBAGENT_TERMINATE_MS`
+/// overrides. Generous default (90s) so a long-running tool call is never mistaken
+/// for a finished subagent.
+pub fn radar_subagent_terminate_ms() -> u64 {
+    std::env::var("WARDEN_RADAR_SUBAGENT_TERMINATE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(90_000)
+}
+
+/// RADAR: how long a terminated subagent stays in the emitted forest (status
+/// "terminated") so the FACE can play its implode, before it is dropped. Derived
+/// from the permanent termination timestamp, so dropping is idempotent.
+pub fn radar_terminate_grace_ms() -> u64 {
+    std::env::var("WARDEN_RADAR_TERMINATE_GRACE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(5_000)
+}
 pub fn default_codex_archived_sessions() -> PathBuf {
     std::env::var("WARDEN_CODEX_ARCHIVED_SESSIONS")
         .map(|s| expand_tilde(&s))

@@ -34,10 +34,13 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{ActivationPolicy, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-/// Reveal the persistent overlay window: show, focus, and signal the frontend to
-/// animate in. Idempotent — safe to call when already visible.
+/// Reveal the persistent overlay window: maximize (fill the screen as a normal
+/// window — not fullscreen, which would split off its own Space and switch away on
+/// click-out), show, focus, and signal the frontend to animate in. Idempotent —
+/// safe to call when already visible.
 fn summon_overlay(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.maximize();
         let _ = w.show();
         let _ = w.set_focus();
         let _ = app.emit(
@@ -242,6 +245,11 @@ pub fn run() {
                 })
                 .map_err(|e| format!("global shortcut: {e}"))?;
             }
+
+            // Start maximized + on screen (Karim: "start out completely maximized").
+            // The overlay then stays put — it pauses only on minimize and never hides
+            // on blur. Remove this single call to revert to hotkey-only summon.
+            summon_overlay(&app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

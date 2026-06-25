@@ -207,11 +207,94 @@ pub fn assemble(
         kept_parent.insert(id.clone(), rp);
     }
 
+    // ── subagent termination ─────────────────────────────────────────────────────
+    // A subagent has no PID, so liveness can't see it finish. Derive it: the parent
+    // logged a tool-result for the subagent's call (permanent ⇒ idempotent), or the
+    // subagent fell silent past the backstop. Within a grace window we EMIT it as
+    // `terminated` (the FACE implodes it); past the window we DROP it from the forest
+    // so it never lingers as idle and never resurrects.
+    let terminate_ms = crate::util::radar_subagent_terminate_ms();
+    let grace_ms = crate::util::radar_terminate_grace_ms();
+    let mut terminated_now: HashSet<String> = HashSet::new();
+    let mut terminated_drop: HashSet<String> = HashSet::new();
+    for id in &keep {
+        let Some(Some(parent)) = kept_parent.get(id) else {
+            continue; // roots are never "terminated" (they Close instead)
+        };
+        let Some(child) = by_id.get(id.as_str()) else {
+            continue;
+        };
+        let tid = child.meta.get("toolUseId").and_then(|v| v.as_str());
+        let parent_events = store.session_events(parent).unwrap_or_default();
+        let last = mtime_secs_ago(&child.external_id)
+            .map(|secs| now - chrono::Duration::seconds(secs as i64));
+        if let Some(ts) = subagent_terminated_at(tid, &parent_events, last, now, terminate_ms) {
+            let age_ms = now.signed_duration_since(ts).num_milliseconds().max(0) as u64;
+            if age_ms <= grace_ms {
+                terminated_now.insert(id.clone());
+            } else {
+                terminated_drop.insert(id.clone());
+            }
+        }
+    }
+    // Drop past-grace terminated subagents from the forest entirely (BEFORE counts).
+    if !terminated_drop.is_empty() {
+        keep.retain(|id| !terminated_drop.contains(id));
+        kept_parent.retain(|id, _| !terminated_drop.contains(id));
+    }
+
     // childCount over the kept set only (a closed/duplicate child never inflates it).
     let mut child_count: HashMap<String, u32> = HashMap::new();
     for id in &keep {
         if let Some(Some(p)) = kept_parent.get(id) {
             *child_count.entry(p.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Per-parent subagent ordinals (1-based by spawn order) and per-folder root
+    // disambiguators (1-based by spawn order) — both over the KEPT set so the
+    // numbering is stable and never counts a dropped/closed sibling.
+    let started = |id: &str| by_id.get(id).map(|s| (s.started_at, s.id.clone()));
+    let mut subagent_ordinal: HashMap<String, u32> = HashMap::new();
+    {
+        let mut by_parent: HashMap<String, Vec<String>> = HashMap::new();
+        for id in &keep {
+            if let Some(Some(p)) = kept_parent.get(id) {
+                by_parent.entry(p.clone()).or_default().push(id.clone());
+            }
+        }
+        for sibs in by_parent.values_mut() {
+            sibs.sort_by_key(|id| started(id));
+            for (i, id) in sibs.iter().enumerate() {
+                subagent_ordinal.insert(id.clone(), (i as u32) + 1);
+            }
+        }
+    }
+    let mut root_dup_ordinal: HashMap<String, u32> = HashMap::new();
+    {
+        let mut by_folder: HashMap<String, Vec<String>> = HashMap::new();
+        for id in &keep {
+            let is_root = kept_parent.get(id).map(|p| p.is_none()).unwrap_or(true);
+            if !is_root {
+                continue;
+            }
+            let folder = by_id
+                .get(id.as_str())
+                .and_then(|s| s.project.as_ref())
+                .and_then(|p| p.cwd.file_name())
+                .map(|n| n.to_string_lossy().to_string());
+            if let Some(folder) = folder {
+                by_folder.entry(folder).or_default().push(id.clone());
+            }
+        }
+        for roots in by_folder.values_mut() {
+            if roots.len() < 2 {
+                continue; // a lone root keeps its bare folder name
+            }
+            roots.sort_by_key(|id| started(id));
+            for (i, id) in roots.iter().enumerate() {
+                root_dup_ordinal.insert(id.clone(), (i as u32) + 1);
+            }
         }
     }
 
@@ -224,15 +307,27 @@ pub fn assemble(
         }
         let parent_id = kept_parent.get(&s.id).cloned().flatten();
         let depth = depth_of(&s.id, &kept_parent);
-        let status = agent_status(s, &claude_status, &mtime_secs_ago);
-        agents.push(build_agent(
+        let status = if terminated_now.contains(&s.id) {
+            AgentStatus::Terminated
+        } else {
+            agent_status(s, &claude_status, &mtime_secs_ago)
+        };
+        let mut agent = build_agent(
             store,
             s,
             parent_id,
             depth,
             *child_count.get(&s.id).unwrap_or(&0),
             status,
-        ));
+        );
+        agent.label = display_label(
+            depth,
+            agent.cwd.as_deref(),
+            subagent_ordinal.get(&s.id).copied(),
+            root_dup_ordinal.get(&s.id).copied(),
+            &agent.label,
+        );
+        agents.push(agent);
     }
 
     RadarState {
@@ -611,6 +706,66 @@ fn clean_task_label(raw: &str) -> String {
         _ => collapsed.as_str(),
     };
     crate::util::truncate_chars(cleaned, 60)
+}
+
+/// The radar display label. Roots are named by their project folder; subagents by a
+/// per-parent ordinal ("subagent N"). `root_dup_ordinal` is `Some(n)` only when
+/// several live roots share `cwd_basename` — `n == 1` (the oldest) keeps the bare
+/// name, `n >= 2` gets a circled disambiguator. `fallback` is the identity-derived
+/// label, used only for a root with no project folder.
+fn display_label(
+    depth: u32,
+    cwd_basename: Option<&str>,
+    subagent_ordinal: Option<u32>,
+    root_dup_ordinal: Option<u32>,
+    fallback: &str,
+) -> String {
+    if depth >= 1 {
+        return format!("subagent {}", subagent_ordinal.unwrap_or(1));
+    }
+    match cwd_basename {
+        Some(name) if !name.is_empty() => match root_dup_ordinal {
+            Some(n) if n >= 2 => format!("{name} {}", circled(n)),
+            _ => name.to_string(),
+        },
+        _ => fallback.to_string(),
+    }
+}
+
+/// Circled-number glyph for 2..=20 (② = U+2461 = U+2460 + (n-1)), else " (n)".
+fn circled(n: u32) -> String {
+    if (2..=20).contains(&n) {
+        char::from_u32(0x2460 + (n - 1))
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| format!("({n})"))
+    } else {
+        format!("({n})")
+    }
+}
+
+/// When a subagent became terminated, or `None` if still live.
+/// Primary: the parent logged a tool RESULT for the subagent's `tool_use_id` →
+/// terminated at the result's timestamp (a permanent transcript fact ⇒ idempotent
+/// across recomputes). Backstop: no result, but the subagent has been silent longer
+/// than `terminate_ms` while its parent is alive → terminated at `last + terminate_ms`.
+fn subagent_terminated_at(
+    tool_use_id: Option<&str>,
+    parent_events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+    child_last_activity: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    terminate_ms: u64,
+) -> Option<DateTime<Utc>> {
+    if let Some(tid) = tool_use_id {
+        if let Some(ts) = parent_events.iter().rev().find_map(|(_, e)| match &e.event {
+            Event::ToolResult { call_id, .. } if call_id == tid => Some(e.ts),
+            _ => None,
+        }) {
+            return Some(ts);
+        }
+    }
+    let last = child_last_activity?;
+    let quiet_ms = now.signed_duration_since(last).num_milliseconds().max(0) as u64;
+    (quiet_ms > terminate_ms).then(|| last + chrono::Duration::milliseconds(terminate_ms as i64))
 }
 
 /// A leading prompt token that is an attachment path (`@…`) or a bare URL — noise to
@@ -1137,8 +1292,8 @@ mod tests {
         assert_eq!(root.parent_id, None);
         assert_eq!(root.child_count, 1, "root has one linked child");
         assert_eq!(
-            root.label, "do the thing",
-            "a Claude root is labeled by its originating task"
+            root.label, "MyRepo",
+            "a Claude root is labeled by its project folder (B1)"
         );
         assert_eq!(
             root.cwd.as_deref(),
@@ -1363,7 +1518,7 @@ mod tests {
     /// in the same repo are differentiated by what each is doing. The folder basename
     /// is still exposed (as `cwd`) for the secondary "folder · model" subtitle.
     #[test]
-    fn claude_root_label_is_its_task_with_cwd_exposed() {
+    fn claude_root_label_is_its_folder_with_cwd_exposed() {
         let store = Store::memory().unwrap();
         seed(
             &store,
@@ -1377,8 +1532,8 @@ mod tests {
         let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
         let a = state.agents.iter().find(|a| a.id == "r").expect("root present");
         assert_eq!(
-            a.label, "do the thing",
-            "a Claude root is named by its originating task, not the cwd basename"
+            a.label, "WARDEN",
+            "a Claude root is named by its project folder (B1), not its originating task"
         );
         assert_eq!(
             a.cwd.as_deref(),
@@ -1434,8 +1589,8 @@ mod tests {
             .find(|a| a.id == "c-sid")
             .expect("child present");
         assert_eq!(
-            c.label, "hunt for dead code in the radar module",
-            "Claude subagent label is its description"
+            c.label, "subagent 1",
+            "Claude subagent label is its per-parent ordinal (B1), not its description"
         );
         assert_eq!(
             c.role.as_deref(),
@@ -1443,9 +1598,9 @@ mod tests {
             "Claude subagent role is its agentType"
         );
 
-        // Root is labeled by its task; its folder is still exposed as `cwd`.
+        // Root is labeled by its project folder; its folder is still exposed as `cwd`.
         let p = state.agents.iter().find(|a| a.id == "p-sid").unwrap();
-        assert_eq!(p.label, "do the thing", "root label is its originating task");
+        assert_eq!(p.label, "MyRepo", "root label is its project folder (B1)");
         assert_eq!(p.cwd.as_deref(), Some("MyRepo"), "root still exposes its cwd");
     }
 
@@ -1599,5 +1754,237 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Build a `(Turn, EventRecord)` carrying a single `ToolResult` for `call_id` at
+    /// timestamp `ts` — the parent-side termination fact `subagent_terminated_at` reads.
+    fn mk_tool_result_event(call_id: &str, ts: DateTime<Utc>) -> (Turn, EventRecord) {
+        let turn = Turn {
+            id: "p-t".into(),
+            session_id: "parent".into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: ts,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let rec = EventRecord {
+            id: format!("res-{call_id}"),
+            turn_id: "p-t".into(),
+            session_id: "parent".into(),
+            ts,
+            event: Event::ToolResult {
+                call_id: call_id.into(),
+                status: ToolStatus::Ok,
+                bytes: 0,
+                summary: None,
+            },
+            raw_ref: RawRef {
+                source_path: PathBuf::from("/tmp/parent.jsonl"),
+                offset: 0,
+                line: 1,
+            },
+        };
+        (turn, rec)
+    }
+
+    // ── B4: pure termination decision ────────────────────────────────────────────
+    #[test]
+    fn subagent_terminated_at_uses_result_then_timeout() {
+        let now = Utc::now();
+        let result_ts = now - chrono::Duration::seconds(2);
+        let parent_events = vec![mk_tool_result_event("toolu_5", result_ts)];
+
+        // Primary: a matching tool-result → terminated at the result's ts.
+        assert_eq!(
+            subagent_terminated_at(Some("toolu_5"), &parent_events, Some(now), now, 90_000),
+            Some(result_ts)
+        );
+        // No result, recently active → still live.
+        assert_eq!(
+            subagent_terminated_at(
+                Some("toolu_x"),
+                &[],
+                Some(now - chrono::Duration::seconds(3)),
+                now,
+                90_000
+            ),
+            None
+        );
+        // No result, silent past the backstop → terminated at (last + timeout).
+        let last = now - chrono::Duration::seconds(200);
+        assert_eq!(
+            subagent_terminated_at(Some("toolu_x"), &[], Some(last), now, 90_000),
+            Some(last + chrono::Duration::milliseconds(90_000))
+        );
+        // No tool_use_id and no last activity → never terminated.
+        assert_eq!(subagent_terminated_at(None, &[], None, now, 90_000), None);
+    }
+
+    // ── B1: folder/subagent naming ───────────────────────────────────────────────
+    #[test]
+    fn display_label_names_root_by_folder_and_subagent_by_ordinal() {
+        // root with a folder → the folder name
+        assert_eq!(display_label(0, Some("WARDEN"), None, None, "fallback"), "WARDEN");
+        // a second live root in the same folder → circled disambiguator (oldest keeps bare name)
+        assert_eq!(display_label(0, Some("WARDEN"), None, Some(2), "fallback"), "WARDEN ②");
+        assert_eq!(display_label(0, Some("WARDEN"), None, Some(1), "fallback"), "WARDEN");
+        // root with no folder → falls back to the identity label
+        assert_eq!(display_label(0, None, None, None, "diagnose the bug"), "diagnose the bug");
+        // subagent → strictly "subagent N", regardless of any role/description
+        assert_eq!(display_label(1, Some("WARDEN"), Some(1), None, "Explore"), "subagent 1");
+        assert_eq!(display_label(2, None, Some(3), None, "x"), "subagent 3");
+    }
+
+    /// Seed: a live Claude ROOT that logged a `ToolResult` for `call_id` (the
+    /// subagent's completion signal) + a Claude SUBAGENT under `/subagents/` carrying
+    /// `meta.toolUseId == call_id`, linked to the root. The root's tool-result is
+    /// timestamped at `result_ts` (a fixed point so the test can advance `now` around
+    /// the grace window). Returns nothing; the root's external id is `{root}-ext`.
+    fn seed_root_with_terminated_subagent(
+        store: &Store,
+        root: &str,
+        sub: &str,
+        call_id: &str,
+        result_ts: DateTime<Utc>,
+    ) {
+        // Root session with a ToolResult event for `call_id`.
+        let root_session = Session {
+            id: root.into(),
+            harness: Harness::ClaudeCode,
+            external_id: format!("{root}-ext"),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/Users/k/Developer/MyRepo"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec![],
+            started_at: result_ts - chrono::Duration::seconds(10),
+            ended_at: None,
+            source_path: PathBuf::from(format!("/tmp/{root}.jsonl")),
+            raw_hash: 0,
+            ingested_at: result_ts,
+            meta: serde_json::json!({}),
+        };
+        let root_turn = Turn {
+            id: format!("{root}-t0"),
+            session_id: root.into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: result_ts,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let root_result = EventRecord {
+            id: format!("{root}-res"),
+            turn_id: format!("{root}-t0"),
+            session_id: root.into(),
+            ts: result_ts,
+            event: Event::ToolResult {
+                call_id: call_id.into(),
+                status: ToolStatus::Ok,
+                bytes: 0,
+                summary: None,
+            },
+            raw_ref: RawRef {
+                source_path: root_session.source_path.clone(),
+                offset: 0,
+                line: 1,
+            },
+        };
+        store
+            .upsert_session_batch(&root_session, &[root_turn], &[root_result], 0)
+            .unwrap();
+
+        // Subagent session under /subagents/ with meta.toolUseId == call_id.
+        let sub_session = Session {
+            id: sub.into(),
+            harness: Harness::ClaudeCode,
+            external_id: format!("{sub}-ext"),
+            project: None,
+            model_ids: vec![],
+            started_at: result_ts - chrono::Duration::seconds(5),
+            ended_at: None,
+            source_path: PathBuf::from(format!("/tmp/proj/sess/subagents/agent-{sub}.jsonl")),
+            raw_hash: 0,
+            ingested_at: result_ts,
+            meta: serde_json::json!({}),
+        };
+        store.upsert_session_batch(&sub_session, &[], &[], 0).unwrap();
+        store.merge_session_meta(sub, &serde_json::json!({ "toolUseId": call_id })).unwrap();
+        store.link_child_session(sub, root).unwrap();
+    }
+
+    /// Read back the timestamp of the root's `ToolResult` for `call_id` (the fixed t0
+    /// the termination decision keys on).
+    fn result_ts_of(store: &Store, root: &str, call_id: &str) -> DateTime<Utc> {
+        store
+            .session_events(root)
+            .unwrap()
+            .into_iter()
+            .find_map(|(_, e)| match &e.event {
+                Event::ToolResult { call_id: c, .. } if c == call_id => Some(e.ts),
+                _ => None,
+            })
+            .expect("root must carry the tool-result")
+    }
+
+    /// B4 end-to-end: a subagent whose parent logged its tool-result is emitted ONCE
+    /// as `terminated` (within the grace window so the FACE can implode it), then
+    /// DROPPED from the forest past the grace window, and stays dropped on every later
+    /// recompute (a permanent fact ⇒ no resurrection).
+    #[test]
+    fn terminated_subagent_is_emitted_once_then_dropped_and_never_resurrects() {
+        let store = Store::memory().unwrap();
+        let t0 = Utc::now() - chrono::Duration::seconds(120); // a fixed past instant
+        seed_root_with_terminated_subagent(&store, "root", "sub", "toolu_1", t0);
+        let reg = claude_registry(&[(4242, "root-ext")]); // root is registry-open
+        let t0 = result_ts_of(&store, "root", "toolu_1");
+
+        // Within the 5s grace window → present as "terminated".
+        let s1 = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            t0 + chrono::Duration::seconds(1),
+        );
+        let sub = s1
+            .agents
+            .iter()
+            .find(|a| a.id == "sub")
+            .expect("present within grace");
+        assert_eq!(sub.status, "terminated");
+
+        // Past the grace window → dropped from the forest.
+        let s2 = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            t0 + chrono::Duration::seconds(30),
+        );
+        assert!(
+            s2.agents.iter().all(|a| a.id != "sub"),
+            "dropped past grace"
+        );
+
+        // Stays dropped (no resurrection) on a still-later recompute.
+        let s3 = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            t0 + chrono::Duration::seconds(60),
+        );
+        assert!(
+            s3.agents.iter().all(|a| a.id != "sub"),
+            "stays dropped (no resurrection)"
+        );
+
+        // The root itself is never terminated — it remains in the forest.
+        assert!(s2.agents.iter().any(|a| a.id == "root"), "root persists");
     }
 }

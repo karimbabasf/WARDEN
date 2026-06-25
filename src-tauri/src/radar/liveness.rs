@@ -14,12 +14,15 @@
 use std::path::Path;
 
 /// An agent's live status. `Working` = generating now (recent transcript write),
-/// `Idle` = open but quiet, `Closed` = gone (dead PID / archived) → imploded away.
+/// `Idle` = open but quiet, `Closed` = gone (dead PID / archived) → imploded away,
+/// `Terminated` = a finished subagent (its parent logged the tool-result, or it fell
+/// silent past the backstop) → imploded once, never resurrected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
     Working,
     Idle,
     Closed,
+    Terminated,
 }
 
 impl AgentStatus {
@@ -29,6 +32,7 @@ impl AgentStatus {
             AgentStatus::Working => "working",
             AgentStatus::Idle => "idle",
             AgentStatus::Closed => "closed",
+            AgentStatus::Terminated => "terminated",
         }
     }
 }
@@ -313,5 +317,12 @@ mod tests {
     #[test]
     fn read_claude_registry_missing_dir_is_empty() {
         assert!(read_claude_registry(Path::new("/no/such/dir/warden-x")).is_empty());
+    }
+
+    /// B4: a finished subagent's wire status. New snake_case value in the
+    /// `radar_state` contract; existing values are unchanged.
+    #[test]
+    fn agent_status_terminated_wire_value() {
+        assert_eq!(AgentStatus::Terminated.as_str(), "terminated");
     }
 }

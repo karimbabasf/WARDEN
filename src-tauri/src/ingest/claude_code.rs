@@ -257,42 +257,67 @@ pub fn ingest_all(
         store.upsert_session_batch(&b.session, &b.turns, &b.events, b.offset)?;
         sessions += 1;
     }
-    // Persist linkage now that both parent and child rows exist, and thread the
-    // subagent's description/agentType onto the child row (label/role for RADAR).
+    // Persist each subagent's sidecar fields onto its OWN session row, independent of
+    // whether the parent link resolved this ingest pass — `toolUseId` is the key the
+    // recompute-time linker (B3) and terminator (B4) match against, so it must be
+    // present even before the parent's Task call has been ingested.
+    for (child_sid, meta) in &child_sid_to_meta {
+        store.merge_session_meta(
+            child_sid,
+            &json!({
+                "description": meta.description,
+                "agentType": meta.agent_type,
+                "toolUseId": meta.tool_use_id,
+            }),
+        )?;
+    }
+    // Persist linkage now that both parent and child rows exist.
     for (child, parent) in &pairs {
         store.link_child_session(child, parent)?;
-        if let Some(meta) = child_sid_to_meta.get(child.as_str()) {
-            store.merge_session_meta(
-                child,
-                &json!({ "description": meta.description, "agentType": meta.agent_type }),
-            )?;
-        }
     }
     Ok((sessions, events))
 }
 
-/// RADAR (Finding 2): re-derive Claude subagent parent→child links over every
-/// persisted session and record them via `Store::link_child_session`. Derived
-/// purely from store state — each parent's `SubagentSpawn.child_session` (filled
-/// during ingest) names its child — so it is safe to run idempotently on each radar
-/// recompute (re-recording the same parent is a plain UPDATE). Returns the number
-/// of links (re)recorded. A spawn whose `child_session` is still `None` (child not
-/// yet ingested) is skipped — children are never fabricated.
+/// Re-derive Claude subagent→parent links from the WHOLE store (not a single ingest
+/// pass): match each subagent's persisted `toolUseId` to the parent session whose
+/// transcript contains the `Task`/`Agent` tool-call with that `call_id`. Idempotent
+/// — both facts are permanent, so it converges no matter how the writes interleaved.
 pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
     let sessions = store.sessions()?;
+
+    // call_id → parent session id, scanned across every Claude session's events.
+    let mut call_to_parent: HashMap<String, String> = HashMap::new();
+    for s in &sessions {
+        if !matches!(s.harness, Harness::ClaudeCode) {
+            continue;
+        }
+        for (_, e) in store.session_events(&s.id).unwrap_or_default() {
+            if let Event::ToolCall { tool, call_id, .. } = &e.event {
+                if tool == "Agent" || tool == "Task" {
+                    call_to_parent.insert(call_id.clone(), s.id.clone());
+                }
+            }
+        }
+    }
+
     let mut recorded = 0;
     for s in &sessions {
         if !matches!(s.harness, Harness::ClaudeCode) {
             continue;
         }
-        let events = store.session_events(&s.id).unwrap_or_default();
-        for (_, e) in events {
-            if let Event::SubagentSpawn {
-                child_session: Some(child),
-                ..
-            } = e.event
-            {
-                store.link_child_session(&child, &s.id)?;
+        let is_subagent = s
+            .source_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n == "subagents")
+            .unwrap_or(false);
+        if !is_subagent {
+            continue;
+        }
+        let tid = s.meta.get("toolUseId").and_then(|v| v.as_str());
+        if let Some(parent) = tid.and_then(|t| call_to_parent.get(t)) {
+            if parent != &s.id {
+                store.link_child_session(&s.id, parent)?;
                 recorded += 1;
             }
         }
@@ -1055,5 +1080,162 @@ mod tests {
         let store = Store::memory().unwrap();
         assert_eq!(ingest_all(&store, Some(root.clone()), None).unwrap().0, 1);
         assert_eq!(ingest_all(&store, Some(root), None).unwrap().0, 0);
+    }
+
+    /// Read one top-level meta_json field off a stored session row (test helper —
+    /// there is no `Store::session_meta_value`, so we read via `sessions()`).
+    fn session_meta_str(store: &Store, sid: &str, key: &str) -> Option<String> {
+        store
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == sid)?
+            .meta
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Build a bare session row directly (no transcript), with an optional
+    /// `/subagents/` source path and an optional `toolUseId` on its meta. Used by the
+    /// B3 cross-pass relink test.
+    fn upsert_bare_session(store: &Store, id: &str, is_subagent: bool, tool_use_id: Option<&str>) {
+        let now = chrono::Utc::now();
+        let source_path = if is_subagent {
+            PathBuf::from(format!("/tmp/proj/sess/subagents/agent-{id}.jsonl"))
+        } else {
+            PathBuf::from(format!("/tmp/proj/{id}.jsonl"))
+        };
+        let session = Session {
+            id: id.into(),
+            harness: Harness::ClaudeCode,
+            external_id: format!("{id}-ext"),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path,
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({}),
+        };
+        store.upsert_session_batch(&session, &[], &[], 0).unwrap();
+        if let Some(tid) = tool_use_id {
+            store
+                .merge_session_meta(id, &json!({ "toolUseId": tid }))
+                .unwrap();
+        }
+    }
+
+    /// Insert a parent session carrying a single `Agent` tool-call with `call_id`.
+    fn upsert_parent_with_agent_call(store: &Store, id: &str, call_id: &str) {
+        let now = chrono::Utc::now();
+        let session = Session {
+            id: id.into(),
+            harness: Harness::ClaudeCode,
+            external_id: format!("{id}-ext"),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: PathBuf::from(format!("/tmp/proj/{id}.jsonl")),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({}),
+        };
+        let turn = crate::ir::Turn {
+            id: format!("{id}-t0"),
+            session_id: id.into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let event = EventRecord {
+            id: format!("{id}-call"),
+            turn_id: format!("{id}-t0"),
+            session_id: id.into(),
+            ts: now,
+            event: Event::ToolCall {
+                tool: "Agent".into(),
+                input: serde_json::json!({}),
+                call_id: call_id.into(),
+                kind: crate::ir::ToolKind::SubagentTask,
+            },
+            raw_ref: crate::ir::RawRef {
+                source_path: session.source_path.clone(),
+                offset: 0,
+                line: 1,
+            },
+        };
+        store
+            .upsert_session_batch(&session, &[turn], &[event], 0)
+            .unwrap();
+    }
+
+    /// B3: the parent's `Agent`/`Task` tool-call and the subagent's persisted
+    /// `toolUseId` can arrive in DIFFERENT ingest passes. The store-wide relinker must
+    /// still resolve the parent (the old `SubagentSpawn.child_session` linker did not,
+    /// because that pointer is only filled when both are ingested together).
+    #[test]
+    fn relink_resolves_subagent_across_ingest_passes() {
+        let store = Store::memory().unwrap();
+        // Pass 1: only the subagent row + its toolUseId (parent's Agent call not yet in).
+        upsert_bare_session(&store, "child-sid", true, Some("toolu_77"));
+        assert_eq!(store.parent_of("child-sid").unwrap(), None, "no parent yet");
+
+        // Pass 2: the parent session arrives carrying the Agent tool-call call_id.
+        upsert_parent_with_agent_call(&store, "parent-sid", "toolu_77");
+
+        let n = link_claude_subagents_in_store(&store).expect("relink");
+        assert!(n >= 1, "at least one link recorded");
+        assert_eq!(
+            store.parent_of("child-sid").unwrap().as_deref(),
+            Some("parent-sid"),
+            "subagent links to the parent whose Agent call_id == its toolUseId"
+        );
+    }
+
+    /// B2: a subagent transcript whose PARENT is not ingested in this pass still gets
+    /// `toolUseId` (plus description/agentType) persisted onto its own session row, so
+    /// the recompute-time linker (B3) and terminator (B4) can match on it later.
+    #[test]
+    fn subagent_meta_persists_tool_use_id_even_without_parent() {
+        let dir = tempdir().unwrap();
+        let proj = dir.path().join("proj");
+        // Only the subagent transcript + sidecar meta — NO parent transcript at all.
+        let subs = proj.join("session-1").join("subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        let child_jsonl = subs.join("agent-abc.jsonl");
+        std::fs::write(
+            &child_jsonl,
+            "{\"type\":\"user\",\"uuid\":\"cu\",\"sessionId\":\"child-sid\",\"isSidechain\":true,\"agentId\":\"abc\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{\"content\":\"go\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            subs.join("agent-abc.meta.json"),
+            r#"{"agentType":"Explore","description":"map it","toolUseId":"toolu_99"}"#,
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        ingest_all(&store, Some(proj), None).expect("ingest");
+
+        let child_sid = stable_id(&["claude_code", "child-sid", &child_jsonl.to_string_lossy()]);
+        assert_eq!(
+            session_meta_str(&store, &child_sid, "toolUseId").as_deref(),
+            Some("toolu_99"),
+            "toolUseId must be persisted on the subagent row even without a parent this pass"
+        );
+        assert_eq!(
+            session_meta_str(&store, &child_sid, "agentType").as_deref(),
+            Some("Explore")
+        );
+        assert_eq!(
+            session_meta_str(&store, &child_sid, "description").as_deref(),
+            Some("map it")
+        );
     }
 }
