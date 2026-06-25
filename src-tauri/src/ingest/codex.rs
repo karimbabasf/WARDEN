@@ -330,6 +330,7 @@ fn parse_slice(
         let rec_type = v.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let payload = v.get("payload").cloned().unwrap_or(Value::Null);
         let pt = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        remember_model_context_window(&mut meta, &payload);
 
         match rec_type {
             "session_meta" => {
@@ -666,6 +667,24 @@ fn parse_slice(
     })
 }
 
+fn remember_model_context_window(meta: &mut Value, payload: &Value) {
+    let window = payload
+        .get("model_context_window")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            payload
+                .pointer("/info/model_context_window")
+                .and_then(Value::as_u64)
+        })
+        .filter(|n| *n > 0);
+    let Some(window) = window else {
+        return;
+    };
+    if let Some(obj) = meta.as_object_mut() {
+        obj.insert("model_context_window".to_string(), json!(window));
+    }
+}
+
 /// Return the currently-open turn id, opening a fresh assistant turn if none is
 /// active (records can legitimately arrive before/after a task boundary).
 fn current_or_open(
@@ -823,6 +842,14 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
         assert_eq!(b.session.model_ids, want_models, "model_ids mismatch");
+        assert_eq!(
+            b.session
+                .meta
+                .get("model_context_window")
+                .and_then(Value::as_u64),
+            Some(258_400),
+            "Codex model_context_window must be preserved for RADAR window sizing"
+        );
 
         // project.cwd from session_meta.payload.cwd.
         let project = b.session.project.as_ref().expect("project set from cwd");

@@ -17,7 +17,7 @@ pub mod liveness;
 
 pub use liveness::{AgentStatus, LiveSession};
 
-use crate::ir::{Event, Harness, Session, ToolKind};
+use crate::ir::{Event, EventRecord, Harness, Session, ToolKind};
 use crate::store::Store;
 use chrono::{DateTime, Utc};
 use composition::{
@@ -416,13 +416,21 @@ fn agent_status(
     // FAULT B: conversation-state first (deterministic), mtime only as a last resort.
     let stale_secs = crate::util::radar_working_stale_secs();
     let working_secs = crate::util::radar_working_ms() / 1000;
-    if matches!(s.harness, Harness::Codex) && source_has_uningested_tail(store, s) {
-        return match mtime_secs_ago(&s.external_id) {
-            Some(secs) if secs < working_secs => AgentStatus::Working,
-            _ => AgentStatus::Idle,
-        };
-    }
     let events = store.session_events(&s.id).unwrap_or_default();
+    if matches!(s.harness, Harness::Codex) {
+        let has_uningested_tail = source_has_uningested_tail(store, s);
+        if let Some(st) =
+            codex_status_from_last_event(&events, now, stale_secs, has_uningested_tail)
+        {
+            return st;
+        }
+        if has_uningested_tail {
+            return match mtime_secs_ago(&s.external_id) {
+                Some(secs) if secs < working_secs => AgentStatus::Working,
+                _ => AgentStatus::Idle,
+            };
+        }
+    }
     if let Some(st) = liveness::status_from_last_event(&events, now, stale_secs) {
         return st;
     }
@@ -431,6 +439,63 @@ fn agent_status(
         Some(secs) if secs < working_secs => AgentStatus::Working,
         _ => AgentStatus::Idle,
     }
+}
+
+fn codex_status_from_last_event(
+    events: &[(crate::ir::Turn, EventRecord)],
+    now: DateTime<Utc>,
+    stale_secs: u64,
+    has_uningested_tail: bool,
+) -> Option<AgentStatus> {
+    let last = latest_codex_liveness_event(events)?;
+    let fresh = codex_liveness_event_is_fresh(last, now, stale_secs);
+    if matches!(last.event, Event::AssistantText { .. })
+        || matches!(&last.event, Event::UserPrompt { text, .. } if is_completed_task_notification(text))
+    {
+        return Some(if has_uningested_tail && fresh {
+            AgentStatus::Working
+        } else {
+            AgentStatus::Idle
+        });
+    }
+    Some(if fresh {
+        AgentStatus::Working
+    } else {
+        AgentStatus::Idle
+    })
+}
+
+fn codex_liveness_event_is_fresh(event: &EventRecord, now: DateTime<Utc>, stale_secs: u64) -> bool {
+    let age_secs = now.signed_duration_since(event.ts).num_seconds().max(0) as u64;
+    age_secs <= stale_secs
+}
+
+fn latest_codex_liveness_event(events: &[(crate::ir::Turn, EventRecord)]) -> Option<&EventRecord> {
+    events
+        .iter()
+        .filter(|(_, e)| codex_liveness_priority(&e.event).is_some())
+        .max_by(|(_, a), (_, b)| {
+            a.ts.cmp(&b.ts)
+                .then(a.raw_ref.offset.cmp(&b.raw_ref.offset))
+                .then(codex_liveness_priority(&a.event).cmp(&codex_liveness_priority(&b.event)))
+                .then(a.id.cmp(&b.id))
+        })
+        .map(|(_, e)| e)
+}
+
+fn codex_liveness_priority(event: &Event) -> Option<u8> {
+    match event {
+        Event::UserPrompt { .. } => Some(3),
+        Event::ToolCall { .. } => Some(3),
+        Event::FileSnapshot { .. } => Some(2),
+        Event::ToolResult { .. } => Some(2),
+        Event::AssistantText { .. } => Some(1),
+        _ => None,
+    }
+}
+
+fn is_completed_task_notification(text: &str) -> bool {
+    text.contains("<task-notification>") && text.contains("<status>completed</status>")
 }
 
 fn source_has_uningested_tail(store: &Store, s: &Session) -> bool {
@@ -550,22 +615,23 @@ fn build_agent(
     let model = last_usage
         .as_ref()
         .and_then(|e| match e {
-            Event::TokenUsage { model, .. } => Some(model.clone()),
+            Event::TokenUsage { model, .. } if !model.trim().is_empty() => Some(model.clone()),
             _ => None,
         })
-        .or_else(|| s.model_ids.first().cloned());
+        .or_else(|| first_non_empty_model_id(s));
 
-    let (size, exact) = match &last_usage {
+    let (base_size, exact) = match &last_usage {
         Some(u) => {
             let m = model.clone().unwrap_or_default();
             let size = match s.harness {
                 Harness::Codex => {
-                    // Codex resident size = input_tokens; window from model lookup.
+                    // Codex resident size = input_tokens; window from the transcript
+                    // metadata when present, falling back to the provider/model table.
                     let input = match u {
                         Event::TokenUsage { input, .. } => *input as u64,
                         _ => 0,
                     };
-                    codex_context_size(input, composition::max_window_for_model(&m))
+                    codex_context_size(input, codex_context_window(s, &m))
                 }
                 _ => claude_context_size(u, &m),
             };
@@ -584,9 +650,21 @@ fn build_agent(
             },
         ),
     };
+    let pending_tail_tokens = if last_usage.is_some() {
+        pending_context_after_latest_usage(&events)
+    } else {
+        0
+    };
+    let size = with_pending_context(base_size, pending_tail_tokens);
 
-    let estimated = estimate_for_session(store, s, &events, size.context_tokens);
-    let context_breakdown = context_breakdown(s.harness.clone(), size, estimated.clone(), &events);
+    let estimated = estimate_for_session(store, s, &events, base_size.context_tokens);
+    let context_breakdown = context_breakdown(
+        s.harness.clone(),
+        size,
+        estimated.clone(),
+        &events,
+        pending_tail_tokens,
+    );
 
     let recent_activity = recent_activity(&events);
     let est_cost_usd = est_cost_usd(&model, &exact);
@@ -627,6 +705,51 @@ fn build_agent(
         started_at: s.started_at.to_rfc3339(),
         est_cost_usd,
     }
+}
+
+fn first_non_empty_model_id(s: &Session) -> Option<String> {
+    s.model_ids.iter().find(|m| !m.trim().is_empty()).cloned()
+}
+
+fn codex_context_window(s: &Session, model: &str) -> u64 {
+    s.meta
+        .get("model_context_window")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| composition::max_window_for_model(model))
+}
+
+fn with_pending_context(mut size: ContextSize, pending_tail_tokens: u64) -> ContextSize {
+    if pending_tail_tokens == 0 {
+        return size;
+    }
+    size.context_tokens = size.context_tokens.saturating_add(pending_tail_tokens);
+    size.fill_pct = if size.max_tokens == 0 {
+        0.0
+    } else {
+        (size.context_tokens as f64 / size.max_tokens as f64).clamp(0.0, 1.0)
+    };
+    size
+}
+
+fn pending_context_after_latest_usage(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> u64 {
+    let Some(last_usage_idx) = events
+        .iter()
+        .rposition(|(_, e)| matches!(e.event, Event::TokenUsage { .. }))
+    else {
+        return 0;
+    };
+    events
+        .iter()
+        .skip(last_usage_idx + 1)
+        .map(|(_, e)| match &e.event {
+            Event::UserPrompt { text, .. } | Event::AssistantText { text } => tokenize_len(text),
+            Event::Thinking { tokens } => *tokens as u64,
+            Event::ToolCall { tool, input, .. } => tokenize_len(&format!("{tool} {input}")),
+            Event::ToolResult { bytes, .. } => bytes / 4,
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Compute the raw, pre-calibration token sums for a session's estimated
@@ -741,15 +864,16 @@ fn context_breakdown(
     size: ContextSize,
     estimated: Option<RadarEstimated>,
     events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+    pending_tail_tokens: u64,
 ) -> RadarContextBreakdown {
     let used = size.context_tokens;
     let max = size.max_tokens;
     let rows = match estimated {
         Some(est) => match harness {
-            Harness::Codex => codex_context_rows(max, used, &est, events),
-            _ => claude_context_rows(max, used, &est, events),
+            Harness::Codex => codex_context_rows(max, used, &est, events, pending_tail_tokens),
+            _ => claude_context_rows(max, used, &est, events, pending_tail_tokens),
         },
-        None => fallback_context_rows(max, used),
+        None => fallback_context_rows(max, used, pending_tail_tokens),
     };
 
     RadarContextBreakdown {
@@ -760,18 +884,10 @@ fn context_breakdown(
     }
 }
 
-fn fallback_context_rows(max: u64, used: u64) -> Vec<RadarContextRow> {
-    let mut rows = vec![context_row("context", "Context", used, max, None, false)];
-    if max > 0 {
-        rows.push(context_row(
-            "free_space",
-            "Free space",
-            max.saturating_sub(used),
-            max,
-            None,
-            true,
-        ));
-    }
+fn fallback_context_rows(max: u64, used: u64, pending_tail_tokens: u64) -> Vec<RadarContextRow> {
+    let base = used.saturating_sub(pending_tail_tokens);
+    let mut rows = vec![context_row("context", "Context", base, max, None, false)];
+    append_pending_and_free_rows(&mut rows, max, used, pending_tail_tokens);
     rows
 }
 
@@ -780,6 +896,7 @@ fn claude_context_rows(
     used: u64,
     est: &RadarEstimated,
     events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+    pending_tail_tokens: u64,
 ) -> Vec<RadarContextRow> {
     let tools = tool_context_stats(events, est.tool_output);
     let memory_count = memory_file_count(events);
@@ -790,7 +907,7 @@ fn claude_context_rows(
         tools.system_count,
     );
 
-    vec![
+    let mut rows = vec![
         context_row("messages", "Messages", est.conversation, max, None, false),
         context_row("skills", "Skills", skills, max, None, false),
         context_row(
@@ -849,15 +966,9 @@ fn claude_context_rows(
             None,
             true,
         ),
-        context_row(
-            "free_space",
-            "Free space",
-            max.saturating_sub(used),
-            max,
-            None,
-            true,
-        ),
-    ]
+    ];
+    append_pending_and_free_rows(&mut rows, max, used, pending_tail_tokens);
+    rows
 }
 
 fn codex_context_rows(
@@ -865,9 +976,10 @@ fn codex_context_rows(
     used: u64,
     est: &RadarEstimated,
     events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+    pending_tail_tokens: u64,
 ) -> Vec<RadarContextRow> {
     let tools = tool_context_stats(events, est.tool_output);
-    vec![
+    let mut rows = vec![
         context_row("messages", "Messages", est.conversation, max, None, false),
         context_row("reasoning", "Reasoning", est.thinking, max, None, false),
         context_row(
@@ -902,15 +1014,37 @@ fn codex_context_rows(
             None,
             false,
         ),
-        context_row(
+    ];
+    append_pending_and_free_rows(&mut rows, max, used, pending_tail_tokens);
+    rows
+}
+
+fn append_pending_and_free_rows(
+    rows: &mut Vec<RadarContextRow>,
+    max: u64,
+    used: u64,
+    pending_tail_tokens: u64,
+) {
+    if pending_tail_tokens > 0 {
+        rows.push(context_row(
+            "pending_tail",
+            "Pending tail (est.)",
+            pending_tail_tokens,
+            max,
+            None,
+            false,
+        ));
+    }
+    if max > 0 {
+        rows.push(context_row(
             "free_space",
             "Free space",
             max.saturating_sub(used),
             max,
             None,
             true,
-        ),
-    ]
+        ));
+    }
 }
 
 fn context_row(
@@ -1918,6 +2052,246 @@ mod tests {
         );
         let child = state.agents.iter().find(|a| a.id == "child").unwrap();
         assert_eq!(child.parent_id.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn codex_tail_usage_with_empty_model_uses_session_window_metadata() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let session = Session {
+            id: "codex-tail".into(),
+            harness: Harness::Codex,
+            external_id: "codex-tail-ext".into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/tmp/WARDEN"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec!["openai".into()],
+            started_at: now,
+            ended_at: None,
+            source_path: PathBuf::from("/tmp/codex-tail.jsonl"),
+            raw_hash: 1,
+            ingested_at: now,
+            meta: serde_json::json!({ "model_context_window": 258400 }),
+        };
+        let turn = Turn {
+            id: "codex-tail-turn".into(),
+            session_id: session.id.clone(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let usage = EventRecord {
+            id: "codex-tail-usage".into(),
+            turn_id: turn.id.clone(),
+            session_id: session.id.clone(),
+            ts: now,
+            event: Event::TokenUsage {
+                input: 94_263,
+                output: 153,
+                cache_creation: 0,
+                cache_read: 93_056,
+                model: "".into(),
+                orchestration: None,
+            },
+            raw_ref: RawRef {
+                source_path: session.source_path.clone(),
+                offset: 0,
+                line: 1,
+            },
+        };
+        store
+            .upsert_session_batch(&session, &[turn], &[usage], 100)
+            .unwrap();
+
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &codex_all_open,
+            now,
+        );
+        let agent = state.agents.iter().find(|a| a.id == "codex-tail").unwrap();
+        assert_eq!(agent.context_tokens, 94_263);
+        assert_eq!(
+            agent.max_tokens, 258_400,
+            "an incremental Codex token_count has no session_meta in the tail, so an empty event model must fall back to session/window metadata"
+        );
+        assert!(agent.fill_pct > 0.36 && agent.fill_pct < 0.37);
+    }
+
+    #[test]
+    fn context_tokens_include_estimated_tail_after_latest_usage() {
+        let store = Store::memory().unwrap();
+        seed(
+            &store,
+            "tail-growth",
+            "tail-growth-ext",
+            Harness::ClaudeCode,
+            Some("/tmp/WARDEN"),
+            Some((100, 50, 1_000, 25, "claude-sonnet-4-5")),
+        );
+        let mut session = store
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == "tail-growth")
+            .unwrap();
+        session.raw_hash = 2;
+        let now = Utc::now();
+        let turn = Turn {
+            id: "tail-growth-t1".into(),
+            session_id: session.id.clone(),
+            parent_id: None,
+            role: Role::Tool,
+            index: 2,
+            started_at: now + chrono::Duration::milliseconds(30),
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let tail = EventRecord {
+            id: "tail-growth-tool-result".into(),
+            turn_id: turn.id.clone(),
+            session_id: session.id.clone(),
+            ts: now + chrono::Duration::milliseconds(30),
+            event: Event::ToolResult {
+                call_id: "c1".into(),
+                status: ToolStatus::Ok,
+                bytes: 400,
+                summary: Some("fresh tool output".into()),
+            },
+            raw_ref: RawRef {
+                source_path: session.source_path.clone(),
+                offset: 3,
+                line: 4,
+            },
+        };
+        store
+            .upsert_session_batch(&session, &[turn], &[tail], 400)
+            .unwrap();
+
+        let reg = claude_registry(&[(4242, "tail-growth-ext")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        let agent = state.agents.iter().find(|a| a.id == "tail-growth").unwrap();
+        assert_eq!(
+            agent.context_tokens, 1_250,
+            "last API usage is 1150 resident tokens; the 400-byte tail should add an estimated 100 tokens"
+        );
+        assert!(
+            agent
+                .context_breakdown
+                .rows
+                .iter()
+                .any(|row| row.key == "pending_tail" && row.tokens == 100),
+            "the context window must disclose post-usage tail bytes as an estimated row"
+        );
+    }
+
+    #[test]
+    fn assemble_chooses_newer_tail_usage_even_when_tail_turn_index_restarts() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let session = Session {
+            id: "tail-order".into(),
+            harness: Harness::Codex,
+            external_id: "tail-order-ext".into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/tmp/WARDEN"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec!["openai".into()],
+            started_at: now,
+            ended_at: None,
+            source_path: PathBuf::from("/tmp/tail-order.jsonl"),
+            raw_hash: 1,
+            ingested_at: now,
+            meta: serde_json::json!({}),
+        };
+        let old_turn = Turn {
+            id: "tail-order-old-turn".into(),
+            session_id: session.id.clone(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 2,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let old_usage = EventRecord {
+            id: "tail-order-old-usage".into(),
+            turn_id: old_turn.id.clone(),
+            session_id: session.id.clone(),
+            ts: now,
+            event: Event::TokenUsage {
+                input: 10_000,
+                output: 10,
+                cache_creation: 0,
+                cache_read: 0,
+                model: "openai".into(),
+                orchestration: None,
+            },
+            raw_ref: RawRef {
+                source_path: session.source_path.clone(),
+                offset: 100,
+                line: 10,
+            },
+        };
+        store
+            .upsert_session_batch(&session, &[old_turn], &[old_usage], 100)
+            .unwrap();
+
+        let mut tail_session = session.clone();
+        tail_session.raw_hash = 2;
+        let tail_turn = Turn {
+            id: "tail-order-new-turn".into(),
+            session_id: session.id.clone(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: now + chrono::Duration::seconds(1),
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let new_usage = EventRecord {
+            id: "tail-order-new-usage".into(),
+            turn_id: tail_turn.id.clone(),
+            session_id: session.id.clone(),
+            ts: now + chrono::Duration::seconds(1),
+            event: Event::TokenUsage {
+                input: 42_000,
+                output: 10,
+                cache_creation: 0,
+                cache_read: 0,
+                model: "".into(),
+                orchestration: None,
+            },
+            raw_ref: RawRef {
+                source_path: session.source_path.clone(),
+                offset: 200,
+                line: 20,
+            },
+        };
+        store
+            .upsert_session_batch(&tail_session, &[tail_turn], &[new_usage], 200)
+            .unwrap();
+
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &codex_all_open,
+            now + chrono::Duration::seconds(1),
+        );
+        let agent = state.agents.iter().find(|a| a.id == "tail-order").unwrap();
+        assert_eq!(
+            agent.context_tokens, 42_000,
+            "newer live-tail usage must win even when the tail parser restarts local turn indexes"
+        );
     }
 
     /// Fix #3 — INCREMENTAL token cache: re-assembling an UNCHANGED store must NOT
@@ -3008,7 +3382,7 @@ mod tests {
             registry.path(),
             &|_| true,
             &codex_all_open,
-            base + chrono::Duration::seconds(60),
+            base + chrono::Duration::seconds(240),
         );
 
         let codex = state
@@ -3018,7 +3392,265 @@ mod tests {
             .expect("open Codex session is rendered");
         assert_eq!(
             codex.status, "idle",
-            "a stale store row whose source file grew past its watermark must not stay working"
+            "a stale store row whose source file grew past its watermark must settle after the semantic backstop"
+        );
+    }
+
+    #[test]
+    fn codex_inflight_file_write_stays_working_with_uningested_tail() {
+        let store = Store::memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("rollout-2026-06-25T00-00-00-019f2222-2222-7222-8222-222222222222.jsonl");
+        let complete_tool_call = "{\"timestamp\":\"2026-06-25T00:00:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"apply_patch src/app.ts\\\"}\",\"call_id\":\"call_write\"}}\n";
+        let partial_tool_result =
+            "{\"timestamp\":\"2026-06-25T00:00:40Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\"";
+        std::fs::write(&path, format!("{complete_tool_call}{partial_tool_result}")).unwrap();
+
+        let base = Utc::now();
+        let session = Session {
+            id: "codex-write-tail".into(),
+            harness: Harness::Codex,
+            external_id: "019f2222-2222-7222-8222-222222222222".into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/tmp/WritingFiles"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec!["openai".into()],
+            started_at: base,
+            ended_at: None,
+            source_path: path.clone(),
+            raw_hash: 1,
+            ingested_at: base,
+            meta: serde_json::json!({ "originator": "Codex Desktop" }),
+        };
+        let turn = Turn {
+            id: "codex-write-tail-turn".into(),
+            session_id: session.id.clone(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: base,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let event = EventRecord {
+            id: "codex-write-tail-tool-call".into(),
+            turn_id: turn.id.clone(),
+            session_id: session.id.clone(),
+            ts: base,
+            event: Event::ToolCall {
+                tool: "exec_command".into(),
+                input: serde_json::json!({ "cmd": "apply_patch src/app.ts" }),
+                call_id: "call_write".into(),
+                kind: ToolKind::Unknown,
+            },
+            raw_ref: RawRef {
+                source_path: path.clone(),
+                offset: 0,
+                line: 1,
+            },
+        };
+        store
+            .upsert_session_batch(&session, &[turn], &[event], complete_tool_call.len() as u64)
+            .unwrap();
+
+        let registry = tempfile::tempdir().unwrap();
+        let state = assemble(
+            &store,
+            registry.path(),
+            &|_| true,
+            &codex_all_open,
+            base + chrono::Duration::seconds(60),
+        );
+
+        let codex = state
+            .agents
+            .iter()
+            .find(|a| a.id == "codex-write-tail")
+            .expect("open Codex session is rendered");
+        assert_eq!(
+            codex.status, "working",
+            "an in-flight Codex file-write ToolCall must stay working while its result line is still incomplete"
+        );
+    }
+
+    #[test]
+    fn codex_incomplete_patch_tail_after_assistant_stays_working() {
+        let store = Store::memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("rollout-2026-06-25T00-00-00-019f3333-3333-7333-8333-333333333333.jsonl");
+        let assistant_line = "{\"timestamp\":\"2026-06-25T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"I will update the files now.\"}}\n";
+        let partial_patch =
+            "{\"timestamp\":\"2026-06-25T00:00:40Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"patch_apply_end\"";
+        std::fs::write(&path, format!("{assistant_line}{partial_patch}")).unwrap();
+
+        let base = Utc::now();
+        let session = Session {
+            id: "codex-patch-tail".into(),
+            harness: Harness::Codex,
+            external_id: "019f3333-3333-7333-8333-333333333333".into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/tmp/PatchTail"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec!["openai".into()],
+            started_at: base,
+            ended_at: None,
+            source_path: path.clone(),
+            raw_hash: 1,
+            ingested_at: base,
+            meta: serde_json::json!({ "originator": "Codex Desktop" }),
+        };
+        let turn = Turn {
+            id: "codex-patch-tail-turn".into(),
+            session_id: session.id.clone(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: base,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let event = EventRecord {
+            id: "codex-patch-tail-assistant".into(),
+            turn_id: turn.id.clone(),
+            session_id: session.id.clone(),
+            ts: base,
+            event: Event::AssistantText {
+                text: "I will update the files now.".into(),
+            },
+            raw_ref: RawRef {
+                source_path: path.clone(),
+                offset: 0,
+                line: 1,
+            },
+        };
+        store
+            .upsert_session_batch(&session, &[turn], &[event], assistant_line.len() as u64)
+            .unwrap();
+
+        let registry = tempfile::tempdir().unwrap();
+        let state = assemble(
+            &store,
+            registry.path(),
+            &|_| true,
+            &codex_all_open,
+            base + chrono::Duration::seconds(60),
+        );
+
+        let codex = state
+            .agents
+            .iter()
+            .find(|a| a.id == "codex-patch-tail")
+            .expect("open Codex session is rendered");
+        assert_eq!(
+            codex.status, "working",
+            "a partial Codex patch record means file writing is in progress even when the last complete event was assistant text"
+        );
+    }
+
+    #[test]
+    fn codex_patch_snapshot_after_assistant_stays_working() {
+        let store = Store::memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("rollout-2026-06-25T00-00-00-019f4444-4444-7444-8444-444444444444.jsonl");
+        std::fs::write(
+            &path,
+            "{\"timestamp\":\"2026-06-25T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"I will update the files now.\"}}\n\
+             {\"timestamp\":\"2026-06-25T00:00:40Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"patch_apply_end\",\"changes\":{\"/tmp/PatchDone/src/app.ts\":{\"type\":\"update\"}}}}\n",
+        )
+        .unwrap();
+
+        let base = Utc::now();
+        let patch_ts = base + chrono::Duration::seconds(40);
+        let session = Session {
+            id: "codex-patch-done".into(),
+            harness: Harness::Codex,
+            external_id: "019f4444-4444-7444-8444-444444444444".into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/tmp/PatchDone"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec!["openai".into()],
+            started_at: base,
+            ended_at: None,
+            source_path: path.clone(),
+            raw_hash: 1,
+            ingested_at: base,
+            meta: serde_json::json!({ "originator": "Codex Desktop" }),
+        };
+        let turn = Turn {
+            id: "codex-patch-done-turn".into(),
+            session_id: session.id.clone(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: base,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let assistant = EventRecord {
+            id: "codex-patch-done-assistant".into(),
+            turn_id: turn.id.clone(),
+            session_id: session.id.clone(),
+            ts: base,
+            event: Event::AssistantText {
+                text: "I will update the files now.".into(),
+            },
+            raw_ref: RawRef {
+                source_path: path.clone(),
+                offset: 0,
+                line: 1,
+            },
+        };
+        let files = EventRecord {
+            id: "codex-patch-done-files".into(),
+            turn_id: turn.id.clone(),
+            session_id: session.id.clone(),
+            ts: patch_ts,
+            event: Event::FileSnapshot {
+                files: vec![FileEdit {
+                    path: "/tmp/PatchDone/src/app.ts".into(),
+                    ..Default::default()
+                }],
+            },
+            raw_ref: RawRef {
+                source_path: path.clone(),
+                offset: 140,
+                line: 2,
+            },
+        };
+        let watermark = std::fs::metadata(&path).unwrap().len();
+        store
+            .upsert_session_batch(&session, &[turn], &[assistant, files], watermark)
+            .unwrap();
+
+        let registry = tempfile::tempdir().unwrap();
+        let state = assemble(
+            &store,
+            registry.path(),
+            &|_| true,
+            &codex_all_open,
+            patch_ts + chrono::Duration::seconds(20),
+        );
+
+        let codex = state
+            .agents
+            .iter()
+            .find(|a| a.id == "codex-patch-done")
+            .expect("open Codex session is rendered");
+        assert_eq!(
+            codex.status, "working",
+            "a fresh Codex FileSnapshot is a real file-write action, not idle bookkeeping"
         );
     }
 
