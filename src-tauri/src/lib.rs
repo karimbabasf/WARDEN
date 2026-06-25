@@ -29,18 +29,22 @@ struct RadarWatcherGuard {
     worker: tauri::async_runtime::JoinHandle<()>,
     #[allow(dead_code)]
     tick: tauri::async_runtime::JoinHandle<()>,
+    /// The radar dirty signal, parked here so a recompute can be kicked from outside
+    /// the watcher (e.g. once startup backfill has populated the store).
+    #[allow(dead_code)]
+    radar_signal: scheduler::RadarDirtySignal,
 }
 use tauri::tray::TrayIconBuilder;
 use tauri::{ActivationPolicy, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-/// Reveal the persistent overlay window: maximize (fill the screen as a normal
-/// window — not fullscreen, which would split off its own Space and switch away on
-/// click-out), show, focus, and signal the frontend to animate in. Idempotent —
-/// safe to call when already visible.
+/// Reveal the persistent overlay window: show, focus, and signal the frontend to
+/// animate in. Native window chrome (titleBarStyle: Overlay) now owns sizing — the
+/// user fills the screen with the green traffic-light button or a title-bar
+/// double-click — so we show the window at its own size rather than force-maximizing.
+/// Idempotent — safe to call when already visible.
 fn summon_overlay(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.maximize();
         let _ = w.show();
         let _ = w.set_focus();
         let _ = app.emit(
@@ -102,17 +106,22 @@ pub fn run() {
                 util::default_codex_archived_sessions(),
                 util::default_claude_projects(),
             ];
+            // Kept outside the match so the startup backfill (step 3) can kick a second
+            // recompute once the store is populated (cold-DB-with-live-agents case).
+            let mut radar_signal: Option<scheduler::RadarDirtySignal> = None;
             match scheduler::spawn_radar_watcher(
                 state.store.clone(),
                 util::default_claude_sessions_dir(),
                 radar_roots,
                 app.handle().clone(),
             ) {
-                Ok((watchers, worker, tick)) => {
+                Ok((watchers, worker, tick, signal)) => {
+                    radar_signal = Some(signal.clone());
                     app.manage(RadarWatcherGuard {
                         watchers: std::sync::Mutex::new(watchers),
                         worker,
                         tick,
+                        radar_signal: signal,
                     });
                 }
                 Err(e) => {
@@ -126,6 +135,7 @@ pub fn run() {
             {
                 let store = state.store.clone();
                 let app_handle = app.handle().clone();
+                let radar_signal = radar_signal.clone();
                 tauri::async_runtime::spawn(async move {
                     let backfill_store = store.clone();
                     let summary = tokio::task::spawn_blocking(move || {
@@ -184,6 +194,15 @@ pub fn run() {
                             );
                         }
                         Err(e) => tracing::warn!(error = %e, "startup backfill task panicked"),
+                    }
+                    // Re-derive the live forest now that the store is fully populated.
+                    // The watcher already kicked once at spawn (over the persistent DB +
+                    // live registry); this second kick reflects sessions/events that only
+                    // existed after backfill — so already-running agents are tracked at
+                    // launch instead of waiting for the next unrelated FS write.
+                    if let Some(signal) = &radar_signal {
+                        tracing::info!("startup backfill complete; kicking radar recompute");
+                        signal.mark_dirty();
                     }
                 });
             }
@@ -246,9 +265,10 @@ pub fn run() {
                 .map_err(|e| format!("global shortcut: {e}"))?;
             }
 
-            // Start maximized + on screen (Karim: "start out completely maximized").
-            // The overlay then stays put — it pauses only on minimize and never hides
-            // on blur. Remove this single call to revert to hotkey-only summon.
+            // Show the window on launch at its default size; native chrome lets the
+            // user zoom or resize from there. The overlay then stays put — it pauses
+            // only on minimize and never hides on blur. Remove this single call to
+            // revert to hotkey-only summon.
             summon_overlay(&app.handle());
             Ok(())
         })
@@ -278,6 +298,31 @@ pub fn run() {
             locate_agent,
             warp_to_agent
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running WARDEN");
+        .on_window_event(|window, event| {
+            // The red traffic-light button (and ⌘W) asks the window to CLOSE. WARDEN
+            // is a daemon, so a close must not quit it: veto the request and hide the
+            // window instead. Re-summon via ⌘⌥⌃M, the tray, or the Dock icon (the
+            // Reopen handler below). This is the single seam where the OS's "close"
+            // verb is translated into WARDEN's "hide" verb.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "overlay" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building WARDEN")
+        .run(|app, event| {
+            // macOS: clicking the Dock icon while the overlay is hidden re-summons
+            // it — the standard "reopen" gesture for a window that closes-to-hide.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                summon_overlay(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (&app, &event);
+            }
+        });
 }

@@ -384,7 +384,7 @@ fn agent_status(
     let stale_secs = crate::util::radar_working_stale_secs();
     let working_secs = crate::util::radar_working_ms() / 1000;
     let events = store.session_events(&s.id).unwrap_or_default();
-    if let Some(st) = liveness::status_from_last_event(&events, now, working_secs, stale_secs) {
+    if let Some(st) = liveness::status_from_last_event(&events, now, stale_secs) {
         return st;
     }
     // No usable events at all → fall back to the old transcript-mtime heuristic.
@@ -435,7 +435,7 @@ fn claude_conversation_status(
                     )
                 })
                 .map(|(_, e)| e.ts)?;
-            liveness::status_from_last_event(&events, now, working_secs, stale_secs)
+            liveness::status_from_last_event(&events, now, stale_secs)
                 .map(|st| (last_ts, st))
         })
         .max_by_key(|(ts, _)| *ts);
@@ -1013,16 +1013,16 @@ fn relink_store_subagents(store: &Store) {
 /// when they form after the startup backfill.
 pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> RadarState {
     relink_store_subagents(store);
+    let codex_sessions_dir = crate::util::default_codex_sessions();
+    let codex_archived_dir = crate::util::default_codex_archived_sessions();
+    refresh_live_codex_rollouts(store, &codex_sessions_dir, &codex_archived_dir);
     // The Codex live set is the set of rollout uuids whose file currently sits under
     // `~/.codex/sessions/` (and NOT under `~/.codex/archived_sessions/`). We scan the
     // two roots ONCE here, then close over the resulting set so `assemble` stays a
     // pure join (no per-session FS walk inside the tested path). `source_path` in the
     // store can be stale after Codex moves a rollout to the archive, so membership is
     // decided by the CURRENT on-disk location, never by the stored path.
-    let live_codex = live_codex_rollout_ids(
-        &crate::util::default_codex_sessions(),
-        &crate::util::default_codex_archived_sessions(),
-    );
+    let live_codex = live_codex_rollout_ids(&codex_sessions_dir, &codex_archived_dir);
     let is_codex_open = |s: &Session| live_codex.contains(s.external_id.as_str());
     assemble(
         store,
@@ -1031,6 +1031,41 @@ pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> RadarState {
         &is_codex_open,
         Utc::now(),
     )
+}
+
+/// Pull current live Codex rollout tails into the store before RADAR assembles the
+/// forest. This closes the startup gap: a rollout that was already running before
+/// WARDEN launched has a file on disk, but no watcher event may fire after startup,
+/// so the live-id scan alone can find the agent while the store still has stale or
+/// missing context. Reuse the scheduler's byte-watermark ingester so unchanged files
+/// are cheap and appended bytes become live activity rows.
+fn refresh_live_codex_rollouts(store: &Store, sessions_dir: &Path, archived_dir: &Path) -> usize {
+    let paths = live_codex_rollout_paths(sessions_dir, archived_dir);
+    if paths.is_empty() {
+        return 0;
+    }
+    let registry = crate::ingest::AdapterRegistry::from_adapters(vec![Box::new(
+        crate::ingest::codex::CodexAdapter::with_root(
+            sessions_dir.to_path_buf(),
+            archived_dir.to_path_buf(),
+            store.clone(),
+        ),
+    )]);
+    let mut events = 0usize;
+    for path in paths {
+        match crate::scheduler::ingest_file_once(&registry, store, &path) {
+            Ok(n) => events += n,
+            Err(e) => tracing::warn!(
+                path=%path.display(),
+                error=%format!("{e:#}"),
+                "live Codex radar refresh failed"
+            ),
+        }
+    }
+    if events > 0 {
+        let _ = crate::ingest::codex::link_codex_subagents_in_store(store);
+    }
+    events
 }
 
 /// Whether a non-archived Codex rollout is recent enough to still count as "present"
@@ -1075,6 +1110,16 @@ fn live_codex_rollout_ids(
     sessions_dir: &Path,
     archived_dir: &Path,
 ) -> std::collections::HashSet<String> {
+    live_codex_rollout_paths(sessions_dir, archived_dir)
+        .into_iter()
+        .map(|p| crate::ingest::codex::external_id_from_filename(&p))
+        .collect()
+}
+
+/// Scan Codex roots and return currently-open live rollout paths: present under
+/// `sessions_dir`, absent from `archived_dir`, and still fresh under the hybrid
+/// stale policy.
+fn live_codex_rollout_paths(sessions_dir: &Path, archived_dir: &Path) -> Vec<std::path::PathBuf> {
     use std::collections::HashSet;
     let is_rollout = |entry: &walkdir::DirEntry| -> bool {
         let p = entry.path();
@@ -1100,7 +1145,7 @@ fn live_codex_rollout_ids(
     // Codex has no PID/termination signal, so mtime age is the only "still active" cue.
     let stale_secs = crate::util::radar_codex_stale_secs();
     let now = std::time::SystemTime::now();
-    let mut out = HashSet::new();
+    let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(sessions_dir)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -1119,7 +1164,7 @@ fn live_codex_rollout_ids(
             .and_then(|mt| now.duration_since(mt).ok())
             .map(|d| d.as_secs());
         if codex_fresh(mtime_secs_ago, stale_secs) {
-            out.insert(id);
+            out.push(entry.into_path());
         }
     }
     out
@@ -1131,6 +1176,9 @@ mod tests {
     use crate::ir::*;
     use chrono::Utc;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Seed a session with the given id/external/harness and an optional last
     /// `TokenUsage` event (so size/composition populate).
@@ -1178,11 +1226,31 @@ mod tests {
             },
         }];
         if let Some((input, cc, cr, output, model)) = usage {
+            // A turn that produced usage also produced its assistant response: end on a
+            // completed `AssistantText` (a text-only `end_turn` turn) so the semantic
+            // liveness rule reads this seeded session as SETTLED/idle — the realistic
+            // shape of a finished turn. (A still-working turn is `seed(.., None)`, which
+            // leaves the trailing UserPrompt → working.) Distinct increasing timestamps
+            // keep the stored order UserPrompt → AssistantText → TokenUsage.
+            events.push(EventRecord {
+                id: format!("{id}-a"),
+                turn_id: tid.clone(),
+                session_id: id.into(),
+                ts: now + chrono::Duration::milliseconds(10),
+                event: Event::AssistantText {
+                    text: "here you go".into(),
+                },
+                raw_ref: RawRef {
+                    source_path: session.source_path.clone(),
+                    offset: 1,
+                    line: 2,
+                },
+            });
             events.push(EventRecord {
                 id: format!("{id}-u"),
                 turn_id: tid.clone(),
                 session_id: id.into(),
-                ts: now,
+                ts: now + chrono::Duration::milliseconds(20),
                 event: Event::TokenUsage {
                     input,
                     output,
@@ -1193,8 +1261,8 @@ mod tests {
                 },
                 raw_ref: RawRef {
                     source_path: session.source_path.clone(),
-                    offset: 1,
-                    line: 2,
+                    offset: 2,
+                    line: 3,
                 },
             });
         }
@@ -1484,6 +1552,71 @@ mod tests {
         assert_eq!(parent.child_count, 1, "parent shows one child");
     }
 
+    /// Regression: a Codex rollout that was already open before WARDEN started must
+    /// appear on the first radar recompute even when the store is empty/stale. The
+    /// recompute path must pull live Codex tails before assembling the forest;
+    /// otherwise the live-id scan sees the file but `assemble` has no stored session
+    /// or events to render, so the UI shows absent/stale/idle context.
+    #[test]
+    fn recompute_refreshes_live_codex_rollout_before_assembling() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_sessions = std::env::var_os("WARDEN_CODEX_SESSIONS");
+        let old_archived = std::env::var_os("WARDEN_CODEX_ARCHIVED_SESSIONS");
+
+        let sessions_root = tempfile::tempdir().unwrap();
+        let archived_root = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDEN_CODEX_SESSIONS", sessions_root.path());
+        std::env::set_var("WARDEN_CODEX_ARCHIVED_SESSIONS", archived_root.path());
+
+        let live_dir = sessions_root.path().join("2026/06/25");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let path = live_dir.join(
+            "rollout-2026-06-25T00-00-00-019efd6c-8f60-7f42-8da1-3977122aa6be.jsonl",
+        );
+        let now = Utc::now();
+        let t0 = now.to_rfc3339();
+        let t1 = (now + chrono::Duration::milliseconds(100)).to_rfc3339();
+        let t2 = (now + chrono::Duration::milliseconds(200)).to_rfc3339();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"timestamp\":\"{t0}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"019efd6c-8f60-7f42-8da1-3977122aa6be\",\"cwd\":\"/tmp/LiveCodex\",\"model_provider\":\"openai\",\"originator\":\"Codex Desktop\"}}}}\n\
+                 {{\"timestamp\":\"{t1}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\"}}}}\n\
+                 {{\"timestamp\":\"{t2}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"keep tracking this live codex context\"}}}}\n",
+            ),
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        let claude_registry = tempfile::tempdir().unwrap();
+        let state = recompute_radar_state(&store, claude_registry.path());
+
+        match old_sessions {
+            Some(v) => std::env::set_var("WARDEN_CODEX_SESSIONS", v),
+            None => std::env::remove_var("WARDEN_CODEX_SESSIONS"),
+        }
+        match old_archived {
+            Some(v) => std::env::set_var("WARDEN_CODEX_ARCHIVED_SESSIONS", v),
+            None => std::env::remove_var("WARDEN_CODEX_ARCHIVED_SESSIONS"),
+        }
+
+        let codex = state
+            .agents
+            .iter()
+            .find(|a| a.harness == "codex")
+            .expect("live Codex rollout should render on first recompute");
+        assert_eq!(codex.harness, "codex");
+        assert_eq!(codex.status, "working");
+        assert!(
+            codex
+                .recent_activity
+                .iter()
+                .any(|a| a.label.contains("keep tracking this live codex context")),
+            "freshly ingested Codex activity should drive the live log: {:?}",
+            codex.recent_activity
+        );
+    }
+
     /// The "what is it doing" signal: a tool call's recent-activity label names its
     /// TARGET (file path basename / command), not just the bare tool name, and the
     /// opaque `result <call_id>` rows are dropped (they were pure noise). Built from
@@ -1763,8 +1896,8 @@ mod tests {
     #[test]
     fn assemble_status_from_conversation_state_is_deterministic() {
         let store = Store::memory().unwrap();
-        // `seed` writes a UserPrompt then an optional TokenUsage as the LAST event, both
-        // stamped at ~now. idle-sess: last event is a completed TokenUsage turn.
+        // `seed` writes a UserPrompt then optional bookkeeping TokenUsage. Add a real
+        // trailing AssistantText for idle-sess so the semantic tail is a completed turn.
         seed(
             &store,
             "idle-sess",
@@ -1773,16 +1906,61 @@ mod tests {
             Some("/tmp/a"),
             Some((2, 100, 1000, 50, "claude-opus-4-8")),
         );
+        let done_ts = Utc::now() + chrono::Duration::milliseconds(10);
+        let done_session = Session {
+            id: "idle-sess".into(),
+            harness: Harness::ClaudeCode,
+            external_id: "idle-ext".into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/tmp/a"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec![],
+            started_at: done_ts,
+            ended_at: None,
+            source_path: PathBuf::from("/tmp/idle-sess.jsonl"),
+            raw_hash: 1,
+            ingested_at: done_ts,
+            meta: serde_json::json!({}),
+        };
+        let done_turn = Turn {
+            id: "idle-sess-done-turn".into(),
+            session_id: "idle-sess".into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 99,
+            started_at: done_ts,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let done_event = EventRecord {
+            id: "idle-sess-done-text".into(),
+            turn_id: done_turn.id.clone(),
+            session_id: "idle-sess".into(),
+            ts: done_ts,
+            event: Event::AssistantText {
+                text: "done".into(),
+            },
+            raw_ref: RawRef {
+                source_path: done_session.source_path.clone(),
+                offset: 2,
+                line: 3,
+            },
+        };
+        store
+            .upsert_session_batch(&done_session, &[done_turn], &[done_event], 0)
+            .unwrap();
         // working-sess: last event is an unanswered UserPrompt (a strong working signal).
         seed(&store, "working-sess", "working-ext", Harness::ClaudeCode, Some("/tmp/b"), None);
 
         // Both are registry-open WITHOUT an authoritative `status` field, so the
-        // conversation-state fallback decides. Evaluate 40s in the FUTURE relative to the
-        // seeded events: past the 15s working window (so the quiet TokenUsage tail reads
-        // idle) but within the 180s stale backstop (so the unanswered UserPrompt is still
-        // working). A FIXED clock makes the verdict exact and deterministic.
+        // conversation-state fallback decides. Evaluate 60s in the FUTURE relative to the
+        // seeded events: the completed AssistantText is idle while the unanswered
+        // UserPrompt is still within the 180s stale backstop and remains working. A
+        // FIXED clock makes the verdict exact and deterministic.
         let reg = claude_registry(&[(101, "idle-ext"), (102, "working-ext")]);
-        let now = Utc::now() + chrono::Duration::seconds(40);
+        let now = Utc::now() + chrono::Duration::seconds(60);
 
         let st = |state: &RadarState, id: &str| {
             state
@@ -1797,7 +1975,7 @@ mod tests {
         assert_eq!(
             st(&s1, "idle-sess"),
             "idle",
-            "last event is a completed TokenUsage turn → idle"
+            "last real action is a completed AssistantText turn → idle"
         );
         assert_eq!(
             st(&s1, "working-sess"),

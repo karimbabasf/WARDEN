@@ -242,6 +242,25 @@ pub fn recompute_and_emit_radar(
     use tauri::Emitter;
     let state = crate::radar::recompute_radar_state(store, sessions_dir);
     let agent_count = state.agents.len();
+    // Status breakdown for the logs — so "why is everything idle?" is answerable from
+    // a single recompute line (esp. the startup kick) without attaching a debugger.
+    let mut working = 0usize;
+    let mut idle = 0usize;
+    let mut terminated = 0usize;
+    for a in &state.agents {
+        match a.status.as_str() {
+            "working" => working += 1,
+            "terminated" => terminated += 1,
+            _ => idle += 1,
+        }
+    }
+    tracing::debug!(
+        agents = agent_count,
+        working,
+        idle,
+        terminated,
+        "radar recompute emitted"
+    );
     let _ = app.emit("radar_state", &state);
     agent_count
 }
@@ -415,6 +434,7 @@ pub fn spawn_radar_watcher(
     Vec<notify::RecommendedWatcher>,
     tauri::async_runtime::JoinHandle<()>,
     tauri::async_runtime::JoinHandle<()>,
+    RadarDirtySignal,
 )> {
     use notify::{EventKind, RecursiveMode, Watcher};
 
@@ -489,7 +509,15 @@ pub fn spawn_radar_watcher(
         tracing::info!(root=%root.display(), "watching for live agents (radar)");
         watchers.push(watcher);
     }
-    Ok((watchers, worker, tick))
+    // STARTUP BOOTSTRAP: kick one recompute now, before any FS event. Without this the
+    // worker sleeps on the dirty signal and the heartbeat is gated on `agent_count > 0`
+    // (only set BY a recompute) — so neither can self-start, and already-running agents
+    // render idle/absent until some unrelated FS write happens to fire. This first kick
+    // evaluates the live registry + persistent store immediately AND seeds `agent_count`
+    // so the heartbeat begins ticking. `lib.rs` kicks it a second time once startup
+    // backfill has populated the store (handles a cold/empty DB with live agents).
+    signal.mark_dirty();
+    Ok((watchers, worker, tick, signal))
 }
 
 #[cfg(test)]
@@ -563,6 +591,31 @@ mod tests {
             "recomputes must be strictly serialized — never two concurrent"
         );
 
+        worker.abort();
+    }
+
+    /// STARTUP BOOTSTRAP: a single `mark_dirty()` with ZERO filesystem events must drive
+    /// exactly one recompute. This is the contract `spawn_radar_watcher`'s startup kick
+    /// relies on — without it the worker would sleep forever on the dirty signal and
+    /// already-running agents would never be evaluated at launch.
+    #[tokio::test]
+    async fn radar_recompute_worker_bootstraps_on_initial_signal_without_fs_events() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let signal = RadarDirtySignal::new();
+        let worker = {
+            let runs = runs.clone();
+            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        // The startup kick — no watcher has fired, this is the only signal.
+        signal.mark_dirty();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the initial bootstrap signal must drive exactly one recompute at startup"
+        );
         worker.abort();
     }
 

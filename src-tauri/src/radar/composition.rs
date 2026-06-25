@@ -45,6 +45,13 @@ fn fill_pct(tokens: u64, max: u64) -> f64 {
 /// Claude context size from the last assistant turn's `TokenUsage`.
 /// `context_tokens = input + cache_creation + cache_read`; the max window is
 /// resolved from the model id. A non-`TokenUsage` event yields a zeroed size.
+///
+/// Observed-window guard: if the resident context already exceeds the table window,
+/// the session is demonstrably running a LARGER window than the model id advertises
+/// (e.g. a 1M-context Claude — a live Opus session here holds ~372k, which a 200k
+/// window can't). Promote the max to 1M so `fill_pct` is honest (the real fraction)
+/// instead of pinned at 100%. Only promotes a known (>0) window; an unknown model
+/// stays 0 (no fabricated window).
 pub fn claude_context_size(last_usage: &Event, model: &str) -> ContextSize {
     let context_tokens = match last_usage {
         Event::TokenUsage {
@@ -55,7 +62,10 @@ pub fn claude_context_size(last_usage: &Event, model: &str) -> ContextSize {
         } => *input as u64 + *cache_creation as u64 + *cache_read as u64,
         _ => 0,
     };
-    let max_tokens = max_window_for_model(model);
+    let mut max_tokens = max_window_for_model(model);
+    if max_tokens > 0 && context_tokens > max_tokens {
+        max_tokens = 1_000_000; // the next real Claude tier above 200k
+    }
     ContextSize {
         context_tokens,
         max_tokens,
@@ -257,9 +267,12 @@ pub fn tokenize_len(text: &str) -> u64 {
 /// unknown model so `fill_pct` degrades to `0.0` (honest: no fabricated window).
 ///
 /// Table (per the M3 design spec §4.5 and the model lookup anchor):
-/// * Claude `opus`/`sonnet`/`haiku` → 200_000 (the 1M-context Sonnet variant is
-///   still reported at the default 200k unless explicitly a `-1m` id);
-/// * Codex / GPT-5-class → 258_400.
+/// * Claude `opus` → 1_000_000 (Opus 4.x runs a 1M context window — confirmed live:
+///   an Opus session here holds ~372k resident, which a 200k window cannot);
+/// * Claude `sonnet`/`haiku` → 200_000 (the 1M Sonnet variant only when its id
+///   advertises it, `-1m`/`[1m]`); a session that observably exceeds its window is
+///   promoted to 1M by `claude_context_size`'s observed-window guard;
+/// * Codex / GPT-5-class → 258_400 (equals the on-disk `model_context_window`).
 pub fn max_window_for_model(model: &str) -> u64 {
     let m = model.to_ascii_lowercase();
     // Explicit 1M-context Sonnet variant, when the id advertises it. Match only the
@@ -268,7 +281,12 @@ pub fn max_window_for_model(model: &str) -> u64 {
     if m.contains("sonnet") && (m.contains("-1m") || m.contains("[1m]")) {
         return 1_000_000;
     }
-    if m.contains("opus") || m.contains("sonnet") || m.contains("haiku") || m.contains("claude") {
+    // Opus runs a 1M window today; the other Claude models default to 200k (and are
+    // promoted on observation if a session proves a wider window).
+    if m.contains("opus") {
+        return 1_000_000;
+    }
+    if m.contains("sonnet") || m.contains("haiku") || m.contains("claude") {
         return 200_000;
     }
     // `openai` is the Codex Desktop *provider* id (`session_meta.model_provider`),
@@ -300,17 +318,42 @@ mod tests {
         }
     }
 
-    /// Claude size = input+cache_creation+cache_read (NOT output); fill clamps to 1
-    /// when occupancy exceeds the window.
+    /// Claude size = input+cache_creation+cache_read (NOT output). Opus runs a 1M
+    /// window, so a 345k resident context is ~0.345 full (NOT pinned at 100% as it
+    /// would be against the old 200k table value).
     #[test]
-    fn claude_context_size_sums_resident_and_clamps_fill() {
+    fn claude_context_size_uses_opus_1m_window() {
         let u = usage(2, 13761, 331244, 2620, "claude-opus-4-8");
         let size = claude_context_size(&u, "claude-opus-4-8");
         assert_eq!(size.context_tokens, 345_007, "2 + 13761 + 331244");
-        assert_eq!(size.max_tokens, 200_000);
+        assert_eq!(size.max_tokens, 1_000_000, "Opus 4.x is a 1M-context model");
+        assert!(
+            (size.fill_pct - 0.345_007).abs() < 1e-6,
+            "345007/1000000 ≈ 0.345, got {}",
+            size.fill_pct
+        );
+    }
+
+    /// Observed-window guard: a model whose table window is 200k but whose resident
+    /// context already exceeds it is promoted to the 1M tier so fill is honest
+    /// (here a haiku id holding 250k → 0.25, not clamped at 1.0).
+    #[test]
+    fn claude_context_size_promotes_window_when_observed_exceeds_table() {
+        let u = usage(0, 0, 250_000, 0, "claude-3-5-haiku");
+        let size = claude_context_size(&u, "claude-3-5-haiku");
+        assert_eq!(size.context_tokens, 250_000);
+        assert_eq!(size.max_tokens, 1_000_000, "exceeds 200k table → promoted to 1M");
+        assert!((size.fill_pct - 0.25).abs() < 1e-9, "250k/1M = 0.25, got {}", size.fill_pct);
+    }
+
+    /// Fill still clamps to 1.0 when occupancy exceeds even the promoted window.
+    #[test]
+    fn claude_context_size_clamps_fill_when_over_max() {
+        let u = usage(0, 0, 1_200_000, 0, "claude-opus-4-8");
+        let size = claude_context_size(&u, "claude-opus-4-8");
         assert!(
             (size.fill_pct - 1.0).abs() < 1e-9,
-            "345007/200000 clamps to 1.0, got {}",
+            "1.2M/1M clamps to 1.0, got {}",
             size.fill_pct
         );
     }
@@ -348,10 +391,11 @@ mod tests {
         assert_eq!(size.fill_pct, 0.0);
     }
 
-    /// The model table covers the Claude family and the Codex/GPT-5 window.
+    /// The model table covers the Claude family and the Codex/GPT-5 window. Opus is a
+    /// 1M-context model; the other Claude models default to 200k.
     #[test]
     fn max_window_table_covers_known_models() {
-        assert_eq!(max_window_for_model("claude-opus-4-8"), 200_000);
+        assert_eq!(max_window_for_model("claude-opus-4-8"), 1_000_000);
         assert_eq!(max_window_for_model("claude-3-5-haiku"), 200_000);
         assert_eq!(max_window_for_model("claude-sonnet-4-5"), 200_000);
         assert_eq!(max_window_for_model("gpt-5-codex"), 258_400);

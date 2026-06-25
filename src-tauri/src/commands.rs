@@ -355,7 +355,7 @@ pub async fn ask(
     .await
 }
 /// Hide the overlay window. The daemon keeps running and the window is
-/// re-summonable via ⌘⇧Space or the tray menu. Best-effort: a missing
+/// re-summonable via ⌘⌥⌃M or the tray menu. Best-effort: a missing
 /// window must not error the frontend, so failures are swallowed.
 #[tauri::command]
 pub async fn hide_overlay(app: tauri::AppHandle) -> Result<(), String> {
@@ -376,7 +376,7 @@ pub async fn minimize_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 /// Hide the persistent overlay window. The daemon keeps running and the window
-/// stays re-summonable via the tray menu or the ⌘⇧Space hotkey. Best-effort: a
+/// stays re-summonable via the tray menu or the ⌘⌥⌃M hotkey. Best-effort: a
 /// missing window must not error the frontend, so failures are swallowed.
 #[tauri::command]
 pub async fn hide_window(app: tauri::AppHandle) -> Result<(), String> {

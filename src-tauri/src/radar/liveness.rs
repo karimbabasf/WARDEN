@@ -129,48 +129,50 @@ pub fn codex_status(
     }
 }
 
-/// FAULT B: working/idle from the session's CONVERSATION STATE, not file mtime.
+/// Working/idle from the session's CONVERSATION STATE — the LAST real action in the
+/// transcript, read SEMANTICALLY (not by a recency timer).
 ///
-/// mtime ("file touched recently") is a racy proxy — FSEvents coalesces writes, so the
-/// same idle session's mtime moves independently of real activity, flipping it
-/// working↔idle between two reads seconds apart. The ingested events ARE the real
-/// activity, and they are stable across reads on an unchanged store, so deriving status
-/// from the last event is BOTH more honest and deterministic (this kills the flicker).
+/// Why semantic, not a recency window: the transcript is written per step, and the
+/// SHAPE of the last step says exactly what the agent is doing right now. An actively
+/// working agent's transcript ends mid tool-loop — on a `ToolCall` (a tool is in
+/// flight) or a `ToolResult` (a tool just returned and the next assistant turn is
+/// coming). A finished agent's transcript ends on an `AssistantText`: a Claude
+/// `end_turn` message is text-only (a message that will CONTINUE carries `tool_use`,
+/// which maps to a `ToolCall`, never a trailing `AssistantText`), so a trailing
+/// assistant text means the turn COMPLETED and the agent is waiting on the operator.
 ///
-/// Rule on the LAST event (events are pre-sorted by `(turn idx, ts, id)`):
-/// * `UserPrompt` (operator just asked, not yet answered) ⇒ Working (a "strong"
-///   signal: the agent owes a reply).
-/// * a `ToolCall` whose `call_id` has no following `ToolResult` (a tool is still
-///   running) ⇒ Working (strong signal).
-/// * anything else — a completed `AssistantText`/`TokenUsage` turn, or an answered
-///   `ToolResult` — is a "quiet" tail: the agent is Working only if that event is
-///   RECENT (written within `working_secs`), else Idle.
+/// This reads "is it working right now?" with ~one filesystem event of latency, and is
+/// also DETERMINISTIC across reads (stable on an unchanged store → no flicker). The old
+/// recency window was a guess that flipped a busy agent to idle during any long
+/// generation / tool run that wrote nothing for a few seconds, and (worse) leaned on a
+/// Claude registry `status` field the DESKTOP app does not write — so desktop agents
+/// fell through to that timer and read idle while hard at work.
 ///
-/// Why recency for the quiet tail: an actively-generating agent spends almost all of
-/// its time with its transcript ending on `AssistantText`/`TokenUsage`/answered
-/// `ToolResult` — it only momentarily shows an unanswered `ToolCall`. Classifying
-/// every quiet tail as Idle therefore collapses a whole forest of busy agents to
-/// Idle (observed: 14/14 live globes read idle). Recency is the honest discriminator:
-/// a quiet tail 45s old is mid-stream work; one 5000s old is a session that went home.
+/// Rule on the LAST action event — bookkeeping (`TokenUsage`/`Thinking`/`SystemNotice`/
+/// `ModeChange`/`FileSnapshot`) is skipped because it trails or accompanies the real
+/// action and would mask it (e.g. `TokenUsage` is emitted right AFTER each assistant
+/// message):
+/// * `AssistantText` ⇒ Idle  (completed `end_turn`; the agent stopped, waiting on the operator);
+/// * `UserPrompt`    ⇒ Working (the operator asked; the agent owes its answer);
+/// * `ToolCall`      ⇒ Working (a tool is in flight — its result is not written yet);
+/// * `ToolResult`    ⇒ Working (a tool just returned; the next assistant turn is coming).
 ///
-/// Backstop: a "strong" Working signal whose event is older than `stale_secs` (the
-/// agent fell silent mid-step and never finished) downgrades to Idle so a stuck-forever
-/// session does not glow Working indefinitely. (`stale_secs >= working_secs`, so a
-/// quiet tail is bounded by the tighter `working_secs` window.)
+/// Backstop: a Working verdict whose last action is older than `stale_secs` is a wedged
+/// step (the agent fell silent mid-tool and never continued) → Idle, so a stuck globe
+/// does not glow forever. A live agent rewrites its transcript far inside this window,
+/// so the backstop never fires on real work.
 ///
-/// Returns `None` when there is no usable event at all (no `UserPrompt`/`ToolCall`/
-/// `AssistantText`/`TokenUsage`/`ToolResult`) — the caller then falls back to mtime.
-/// The process-alive check is the caller's responsibility (this is a pure function of
-/// the transcript + clock).
+/// Returns `None` when there is no usable action event at all — the caller then falls
+/// back to mtime. The process-alive check is the caller's responsibility (this is a
+/// pure function of the transcript + clock).
 pub fn status_from_last_event(
     events: &[(Turn, EventRecord)],
     now: DateTime<Utc>,
-    working_secs: u64,
     stale_secs: u64,
 ) -> Option<AgentStatus> {
-    // The last conversational event decides "working vs idle". Skip events that are not
-    // a real activity signal (e.g. SystemNotice/ModeChange/FileSnapshot/Thinking) so a
-    // trailing system record never masks the true last action.
+    // The last real ACTION decides working vs idle. Skip bookkeeping/non-action events
+    // (TokenUsage/Thinking/SystemNotice/ModeChange/FileSnapshot) — a trailing TokenUsage
+    // accompanies every assistant message and would otherwise mask the true last action.
     let last = events.iter().rev().find(|(_, e)| {
         matches!(
             e.event,
@@ -178,47 +180,24 @@ pub fn status_from_last_event(
                 | Event::ToolCall { .. }
                 | Event::ToolResult { .. }
                 | Event::AssistantText { .. }
-                | Event::TokenUsage { .. }
         )
     })?;
 
+    // A completed assistant turn (text-only `end_turn`) is the ONLY idle tail; every
+    // other action (operator prompt, tool in flight, tool just returned) is mid-step.
+    if matches!(last.1.event, Event::AssistantText { .. }) {
+        return Some(AgentStatus::Idle);
+    }
+
+    // Backstop: a Working tail older than the stale window is a wedged step → Idle.
     let age_secs = now
         .signed_duration_since(last.1.ts)
         .num_seconds()
         .max(0) as u64;
-
-    // "Strong" Working signals: the agent visibly owes work right now.
-    let strong_working = match &last.1.event {
-        // Operator asked; the agent has not produced its answering turn yet.
-        Event::UserPrompt { .. } => true,
-        // A tool call is in flight iff no later ToolResult answers its call_id. (The
-        // matching result, when present, sorts after the call, so it would BE the last
-        // event — but check explicitly to be robust to interleaving.)
-        Event::ToolCall { call_id, .. } => !events.iter().any(|(_, e)| {
-            matches!(&e.event, Event::ToolResult { call_id: c, .. } if c == call_id)
-        }),
-        // A completed assistant turn / token-usage / answered tool-result is a "quiet"
-        // tail — not a strong signal; recency decides it below.
-        _ => false,
-    };
-
-    if strong_working {
-        // Stale backstop: a strong "working" verdict on an event older than the window
-        // is a stuck-forever agent — settle it to idle.
-        return Some(if age_secs > stale_secs {
-            AgentStatus::Idle
-        } else {
-            AgentStatus::Working
-        });
-    }
-
-    // Quiet tail: the agent is mid-stream (Working) only if the last event is RECENT.
-    // A busy agent almost always ends on AssistantText/TokenUsage/answered ToolResult
-    // between steps, so without this a working forest reads entirely idle.
-    Some(if age_secs <= working_secs {
-        AgentStatus::Working
-    } else {
+    Some(if age_secs > stale_secs {
         AgentStatus::Idle
+    } else {
+        AgentStatus::Working
     })
 }
 
@@ -449,38 +428,36 @@ mod tests {
         (turn, rec)
     }
 
-    /// FAULT B core: status is derived from the LAST conversational event, not file
-    /// mtime. Strong signals: (b) trailing UserPrompt ⇒ working, (c) a ToolCall with no
-    /// answering ToolResult ⇒ working. Quiet tails (AssistantText / TokenUsage / answered
-    /// ToolResult) are decided by RECENCY: (a) an old completed turn ⇒ idle, (a2) a recent
-    /// completed turn ⇒ working (the agent is mid-stream between steps), (d) an old
-    /// answered ToolResult ⇒ idle, (d2) a recent answered ToolResult ⇒ working. (e) no
-    /// usable events ⇒ None (mtime fallback).
+    /// Semantic liveness: status comes from the SHAPE of the last action event, not a
+    /// recency timer. (a) a trailing completed `AssistantText` (`end_turn`) ⇒ idle, even
+    /// when (a2) it is RECENT — a finished turn means the agent stopped. (b) a trailing
+    /// `UserPrompt` ⇒ working (the agent owes an answer). (c) a `ToolCall` in flight ⇒
+    /// working. (d) a trailing `ToolResult` ⇒ working (a tool just returned; the next
+    /// assistant turn is coming). (d2) a bookkeeping `TokenUsage` after the action is
+    /// SKIPPED, so the real action still decides. (e) no usable action ⇒ None (mtime fallback).
     #[test]
     fn status_from_last_event_classifies_by_conversation_state() {
         let now = Utc::now();
         let t = |secs: i64| now - chrono::Duration::seconds(secs);
-        let working = 15u64;
         let stale = 180u64;
 
-        // (a) last event is a completed assistant turn, OLD (past the working window) → idle.
+        // (a) trailing completed AssistantText (end_turn) → idle (the agent finished).
         let done = vec![
             ev(1, t(60), Event::UserPrompt { text: "go".into(), attachments: vec![], is_meta: false }),
             ev(2, t(40), Event::AssistantText { text: "done".into() }),
         ];
-        assert_eq!(status_from_last_event(&done, now, working, stale), Some(AgentStatus::Idle));
+        assert_eq!(status_from_last_event(&done, now, stale), Some(AgentStatus::Idle));
 
-        // (a2) THE FIX: the SAME completed-turn tail, but RECENT → working. A busy agent
-        // almost always ends on AssistantText between steps; without recency this collapses
-        // a live forest to all-idle (the observed 14/14 idle-globes bug).
+        // (a2) the SAME completed tail but RECENT → STILL idle. A completed assistant turn
+        // means the agent stopped and is waiting on the operator, regardless of how recent.
         let done_recent = vec![
             ev(1, t(8), Event::UserPrompt { text: "go".into(), attachments: vec![], is_meta: false }),
-            ev(2, t(4), Event::AssistantText { text: "working on it".into() }),
+            ev(2, t(4), Event::AssistantText { text: "all done".into() }),
         ];
         assert_eq!(
-            status_from_last_event(&done_recent, now, working, stale),
-            Some(AgentStatus::Working),
-            "a recent quiet tail is an actively-generating agent, not idle"
+            status_from_last_event(&done_recent, now, stale),
+            Some(AgentStatus::Idle),
+            "a completed assistant turn is the agent stopping → idle, even if recent"
         );
 
         // (b) last event is a UserPrompt (asked, not yet answered) → working.
@@ -488,7 +465,7 @@ mod tests {
             ev(1, t(6), Event::AssistantText { text: "hi".into() }),
             ev(2, t(2), Event::UserPrompt { text: "now do X".into(), attachments: vec![], is_meta: false }),
         ];
-        assert_eq!(status_from_last_event(&asked, now, working, stale), Some(AgentStatus::Working));
+        assert_eq!(status_from_last_event(&asked, now, stale), Some(AgentStatus::Working));
 
         // (c) a ToolCall with NO following ToolResult → working (tool in flight).
         let in_flight = vec![
@@ -499,49 +476,68 @@ mod tests {
                 kind: ToolKind::Builtin,
             }),
         ];
-        assert_eq!(status_from_last_event(&in_flight, now, working, stale), Some(AgentStatus::Working));
+        assert_eq!(status_from_last_event(&in_flight, now, stale), Some(AgentStatus::Working));
 
-        // (d) the SAME call, answered by a ToolResult and OLD (past the window) → idle.
-        let answered_old = vec![
-            ev(1, t(50), Event::ToolCall {
+        // (d) a trailing ToolResult (a tool just returned; the agent is about to continue)
+        // → working. Even an older one (50s) is mid-step — only the stale backstop (180s)
+        // settles it. (The old recency rule wrongly called this idle.)
+        let tool_returned = vec![
+            ev(1, t(55), Event::ToolCall {
                 tool: "Bash".into(),
                 input: serde_json::json!({"command":"cargo build"}),
                 call_id: "c1".into(),
                 kind: ToolKind::Builtin,
             }),
-            ev(2, t(40), Event::ToolResult {
+            ev(2, t(50), Event::ToolResult {
                 call_id: "c1".into(),
                 status: ToolStatus::Ok,
                 bytes: 10,
                 summary: None,
             }),
         ];
-        assert_eq!(status_from_last_event(&answered_old, now, working, stale), Some(AgentStatus::Idle));
+        assert_eq!(status_from_last_event(&tool_returned, now, stale), Some(AgentStatus::Working));
 
-        // (d2) the SAME call answered RECENTLY → working (a tool just finished mid-step).
-        let answered_recent = vec![
-            in_flight[0].clone(),
-            ev(2, t(1), Event::ToolResult {
+        // (d2) a bookkeeping TokenUsage trailing the action is SKIPPED — the ToolResult
+        // still decides (without this skip every assistant message would mask its action).
+        let tool_then_usage = vec![
+            ev(1, t(5), Event::ToolCall {
+                tool: "Read".into(),
+                input: serde_json::json!({"file_path":"/x.rs"}),
+                call_id: "c1".into(),
+                kind: ToolKind::Builtin,
+            }),
+            ev(2, t(3), Event::ToolResult {
                 call_id: "c1".into(),
                 status: ToolStatus::Ok,
                 bytes: 10,
                 summary: None,
             }),
+            ev(3, t(3), Event::TokenUsage {
+                input: 5,
+                output: 9,
+                cache_creation: 0,
+                cache_read: 0,
+                model: "claude-opus-4-8".into(),
+                orchestration: None,
+            }),
         ];
-        assert_eq!(status_from_last_event(&answered_recent, now, working, stale), Some(AgentStatus::Working));
+        assert_eq!(
+            status_from_last_event(&tool_then_usage, now, stale),
+            Some(AgentStatus::Working),
+            "trailing TokenUsage is bookkeeping; the ToolResult action decides → working"
+        );
 
-        // (e) no usable events → None (caller falls back to mtime).
+        // (e) no usable action events → None (caller falls back to mtime).
         let none = vec![ev(1, t(1), Event::SystemNotice { subtype: "x".into(), data: serde_json::json!({}) })];
-        assert_eq!(status_from_last_event(&none, now, working, stale), None);
+        assert_eq!(status_from_last_event(&none, now, stale), None);
     }
 
-    /// FAULT B backstop: a "working" verdict (e.g. a UserPrompt) on an event older than
-    /// `stale_secs` is a stuck-forever agent → downgraded to idle. The same UserPrompt
+    /// Backstop: a Working verdict (e.g. a trailing UserPrompt) on an action older than
+    /// `stale_secs` is a wedged/abandoned step → downgraded to idle. The same UserPrompt
     /// within the window stays working.
     #[test]
     fn status_from_last_event_stale_backstop_downgrades_to_idle() {
         let now = Utc::now();
-        let working = 15u64;
         let stale = 180u64;
         // A UserPrompt 10 minutes old → working-by-rule but past the backstop → idle.
         let stuck = vec![ev(
@@ -549,19 +545,18 @@ mod tests {
             now - chrono::Duration::seconds(600),
             Event::UserPrompt { text: "go".into(), attachments: vec![], is_meta: false },
         )];
-        assert_eq!(status_from_last_event(&stuck, now, working, stale), Some(AgentStatus::Idle));
+        assert_eq!(status_from_last_event(&stuck, now, stale), Some(AgentStatus::Idle));
         // The same prompt 5s ago → still working.
         let fresh = vec![ev(
             1,
             now - chrono::Duration::seconds(5),
             Event::UserPrompt { text: "go".into(), attachments: vec![], is_meta: false },
         )];
-        assert_eq!(status_from_last_event(&fresh, now, working, stale), Some(AgentStatus::Working));
+        assert_eq!(status_from_last_event(&fresh, now, stale), Some(AgentStatus::Working));
     }
 
-    /// FAULT B determinism: the same events evaluated at the same instant return the
-    /// SAME status across repeated calls (no mtime, no clock drift between reads). This
-    /// is the property that kills the working↔idle flicker.
+    /// Determinism: the same events evaluated at the same instant return the SAME status
+    /// across repeated calls — the property that kills the working↔idle flicker.
     #[test]
     fn status_from_last_event_is_deterministic_across_reads() {
         let now = Utc::now();
@@ -573,8 +568,8 @@ mod tests {
                 kind: ToolKind::Builtin,
             }),
         ];
-        let a = status_from_last_event(&events, now, 15, 180);
-        let b = status_from_last_event(&events, now, 15, 180);
+        let a = status_from_last_event(&events, now, 180);
+        let b = status_from_last_event(&events, now, 180);
         assert_eq!(a, b, "identical inputs must yield identical status");
         assert_eq!(a, Some(AgentStatus::Working));
     }

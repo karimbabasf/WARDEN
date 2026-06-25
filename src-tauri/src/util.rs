@@ -71,14 +71,11 @@ pub fn default_claude_sessions_dir() -> PathBuf {
         .map(|s| expand_tilde(&s))
         .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".claude/sessions"))
 }
-/// RADAR: how recently a transcript must have been written for its agent to count
-/// as *working* (vs merely *idle*) — the FALLBACK used only when the registry has no
-/// authoritative live `status` field (older Claude / Codex). `WARDEN_RADAR_WORKING_MS`
-/// overrides. Default 15000ms: a working agent writes its transcript every few-to-tens
-/// of seconds (each message / tool call / result), so a 5s window flipped agents to
-/// "idle" mid-step (e.g. during a long build that writes nothing). 15s spans the
-/// normal between-write gap while still settling a genuinely idle agent to idle
-/// promptly. Newer Claude (v2.1.187+) bypasses this entirely via its registry status.
+/// RADAR: transcript-mtime recency window (ms) for the LAST-RESORT liveness fallback —
+/// used ONLY when a session has no usable action events at all to read semantically
+/// (see `status_from_last_event`). With events present, working/idle now comes from the
+/// SHAPE of the last action, not this timer. `WARDEN_RADAR_WORKING_MS` overrides; default
+/// 15000ms. (The primary path is event-semantic and needs no window.)
 pub fn radar_working_ms() -> u64 {
     std::env::var("WARDEN_RADAR_WORKING_MS")
         .ok()

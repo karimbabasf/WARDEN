@@ -16,7 +16,7 @@ pub fn harness_theme(h: &Harness) -> HarnessTheme {
         Harness::Codex => HarnessTheme {
             label: "Codex",
             color: "#b98cff",
-            glyph: "▲",
+            glyph: "▣",
         },
         _ => HarnessTheme {
             label: "Other",
@@ -44,7 +44,7 @@ mod tests {
         let t = harness_theme(&Harness::Codex);
         assert_eq!(t.label, "Codex");
         assert_eq!(t.color, "#b98cff");
-        assert_eq!(t.glyph, "▲");
+        assert_eq!(t.glyph, "▣");
     }
 
     #[test]
