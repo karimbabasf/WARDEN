@@ -100,9 +100,6 @@ pub struct RadarState {
     pub agents: Vec<RadarAgent>,
 }
 
-/// How many recent events to surface per agent in `recentActivity`.
-const RECENT_ACTIVITY_N: usize = 8;
-
 /// Assemble the live agent forest from the store + the Claude liveness registry.
 ///
 /// `is_alive`/`now` are injected so the join is deterministic and unit-testable
@@ -127,9 +124,15 @@ pub fn assemble(
 
     // Liveness: map a Claude external session id → status from the registry.
     let registry = read_claude_registry(sessions_dir);
-    let working_secs = crate::util::radar_working_ms() / 1000;
     let mtime_secs_ago = |sid: &str| transcript_mtime_secs_ago(&sessions, sid, now);
-    let live = partition_claude(&registry, is_alive, &mtime_secs_ago, working_secs);
+    // FAULT B: when the registry carries no authoritative `status`, decide working/idle
+    // from the session's CONVERSATION STATE (its last ingested event), not file mtime —
+    // deterministic across reads, so the working↔idle flicker is gone. The closure
+    // bridges the registry's external `sessionId` → the store row → its events.
+    let stale_secs = crate::util::radar_working_stale_secs();
+    let fallback_status =
+        |ext: &str| claude_conversation_status(store, &sessions, ext, now, stale_secs, &mtime_secs_ago);
+    let live = partition_claude(&registry, is_alive, &fallback_status);
     let claude_status: HashMap<String, AgentStatus> = live
         .into_iter()
         .map(|(s, st)| (s.session_id, st))
@@ -310,7 +313,7 @@ pub fn assemble(
         let status = if terminated_now.contains(&s.id) {
             AgentStatus::Terminated
         } else {
-            agent_status(s, &claude_status, &mtime_secs_ago)
+            agent_status(store, s, &claude_status, &mtime_secs_ago, now)
         };
         let mut agent = build_agent(
             store,
@@ -361,21 +364,86 @@ fn root_is_open(
         .is_some_and(|root| directly_open(root))
 }
 
-/// Status for one session: a Claude session uses the registry partition (by
-/// external id); anything else (Codex, etc.) is Idle when recently written, else
-/// Idle — the live collector treats store-resident sessions as open/idle and lets
-/// the watcher's recompute drop a session that has left the live set.
+/// Status for one session: a Claude session uses the registry partition (by external
+/// id); anything else (Codex, etc., and Claude rows not in the live registry — e.g.
+/// subagents, which have no PID) derives working/idle from its CONVERSATION STATE
+/// (last ingested event), falling back to mtime only when it has no usable events.
+/// The live collector treats store-resident sessions as open/idle and lets the
+/// watcher's recompute drop a session that has left the live set.
 fn agent_status(
+    store: &Store,
     s: &Session,
     claude_status: &HashMap<String, AgentStatus>,
     mtime_secs_ago: &dyn Fn(&str) -> Option<u64>,
+    now: DateTime<Utc>,
 ) -> AgentStatus {
     if let Some(st) = claude_status.get(&s.external_id) {
         return *st;
     }
-    // Non-registry sessions: working when their transcript was just written.
+    // FAULT B: conversation-state first (deterministic), mtime only as a last resort.
+    let stale_secs = crate::util::radar_working_stale_secs();
     let working_secs = crate::util::radar_working_ms() / 1000;
+    let events = store.session_events(&s.id).unwrap_or_default();
+    if let Some(st) = liveness::status_from_last_event(&events, now, working_secs, stale_secs) {
+        return st;
+    }
+    // No usable events at all → fall back to the old transcript-mtime heuristic.
     match mtime_secs_ago(&s.external_id) {
+        Some(secs) if secs < working_secs => AgentStatus::Working,
+        _ => AgentStatus::Idle,
+    }
+}
+
+/// Decide a Claude session's working/idle status from its CONVERSATION STATE (Fault B):
+/// resolve the registry's external `sessionId` → the store row → its last ingested
+/// event via [`liveness::status_from_last_event`]. Falls back to the transcript-mtime
+/// heuristic ONLY when the session has no usable events (or is not in the store). This
+/// is deterministic across reads — the property that removes the working↔idle flicker.
+fn claude_conversation_status(
+    store: &Store,
+    sessions: &[Session],
+    external_id: &str,
+    now: DateTime<Utc>,
+    stale_secs: u64,
+    mtime_secs_ago: &dyn Fn(&str) -> Option<u64>,
+) -> AgentStatus {
+    // The registry keys by external `sessionId`; the store keys events by the internal
+    // id. A long Claude session is re-ingested as SEVERAL store rows sharing one external
+    // id (one row per compaction segment), and — contrary to an earlier assumption — the
+    // conversational tail is NOT replicated across them: each row holds only its segment's
+    // events. So `find()`-first (which, given `sessions()` orders by `started_at DESC`,
+    // returns the row with the latest START, not the freshest TAIL) can read a stale
+    // segment and mislabel a live agent idle. Evaluate the row whose LAST event is the
+    // most recent — that segment carries the agent's true current state.
+    let working_secs = crate::util::radar_working_ms() / 1000;
+    let freshest = sessions
+        .iter()
+        .filter(|s| s.external_id == external_id)
+        .filter_map(|s| {
+            let events = store.session_events(&s.id).unwrap_or_default();
+            let last_ts = events
+                .iter()
+                .rev()
+                .find(|(_, e)| {
+                    matches!(
+                        e.event,
+                        Event::UserPrompt { .. }
+                            | Event::ToolCall { .. }
+                            | Event::ToolResult { .. }
+                            | Event::AssistantText { .. }
+                            | Event::TokenUsage { .. }
+                    )
+                })
+                .map(|(_, e)| e.ts)?;
+            liveness::status_from_last_event(&events, now, working_secs, stale_secs)
+                .map(|st| (last_ts, st))
+        })
+        .max_by_key(|(ts, _)| *ts);
+    if let Some((_, st)) = freshest {
+        return st;
+    }
+    // No row / no usable events → old transcript-mtime heuristic (last resort).
+    match mtime_secs_ago(external_id) {
         Some(secs) if secs < working_secs => AgentStatus::Working,
         _ => AgentStatus::Idle,
     }
@@ -609,8 +677,9 @@ fn estimate_for_session(
     })
 }
 
-/// The last N events as recent-activity rows (newest first): a kind glyph-friendly
-/// `kind` plus a short label.
+/// Every action event as a recent-activity row (newest first): a kind glyph-friendly
+/// `kind` plus a short label. No cap — the detail panel shows ~10 rows in a
+/// scrollable feed and lets you scroll back to the very first action.
 fn recent_activity(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> Vec<RadarActivity> {
     let mut out: Vec<RadarActivity> = Vec::new();
     for (_, e) in events.iter().rev() {
@@ -630,9 +699,6 @@ fn recent_activity(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> Vec<
             kind: kind.to_string(),
             label,
         });
-        if out.len() >= RECENT_ACTIVITY_N {
-            break;
-        }
     }
     out
 }
@@ -1660,7 +1726,9 @@ mod tests {
     /// THE FIX (spec §3/§5: the forest is the OPEN set). A backfilled Claude session
     /// whose external id is NOT in the live registry is EXCLUDED — the archive of
     /// every transcript ever ingested must not render. A Claude session that IS in the
-    /// registry is included, status from mtime (idle here, with no fresh write).
+    /// registry is included; its status now comes from CONVERSATION STATE (Fault B):
+    /// `seed` leaves a fresh, unanswered `UserPrompt` as the last event, so the honest
+    /// verdict is `working` (the operator just asked) — not the old mtime "idle".
     #[test]
     fn claude_forest_includes_only_registry_open_sessions() {
         let store = Store::memory().unwrap();
@@ -1675,10 +1743,76 @@ mod tests {
         assert_eq!(state.agents.len(), 1, "only the registry-open session is in the forest");
         let a = &state.agents[0];
         assert_eq!(a.id, "live", "the open session is the live one, not the backfill");
-        assert_eq!(a.status, "idle", "open but no fresh transcript write → idle");
+        assert_eq!(
+            a.status, "working",
+            "last event is a fresh unanswered UserPrompt → working (Fault B: conversation-state, not mtime)"
+        );
         assert!(
             !state.agents.iter().any(|a| a.id == "hist"),
             "the historical/backfill session must be excluded"
+        );
+    }
+
+    /// FAULT B end-to-end via `assemble`: a registry-open Claude session's working/idle
+    /// verdict comes from its LAST ingested event, and is DETERMINISTIC across reads
+    /// (the property that kills the flicker). A session whose last event is a completed
+    /// `TokenUsage` turn is idle; a session whose last event is an unanswered
+    /// `UserPrompt` is working; two assembles on the unchanged store at the same instant
+    /// return byte-identical statuses. (The OLD mtime path, keyed on FSEvents-coalesced
+    /// file writes, could flip these between reads — this test pins the fix.)
+    #[test]
+    fn assemble_status_from_conversation_state_is_deterministic() {
+        let store = Store::memory().unwrap();
+        // `seed` writes a UserPrompt then an optional TokenUsage as the LAST event, both
+        // stamped at ~now. idle-sess: last event is a completed TokenUsage turn.
+        seed(
+            &store,
+            "idle-sess",
+            "idle-ext",
+            Harness::ClaudeCode,
+            Some("/tmp/a"),
+            Some((2, 100, 1000, 50, "claude-opus-4-8")),
+        );
+        // working-sess: last event is an unanswered UserPrompt (a strong working signal).
+        seed(&store, "working-sess", "working-ext", Harness::ClaudeCode, Some("/tmp/b"), None);
+
+        // Both are registry-open WITHOUT an authoritative `status` field, so the
+        // conversation-state fallback decides. Evaluate 40s in the FUTURE relative to the
+        // seeded events: past the 15s working window (so the quiet TokenUsage tail reads
+        // idle) but within the 180s stale backstop (so the unanswered UserPrompt is still
+        // working). A FIXED clock makes the verdict exact and deterministic.
+        let reg = claude_registry(&[(101, "idle-ext"), (102, "working-ext")]);
+        let now = Utc::now() + chrono::Duration::seconds(40);
+
+        let st = |state: &RadarState, id: &str| {
+            state
+                .agents
+                .iter()
+                .find(|a| a.id == id)
+                .map(|a| a.status.clone())
+                .unwrap_or_default()
+        };
+
+        let s1 = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        assert_eq!(
+            st(&s1, "idle-sess"),
+            "idle",
+            "last event is a completed TokenUsage turn → idle"
+        );
+        assert_eq!(
+            st(&s1, "working-sess"),
+            "working",
+            "last event is an unanswered UserPrompt → working"
+        );
+
+        // Determinism: a second assemble on the UNCHANGED store at the SAME instant
+        // yields identical statuses (no mtime, no flicker).
+        let s2 = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        assert_eq!(st(&s2, "idle-sess"), st(&s1, "idle-sess"), "idle status stable across reads");
+        assert_eq!(
+            st(&s2, "working-sess"),
+            st(&s1, "working-sess"),
+            "working status stable across reads"
         );
     }
 

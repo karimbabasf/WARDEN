@@ -98,6 +98,18 @@ pub fn radar_codex_stale_secs() -> u64 {
         .unwrap_or(6)
         * 3600
 }
+/// RADAR (Fault B): how long since a session's LAST ingested event a "working" verdict
+/// stays trusted before it is downgraded to idle — the BACKSTOP for the conversation-
+/// state liveness rule (last event = an unanswered UserPrompt / in-flight ToolCall ⇒
+/// working). `WARDEN_RADAR_WORKING_STALE_SECS` overrides. Generous default (180s) so a
+/// long tool run or a slow generation is never mistaken for a stuck agent, while a
+/// session that fell silent mid-step still settles to idle instead of glowing forever.
+pub fn radar_working_stale_secs() -> u64 {
+    std::env::var("WARDEN_RADAR_WORKING_STALE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(180)
+}
 /// RADAR: how long a subagent may be silent (no transcript writes) while its parent
 /// is still alive before it is treated as terminated — a BACKSTOP only; the primary
 /// signal is the parent's tool-result for the subagent's call. `WARDEN_RADAR_SUBAGENT_TERMINATE_MS`

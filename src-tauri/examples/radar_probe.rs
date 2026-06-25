@@ -53,10 +53,11 @@ fn main() {
         }
         let indent = "  ".repeat(a.depth as usize + 1);
         println!(
-            "{indent}[{}] {} | status={} depth={} fill={:.1} ctx={}/{} kids={} model={:?} role={:?} parent={:?}",
+            "{indent}[{}] {} | status={} cwd={:?} depth={} fill={:.1} ctx={}/{} kids={} model={:?} role={:?} parent={:?}",
             a.harness,
             a.label,
             a.status,
+            a.cwd,
             a.depth,
             a.fill_pct,
             a.context_tokens,

@@ -314,15 +314,70 @@ pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
         if !is_subagent {
             continue;
         }
-        let tid = s.meta.get("toolUseId").and_then(|v| v.as_str());
+        // FAULT A: the durable `toolUseId` lives in the on-disk sidecar
+        // `agent-<id>.meta.json` next to the subagent transcript — NOT on the row.
+        // The live tail's `upsert_session_batch` REPLACEs `meta_json` with the
+        // `{"ignored_record_types":…}` parse-meta (non-empty ⇒ not the empty sentinel),
+        // clobbering any merged `toolUseId`; the scheduler path never re-runs the merge,
+        // so the row's `toolUseId` is permanently absent (0/740 on the live store).
+        // Read the sidecar from disk so linking is immune to that clobber. Fall back to
+        // the row meta for synthetic stores that never wrote a sidecar.
+        let sidecar = read_subagent_meta(&sidecar_path(&s.source_path)).ok();
+        let sidecar_tid = sidecar
+            .as_ref()
+            .map(|m| m.tool_use_id.as_str())
+            .filter(|t| !t.is_empty());
+        let tid = sidecar_tid.or_else(|| s.meta.get("toolUseId").and_then(|v| v.as_str()));
         if let Some(parent) = tid.and_then(|t| call_to_parent.get(t)) {
             if parent != &s.id {
                 store.link_child_session(&s.id, parent)?;
                 recorded += 1;
             }
         }
+        // Repair the durable identity fields the same clobber nulls
+        // (`toolUseId`/`agentType`/`description`), so the FACE detail-panel Role/name
+        // survive. Gate to only-when-missing to bound the write cost — once merged, the
+        // row carries them and subsequent recomputes skip the merge.
+        if let Some(m) = sidecar.as_ref() {
+            let row_has = |k: &str| {
+                s.meta
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+            };
+            let missing_tid = !row_has("toolUseId") && !m.tool_use_id.is_empty();
+            let missing_type = !row_has("agentType") && !m.agent_type.is_empty();
+            let missing_desc = !row_has("description") && !m.description.is_empty();
+            if missing_tid || missing_type || missing_desc {
+                store.merge_session_meta(
+                    &s.id,
+                    &json!({
+                        "toolUseId": m.tool_use_id,
+                        "agentType": m.agent_type,
+                        "description": m.description,
+                    }),
+                )?;
+            }
+        }
     }
     Ok(recorded)
+}
+
+/// The sidecar metadata path for a subagent transcript: `agent-<id>.jsonl` →
+/// `agent-<id>.meta.json` in the same `subagents/` directory. (`Path::with_extension`
+/// would strip `.jsonl` and yield `agent-<id>.meta.json` via `meta.json`, but spelled
+/// out here so the intent — pair the transcript with its sibling sidecar — is explicit
+/// and robust to ids that contain dots.)
+fn sidecar_path(transcript: &Path) -> PathBuf {
+    let stem = transcript
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    match transcript.parent() {
+        Some(dir) => dir.join(format!("{stem}.meta.json")),
+        None => PathBuf::from(format!("{stem}.meta.json")),
+    }
 }
 
 /// Full (offset-0) parse: the first record carries `sessionId`, which resolves
@@ -1195,6 +1250,122 @@ mod tests {
             store.parent_of("child-sid").unwrap().as_deref(),
             Some("parent-sid"),
             "subagent links to the parent whose Agent call_id == its toolUseId"
+        );
+    }
+
+    /// Build a subagent session row whose `source_path` points at a REAL on-disk
+    /// `subagents/agent-<id>.jsonl` with a sibling `agent-<id>.meta.json`, while its
+    /// stored `meta_json` is the CLOBBERED production shape (no `toolUseId` — only
+    /// `ignored_record_types`, exactly what the live tail's REPLACE leaves behind).
+    /// Returns the child session id. This reproduces the field condition the store-meta
+    /// linker fails on: the durable `toolUseId` lives only in the sidecar.
+    fn upsert_subagent_with_sidecar_but_clobbered_meta(
+        store: &Store,
+        dir: &Path,
+        agent_id: &str,
+        sid: &str,
+        sidecar_tool_use_id: &str,
+        sidecar_agent_type: &str,
+        sidecar_description: &str,
+    ) -> String {
+        let subs = dir.join("proj").join("019sess").join("subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        let jsonl = subs.join(format!("agent-{agent_id}.jsonl"));
+        std::fs::write(&jsonl, "{}\n").unwrap();
+        std::fs::write(
+            subs.join(format!("agent-{agent_id}.meta.json")),
+            json!({
+                "agentType": sidecar_agent_type,
+                "description": sidecar_description,
+                "toolUseId": sidecar_tool_use_id,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let now = chrono::Utc::now();
+        let session = Session {
+            id: sid.into(),
+            harness: Harness::ClaudeCode,
+            external_id: format!("{sid}-ext"),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: jsonl,
+            raw_hash: 0,
+            ingested_at: now,
+            // The PRODUCTION clobbered shape: non-empty, no toolUseId. The live tail's
+            // REPLACE-unless-sentinel meta write leaves exactly this on the row.
+            meta: json!({ "ignored_record_types": { "attachment": 2 } }),
+        };
+        store.upsert_session_batch(&session, &[], &[], 0).unwrap();
+        sid.to_string()
+    }
+
+    /// FAULT A regression: in production every Claude subagent row's `meta_json` is
+    /// clobbered by the live tail's REPLACE write, so `toolUseId` is ALWAYS absent from
+    /// the row (0/740 on the live store) — the old linker gated on `s.meta["toolUseId"]`
+    /// and therefore linked nothing. The durable `toolUseId` survives only in the
+    /// on-disk sidecar `agent-<id>.meta.json`. The relinker must read the sidecar, link
+    /// child→parent by `Agent` call_id == sidecar `toolUseId`, AND repair the row's
+    /// identity (toolUseId/agentType/description) so the detail-panel role survives.
+    #[test]
+    fn relink_reads_tool_use_id_from_sidecar_not_clobbered_meta() {
+        let dir = tempdir().unwrap();
+        let store = Store::memory().unwrap();
+
+        // The subagent row: clobbered meta (no toolUseId), but its sidecar carries it.
+        let child_sid = upsert_subagent_with_sidecar_but_clobbered_meta(
+            &store,
+            dir.path(),
+            "deadbeef",
+            "child-sid",
+            "toolu_side",
+            "Explore",
+            "sweep the radar module",
+        );
+
+        // Precondition: the row genuinely has NO toolUseId (the production condition).
+        assert_eq!(
+            session_meta_str(&store, &child_sid, "toolUseId"),
+            None,
+            "precondition: the clobbered row carries no toolUseId (sidecar-only)"
+        );
+
+        // BEFORE: with the parent's Agent call absent there is no parent yet.
+        assert_eq!(store.parent_of(&child_sid).unwrap(), None, "no parent yet");
+
+        // The parent arrives carrying an `Agent` tool-call whose call_id == the
+        // sidecar's toolUseId.
+        upsert_parent_with_agent_call(&store, "parent-sid", "toolu_side");
+
+        // AFTER relink: the parent is resolved FROM THE SIDECAR (the row meta is still
+        // clobbered, so a store-meta linker would still find nothing).
+        let n = link_claude_subagents_in_store(&store).expect("relink");
+        assert!(n >= 1, "at least one sidecar-resolved link recorded");
+        assert_eq!(
+            store.parent_of(&child_sid).unwrap().as_deref(),
+            Some("parent-sid"),
+            "subagent links to the parent whose Agent call_id == its SIDECAR toolUseId"
+        );
+
+        // Identity repair: the durable fields are merged back onto the clobbered row so
+        // the FACE detail panel's role/name survive the live-tail clobber.
+        assert_eq!(
+            session_meta_str(&store, &child_sid, "toolUseId").as_deref(),
+            Some("toolu_side"),
+            "the sidecar toolUseId is repaired onto the row"
+        );
+        assert_eq!(
+            session_meta_str(&store, &child_sid, "agentType").as_deref(),
+            Some("Explore"),
+            "the sidecar agentType is repaired onto the row (detail-panel role)"
+        );
+        assert_eq!(
+            session_meta_str(&store, &child_sid, "description").as_deref(),
+            Some("sweep the radar module"),
+            "the sidecar description is repaired onto the row (detail-panel label)"
         );
     }
 
