@@ -90,13 +90,15 @@ export function heatColor(baseHex: string, fillPct: number): string {
   const f = clamp01(fillPct);
 
   // 1) brightness gain — even an empty globe is a visible dim ember, not black.
-  const EMBER_FLOOR = 0.34; // base scaled to 34% at fill 0 …
+  const EMBER_FLOOR = 0.36; // base scaled to 36% at fill 0 …
   const gain = EMBER_FLOOR + (1 - EMBER_FLOOR) * f; // … up to 100% at fill 1
   const lit: Rgb = { r: base.r * gain, g: base.g * gain, b: base.b * gain };
 
-  // 2) whiteness — eased so it engages mainly in the top of the range. f^2.2
-  // keeps the hue legible at low/mid fill, then rushes to white-hot near full.
-  const whiteness = Math.pow(f, 2.2) * 0.92;
+  // 2) whiteness — eased toward the top of the range, but engaging earlier (f^1.7)
+  // and climbing nearer pure white, so a busy globe BLAZES rather than merely
+  // brightening, while an empty/idle globe stays hue-true and dim (the working↔idle
+  // contrast lives here in the heat ramp + the per-globe glow lift).
+  const whiteness = Math.pow(f, 1.7) * 0.97;
   const out: Rgb = {
     r: lerp(lit.r, 255, whiteness),
     g: lerp(lit.g, 255, whiteness),
