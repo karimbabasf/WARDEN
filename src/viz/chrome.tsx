@@ -10,7 +10,7 @@
 // (ask, request fix, clear, dismiss). No Tauri, no Three — trivially reasoned about.
 
 import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { SceneState } from './bridge';
+import type { HabitsWindow, SceneState } from './bridge';
 import { harnessTheme, severityColor } from './harnessTheme';
 import type { LayoutNode, OrbIssue, OrbSceneModel } from './orbTypes';
 import type { ConstellationTab } from './NavBar';
@@ -90,6 +90,96 @@ function compact(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0';
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
   return String(Math.round(n));
+}
+
+// ── Living Habits: the time-window dial + a live "last scanned" readout ──────
+// The dial is a segmented control over the five window wire strings; clicking one
+// asks the backend to re-scan that window (`set_habits_window`) and optimistically
+// lights the chosen segment so the UI feels instant (the real highlight then
+// reconciles from `scene.activeWindow` when `habits_refreshed` echoes back). The
+// readout derives a relative age from `scene.lastScannedAt`, re-rendered on a 1s
+// tick so "last scanned Ns ago" actually counts up. Rendered ONLY on the habits tab
+// (its caller gates it). Phosphor chrome: active = --acid, text --ink-soft, the
+// rest from the shared tokens so it matches the FilterBar dock it sits above.
+export const HABITS_WINDOW_OPTIONS: ReadonlyArray<{ value: HabitsWindow; label: string }> = [
+  { value: 'today', label: 'Today' },
+  { value: '7d', label: '7d' },
+  { value: '30d', label: '30d' },
+  { value: '6mo', label: '6mo' },
+  { value: 'all', label: 'All-time' },
+];
+
+// Pure: format an age in seconds as a compact relative string. Exported for the
+// unit test (no DOM/clock dependence — the tick that re-runs it lives in the view).
+export function relativeScanAge(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'just now';
+  if (seconds < 1) return 'just now';
+  if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+function HabitsDial({
+  activeWindow,
+  lastScannedAt,
+  onPickWindow,
+}: {
+  activeWindow: HabitsWindow | undefined;
+  lastScannedAt: string | undefined;
+  onPickWindow: (w: HabitsWindow) => void;
+}) {
+  // Optimistic highlight: lit on click immediately, reconciled to the backend's
+  // echoed window whenever `activeWindow` changes (the honest source of truth).
+  const [optimistic, setOptimistic] = useState<HabitsWindow | undefined>(activeWindow);
+  useEffect(() => {
+    if (activeWindow) setOptimistic(activeWindow);
+  }, [activeWindow]);
+  const lit = optimistic ?? activeWindow ?? 'today';
+
+  // 1s tick so the relative "last scanned" age counts up live. The interval is the
+  // ONLY clock here; `relativeScanAge` stays pure. Cleaned up on unmount.
+  const [, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const scannedMs = lastScannedAt ? Date.parse(lastScannedAt) : NaN;
+  const age = Number.isFinite(scannedMs) ? relativeScanAge((Date.now() - scannedMs) / 1000) : null;
+
+  return (
+    <div className="wd-habits-dial" data-habits-dial role="group" aria-label="Habits time window">
+      <div className="wd-dial-seg" role="radiogroup" aria-label="Time window">
+        {HABITS_WINDOW_OPTIONS.map((o) => {
+          const active = lit === o.value;
+          return (
+            <button
+              type="button"
+              key={o.value}
+              className={`wd-dial-opt${active ? ' is-active' : ''}`}
+              data-window={o.value}
+              role="radio"
+              aria-checked={active}
+              title={`Show habits over: ${o.label}`}
+              onClick={() => {
+                setOptimistic(o.value); // optimistic — reconciles from scene.activeWindow
+                onPickWindow(o.value);
+              }}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+      <div className="wd-dial-live" data-habits-live aria-live="polite">
+        <span className="wd-dial-live-dot" aria-hidden="true" />
+        <span className="wd-dial-live-text">
+          live{age ? ` · last scanned ${age}` : ''}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 // ── top HUD: identity + live memory profile ────────────────────────────────
@@ -651,6 +741,7 @@ export function Chrome({
   onDismiss,
   onPopFocus,
   onClearFocus,
+  onPickWindow,
 }: {
   scene: SceneState;
   model: OrbSceneModel;
@@ -678,6 +769,8 @@ export function Chrome({
   onDismiss: () => void;
   onPopFocus: (index: number) => void;
   onClearFocus: () => void;
+  /** Living Habits: the dial picked a time-window → re-scan it (`set_habits_window`). */
+  onPickWindow: (w: HabitsWindow) => void;
 }) {
   const ledgerCount = artifacts.filter(isHistoric).length;
   // Chrome now carries only the radar focus trail (Breadcrumb, top of the chrome
@@ -693,6 +786,17 @@ export function Chrome({
           model={model}
           onPopFocus={onPopFocus}
           onClearFocus={onClearFocus}
+        />
+      )}
+
+      {/* Living Habits time-window dial + live "last scanned" readout — habits tab
+          only (severity/streaks are a habits-only signal). Picking a window asks the
+          backend to re-scan it; the constellation then refreshes via habits_refreshed. */}
+      {tab === 'habits' && (
+        <HabitsDial
+          activeWindow={scene.activeWindow}
+          lastScannedAt={scene.lastScannedAt}
+          onPickWindow={onPickWindow}
         />
       )}
 

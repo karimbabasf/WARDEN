@@ -35,6 +35,14 @@ export type OrbIssue = {
   findingId?: string;
   verifierVerdict?: string;
   status?: string;
+  /** Living Habits: how many times this habit was caught/credited toward a streak. */
+  credits: number;
+  /** Living Habits: the streak length K — `credits / streakK` fills the orb's ring. 0 = no ring. */
+  streakK: number;
+  /** Living Habits: true once the habit is resolved (the orb fades + scales down). */
+  fixed: boolean;
+  /** Living Habits: ISO-8601 timestamp of the most recent credit, or null. */
+  lastCreditAt: string | null;
 };
 
 export type OrbLink = {

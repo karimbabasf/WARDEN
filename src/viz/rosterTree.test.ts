@@ -135,6 +135,10 @@ function issueNode(over: Partial<OrbIssue> & { id: string; harness: string }): L
     confidence: 0,
     sessionIds: [],
     evidence: [],
+    credits: 0,
+    streakK: 0,
+    fixed: false,
+    lastCreditAt: null,
   };
   return {
     id: over.id,

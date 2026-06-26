@@ -21,6 +21,10 @@ import { AgentCore } from './AgentCore';
 
 const WHITE = new THREE.Color('#ffffff');
 
+// Module-scope scratch for the streak-ring billboard — reused across all orbs every
+// frame so the per-frame camera-facing math never allocates a quaternion.
+const _qParent = new THREE.Quaternion();
+
 // ~300 ms time-constant for the legend colour-dim crossfade. `damp(.., DIM_LAMBDA, dt)`
 // is identical to the brief's `cur += (target-cur)*(1 - exp(-dt/0.3))` (lambda = 1/0.3).
 const DIM_LAMBDA = 1 / 0.3;
@@ -107,9 +111,15 @@ export function Orb({
   const group = useRef<THREE.Group>(null!);
   const innerCage = useRef<THREE.Group>(null!);
   const gem = useRef<THREE.Group>(null!);
+  // The streak gauge billboards to face the camera each frame (so the arc reads flat
+  // regardless of the orb's spin). Held in its own group so the spin never tilts it.
+  const streakRing = useRef<THREE.Group>(null!);
   const gemMat = useRef<THREE.MeshPhysicalMaterial>(null!);
   const haloMat = useRef<THREE.SpriteMaterial>(null!);
   const nodeMat = useRef<THREE.PointsMaterial>(null!);
+  // Living-Habits streak gauge materials (the swept arc + its faint full track).
+  const streakMat = useRef<THREE.MeshBasicMaterial | null>(null);
+  const trackMat = useRef<THREE.MeshBasicMaterial | null>(null);
   // Wrapper groups whose only child is a drei <Wireframe>; we traverse them once
   // to cache the underlying MeshWireframeMaterial so the eased dim can tint the
   // stroke/fill colour uniforms per frame (drei forwards no material ref).
@@ -122,6 +132,15 @@ export function Orb({
   const severity = node.issue?.severity ?? 1;
   const theme = harnessTheme(node.harness);
   const seed = useMemo(() => seedOf(node.id), [node.id]);
+
+  // ── Living Habits signals ───────────────────────────────────────────────────
+  // streakK > 0 draws a progress ring filling `credits / streakK` (a habit on its
+  // way to "fixed"); `fixed` calmly fades + shrinks the whole orb (the basic
+  // resolved look — the elaborate implode is a later pass). Hubs carry neither.
+  const streakK = isHub ? 0 : node.issue?.streakK ?? 0;
+  const credits = isHub ? 0 : node.issue?.credits ?? 0;
+  const fixed = !isHub && node.issue?.fixed === true;
+  const streakFrac = streakK > 0 ? Math.max(0, Math.min(1, credits / streakK)) : 0;
 
   const color = useMemo(() => new THREE.Color(isHub ? theme.color : severityColor(severity)), [isHub, severity, theme.color]);
   const innerColor = useMemo(() => color.clone().lerp(WHITE, 0.24), [color]);
@@ -155,6 +174,26 @@ export function Orb({
   const dotTex = useMemo(() => dotTexture(), []);
   const glowTex = useMemo(() => glowTexture(), []);
 
+  // Memoised streak-progress arc — a thin ring whose swept angle = the streak
+  // fraction (credits / streakK). Built ONCE per fraction (never in useFrame): a
+  // full RingGeometry at frac=1, a partial arc otherwise. thetaStart at +Y so the
+  // arc grows clockwise from the top like a progress gauge. Disposed on change.
+  const streakGeo = useMemo(() => {
+    if (streakFrac <= 0) return null;
+    const inner = 1.16;
+    const outer = 1.26;
+    const sweep = Math.max(0.02, streakFrac * Math.PI * 2);
+    return new THREE.RingGeometry(inner, outer, 64, 1, Math.PI / 2, -sweep);
+  }, [streakFrac]);
+  useEffect(() => () => streakGeo?.dispose(), [streakGeo]);
+  // The faint full-circle track behind the arc so an unfinished streak reads as
+  // "X of the way round", not a floating sliver. Shares the inner/outer radii.
+  const trackGeo = useMemo(() => {
+    if (streakK <= 0) return null;
+    return new THREE.RingGeometry(1.16, 1.26, 64, 1);
+  }, [streakK]);
+  useEffect(() => () => trackGeo?.dispose(), [trackGeo]);
+
   useEffect(
     () => () => {
       outerGeo.dispose();
@@ -165,7 +204,9 @@ export function Orb({
     [outerGeo, innerGeo, gemGeo, nodeGeo],
   );
 
-  const sim = useRef({ scale: 0.0001, glow: 0.6, dim: 0, colorDim: 0, born: -1 });
+  // `resolve` eases 0→1 when the habit is fixed; it scales the orb down and crushes
+  // its opacity for the calm "resolved" fade. Starts at 0 (full presence).
+  const sim = useRef({ scale: 0.0001, glow: 0.6, dim: 0, colorDim: 0, resolve: 0, born: -1 });
 
   useFrame((state, dtRaw) => {
     const dt = Math.min(dtRaw, 0.05);
@@ -181,12 +222,19 @@ export function Orb({
     const emphasisGlow = emphasized ? 0.9 : 0;
     const boost = (selected ? 0.22 : hovered ? 0.07 : 0) + (emphasized ? 0.08 : 0);
     const severityGlow = isHub ? 0.0 : (severity / 5) * 0.4;
-    const targetScale = alive ? node.radius * (1 + boost) : 0.0001;
     const targetGlow = (isHub ? 0.85 : 0.5) + severityGlow + emphasisGlow + (selected ? 0.9 : hovered ? 0.35 : 0);
     const targetDim = dimmed ? 1 : 0;
     // Legend colour-dim: dims for the legend filter OR the boolean other-selected
     // state, whichever is stronger — one eased float, colour only.
     const targetColorDim = Math.max(targetDim, Math.min(1, Math.max(0, dimTarget)));
+    // Living Habits "fixed" fade: ease toward 1 when resolved. lambda ~2.2 ≈ a calm
+    // ~0.45s settle — deliberately gentle, not a snap. Frame-rate-independent damp.
+    s.resolve = damp(s.resolve, fixed ? 1 : 0, 2.2, dt);
+    // resolveScale shrinks the resolved orb toward 65% of its size; resolveK crushes
+    // its opacity/emissive toward a faint 18% so it reads as quietly retired.
+    const resolveScale = 1 - s.resolve * 0.35;
+    const resolveK = 1 - s.resolve * 0.82;
+    const targetScale = alive ? node.radius * (1 + boost) * resolveScale : 0.0001;
 
     s.scale = damp(s.scale, targetScale, alive ? 6 : 14, dt);
     s.glow = damp(s.glow, targetGlow, 5, dt);
@@ -202,6 +250,15 @@ export function Orb({
     gem.current.rotation.y += dt * 0.28;
     gem.current.rotation.x += dt * 0.12;
 
+    // Billboard the streak gauge to face the camera. The parent `group` spins on Y,
+    // so we cancel the parent's world rotation then apply the camera's, leaving the
+    // ring flat-on to the viewer. No allocation: reuses two module-scope scratch
+    // quaternions (orbits run for dozens of orbs every frame).
+    if (streakRing.current && streakK > 0) {
+      group.current.getWorldQuaternion(_qParent);
+      streakRing.current.quaternion.copy(_qParent).invert().multiply(state.camera.quaternion);
+    }
+
     // dimK (opacity/intensity) stays bound to the boolean-dim track only — the
     // legend colour-dim must NOT change opacity, so it is deliberately excluded.
     const dimK = 1 - s.dim * 0.6;
@@ -209,9 +266,13 @@ export function Orb({
     // filtered-out node falls below the bloom threshold → near-dark ember, while a
     // match keeps its full halo and blooms. litK=1 when lit, ~0.1 when filtered.
     const litK = 1 - s.colorDim * 0.9;
-    gemMat.current.emissiveIntensity = (0.55 + s.glow * 0.6) * dimK * litK;
-    haloMat.current.opacity = (0.2 + s.glow * 0.28) * dimK * litK;
-    nodeMat.current.opacity = (0.45 + s.glow * 0.32) * dimK * litK;
+    gemMat.current.emissiveIntensity = (0.55 + s.glow * 0.6) * dimK * litK * resolveK;
+    haloMat.current.opacity = (0.2 + s.glow * 0.28) * dimK * litK * resolveK;
+    nodeMat.current.opacity = (0.45 + s.glow * 0.32) * dimK * litK * resolveK;
+    // Streak ring + track fade with the orb (resolve) and the legend dim, so a fixed
+    // or filtered-out orb's gauge dims in lockstep instead of floating at full bright.
+    if (streakMat.current) streakMat.current.opacity = (0.7 + s.glow * 0.2) * dimK * litK * resolveK;
+    if (trackMat.current) trackMat.current.opacity = 0.12 * dimK * litK * resolveK;
 
     // ── eased legend dim, COLOUR ONLY ───────────────────────────────────────
     // Copy each material's base colour, scale by the eased dim, write it back.
@@ -335,6 +396,42 @@ export function Orb({
           />
         </mesh>
       </group>
+
+      {/* Living-Habits streak gauge — a thin ring filling credits/streakK toward
+          "fixed". Billboards to the camera (see useFrame). Only present when the
+          habit has an active streak (streakK > 0). The faint full-circle track sits
+          behind the swept arc so partial progress reads as "X of the way round". */}
+      {streakK > 0 && (
+        <group ref={streakRing}>
+          {trackGeo && (
+            <mesh geometry={trackGeo}>
+              <meshBasicMaterial
+                ref={trackMat}
+                color={color}
+                transparent
+                opacity={0.12}
+                side={THREE.DoubleSide}
+                depthWrite={false}
+                toneMapped={false}
+              />
+            </mesh>
+          )}
+          {streakGeo && (
+            <mesh geometry={streakGeo}>
+              <meshBasicMaterial
+                ref={streakMat}
+                color={nodeColor}
+                transparent
+                opacity={0.8}
+                side={THREE.DoubleSide}
+                depthWrite={false}
+                toneMapped={false}
+                blending={THREE.AdditiveBlending}
+              />
+            </mesh>
+          )}
+        </group>
+      )}
 
       {/* orchestrator signature — only the agent hubs (Claude/Codex) wear the gyro
           cradle + brand heart, so they read as the things RUNNING the habit orbs

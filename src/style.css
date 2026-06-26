@@ -1476,6 +1476,103 @@ html, body {
 }
 .wd-crumb.is-current:hover { background: transparent; }
 
+/* ── Living Habits: the time-window dial + live "last scanned" readout ─────────
+   A phosphor segmented control under the nav bar (top-centre), shown only on the
+   Habits tab. The lit segment is acid-green; the rest are quiet --ink-soft. A small
+   live readout sits beside it, its dot pulsing so the constellation reads as alive. */
+.wd-habits-dial {
+  position: fixed;
+  top: var(--top-safe);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-controls);
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 8px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(118, 255, 157, 0.05);
+  backdrop-filter: blur(11px) saturate(1.1);
+  -webkit-backdrop-filter: blur(11px) saturate(1.1);
+  pointer-events: auto;
+  animation: wd-fade-up 600ms ease both;
+}
+.wd-dial-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  background: rgba(2, 4, 3, 0.5);
+}
+.wd-dial-opt {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  padding: 4px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+  opacity: 0.72;
+  transition: background 150ms ease, color 150ms ease, opacity 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+.wd-dial-opt:hover {
+  opacity: 1;
+  color: var(--ink);
+  background: rgba(184, 255, 107, 0.07);
+}
+.wd-dial-opt:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--hair-bright);
+}
+.wd-dial-opt.is-active {
+  opacity: 1;
+  color: var(--bg);
+  background: var(--acid);
+  border-color: color-mix(in srgb, var(--acid) 70%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--acid) 35%, transparent);
+  font-weight: 600;
+}
+.wd-dial-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  padding-right: 4px;
+}
+.wd-dial-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: wd-live-pulse 1.8s ease-in-out infinite;
+}
+@keyframes wd-live-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wd-dial-live-dot { animation: none; opacity: 0.9; }
+  .wd-habits-dial { animation: none; }
+}
+@media (max-width: 720px) {
+  .wd-habits-dial { gap: 7px; padding: 4px 6px; }
+  .wd-dial-opt { font-size: 9px; padding: 3px 6px; }
+  .wd-dial-live { display: none; }
+}
+
 /* ── roster sidebar (left dock) — toggle list of every globe ──────────────────
    Closed by default; the ≡ toggle (top-left) opens it and the panel ✕ closes it.
    Mirrors the right inspector's slide so the two docks feel symmetric. Radar lists

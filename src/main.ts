@@ -121,6 +121,16 @@ listen('fugu_usage', (e) => bridge.ingest('fugu_usage', e.payload));
 // reducer normalizes it into SceneState.radarScene for the radar constellation.
 listen('radar_state', (e) => bridge.ingest('radar_scene_ready', e.payload));
 
+// LIVING HABITS: the windowed habits scan. The event payload IS the refresh — it
+// carries the issues for the active time-window plus the window + last-scanned
+// stamp — so ingesting it directly swaps the constellation's issue set (the bridge
+// routes it through the same OrbSceneModel the Habits forest renders from). No
+// follow-up `get_findings_windowed` invoke is needed; the push already has the data.
+listen('habits_refreshed', (e) => bridge.ingest('habits_refreshed', e.payload));
+// One habit finished its diagnosis pass — the orb data lands on the next
+// `habits_refreshed`; this only bumps the bridge's diagnosed tick for the UI.
+listen('habits_diagnosed', (e) => bridge.ingest('habits_diagnosed', e.payload));
+
 listen('warden_hotkey', () => {
   // The packaged app shows the pre-warmed HIDDEN window with a native call that
   // never fires the webview Page Visibility API, so this explicit summon signal —

@@ -14,7 +14,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { Chrome, classifyDiffLine, provenanceLabel, shortStamp, type Artifact, type FixPreview } from './chrome';
+import { Chrome, classifyDiffLine, provenanceLabel, relativeScanAge, shortStamp, type Artifact, type FixPreview } from './chrome';
 import type { LayoutNode, OrbIssue, OrbSceneModel } from './orbTypes';
 import type { SceneState } from './bridge';
 
@@ -49,6 +49,23 @@ describe('shortStamp', () => {
   });
 });
 
+describe('relativeScanAge', () => {
+  it('buckets an age in seconds into a compact relative string', () => {
+    expect(relativeScanAge(0)).toBe('just now');
+    expect(relativeScanAge(0.4)).toBe('just now');
+    expect(relativeScanAge(5)).toBe('5s ago');
+    expect(relativeScanAge(59)).toBe('59s ago');
+    expect(relativeScanAge(60)).toBe('1m ago');
+    expect(relativeScanAge(3599)).toBe('59m ago');
+    expect(relativeScanAge(3600)).toBe('1h ago');
+    expect(relativeScanAge(86400)).toBe('1d ago');
+  });
+  it('never produces a negative or NaN age', () => {
+    expect(relativeScanAge(-10)).toBe('just now');
+    expect(relativeScanAge(Number.NaN)).toBe('just now');
+  });
+});
+
 // ── component fixtures ──────────────────────────────────────────────────────────
 function issueFixture(over: Partial<OrbIssue> = {}): OrbIssue {
   return {
@@ -67,6 +84,10 @@ function issueFixture(over: Partial<OrbIssue> = {}): OrbIssue {
     sessionIds: ['sess-abcdef1234'],
     evidence: [],
     findingId: 'finding-1',
+    credits: 0,
+    streakK: 0,
+    fixed: false,
+    lastCreditAt: null,
     ...over,
   };
 }
@@ -153,6 +174,7 @@ function renderChrome(props: Partial<React.ComponentProps<typeof Chrome>>): HTML
     onDismiss: noop,
     onPopFocus: noop,
     onClearFocus: noop,
+    onPickWindow: noop,
     ...props,
   };
   container = document.createElement('div');
@@ -298,5 +320,53 @@ describe('Chrome — guardrail ledger', () => {
     const el = renderChrome({ artifacts: [], ledgerOpen: true });
     expect(el.querySelector('[data-ledger-empty]')).toBeTruthy();
     expect(el.querySelectorAll('[data-ledger-row]')).toHaveLength(0);
+  });
+});
+
+// ── Living Habits: the time-window dial ─────────────────────────────────────────
+describe('Chrome — habits time-window dial', () => {
+  it('renders the dial on the habits tab with five window segments', () => {
+    const el = renderChrome({ tab: 'habits' });
+    const dial = el.querySelector('[data-habits-dial]');
+    expect(dial).toBeTruthy();
+    const opts = Array.from(el.querySelectorAll('.wd-dial-opt')).map((b) => b.getAttribute('data-window'));
+    expect(opts).toEqual(['today', '7d', '30d', '6mo', 'all']);
+  });
+
+  it('does NOT render the dial on the radar tab', () => {
+    const el = renderChrome({ tab: 'radar' });
+    expect(el.querySelector('[data-habits-dial]')).toBeFalsy();
+  });
+
+  it('lights the active window from scene.activeWindow', () => {
+    const el = renderChrome({ tab: 'habits', scene: { ...scene(), activeWindow: '30d' } });
+    const active = el.querySelector('.wd-dial-opt.is-active');
+    expect(active?.getAttribute('data-window')).toBe('30d');
+    // exactly one segment is lit
+    expect(el.querySelectorAll('.wd-dial-opt.is-active')).toHaveLength(1);
+  });
+
+  it('fires onPickWindow and optimistically lights the clicked segment', () => {
+    const onPickWindow = vi.fn();
+    const el = renderChrome({ tab: 'habits', scene: { ...scene(), activeWindow: 'today' }, onPickWindow });
+    const sixMo = el.querySelector('[data-window="6mo"]') as HTMLButtonElement;
+    act(() => sixMo.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(onPickWindow).toHaveBeenCalledTimes(1);
+    expect(onPickWindow.mock.calls[0][0]).toBe('6mo');
+    // optimistic highlight moves to the clicked segment even before activeWindow echoes back
+    expect((el.querySelector('.wd-dial-opt.is-active') as HTMLElement)?.getAttribute('data-window')).toBe('6mo');
+  });
+
+  it('shows a live readout with the relative scan age', () => {
+    const fiveSecAgo = new Date(Date.now() - 5000).toISOString();
+    const el = renderChrome({ tab: 'habits', scene: { ...scene(), activeWindow: 'today', lastScannedAt: fiveSecAgo } });
+    const live = el.querySelector('[data-habits-live]');
+    expect(live?.textContent ?? '').toContain('live');
+    expect(live?.textContent ?? '').toMatch(/last scanned \d+s ago/);
+  });
+
+  it('defaults the lit segment to today when no window is set yet', () => {
+    const el = renderChrome({ tab: 'habits', scene: scene() });
+    expect((el.querySelector('.wd-dial-opt.is-active') as HTMLElement)?.getAttribute('data-window')).toBe('today');
   });
 });
