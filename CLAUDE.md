@@ -39,45 +39,36 @@ evidence-cited diagnosis overlay summoned by a global hotkey.
 | Frontend typecheck+bundle | `pnpm build`  (= `tsc && vite build`) |
 | Full app (real e2e gate, slow) | `pnpm tauri build` |
 | Dev run | `pnpm tauri dev` |
+| Rust lint (denies prod `unwrap()`) | `cd src-tauri && cargo clippy` |
+| Frontend import-boundary check | `pnpm check:arch` |
+
+Toolchain pinned in `src-tauri/rust-toolchain.toml` (stable ≥ 1.85, for edition2024 deps).
 
 Env: `WARDEN_DB_PATH` (db override) · engine via `WARDEN_BRAIN_BASE_URL` + `WARDEN_BRAIN_API_KEY` (`OPENAI_*` fallback) + `WARDEN_BRAIN_DIAGNOSE_MODEL`/`_VERIFY_MODEL` (default `z-ai/glm-5.2`); see `.env.example`.
 
 ## Repo map
-**Rust `src-tauri/src/`**
-- `ir.rs` — canonical IR: `Harness`, `Session`, `Turn`, `Event` (11 variants), `EventRecord{raw_ref}`,
-  `Finding`, `Diagnosis`, `EvidenceRef`, `FeatureVector`, `CompetenceProfile`, `RunScope`.
-  **Single source of truth; every adapter maps raw → this IR.**
-- `ingest/mod.rs` — `Adapter` trait + `SessionBatch`. *(M2: add `AdapterRegistry` + `watch`/`map`.)*
-- `ingest/claude_code.rs` — Claude backfill + per-file hash dedup. *(M2: add FSEvents tail + byte watermark.)*
-- `ingest/codex.rs` — **M2 new** Codex adapter.
-- `store.rs` — rusqlite + FTS5, 14 tables; `upsert_session_batch`, `counts`, `save_findings/diagnosis`,
-  `latest_diagnosis`, `profile`, `source_raw_hash`; watermarks keyed by `source_path` with byte `offset`.
-- `featurizer.rs` — FeatureVector + CompetenceProfile. `detectors.rs` — `nominate(store,profile)->Vec<Finding>`.
-- `brain.rs` — engine client (GLM-5.2 via NEAR AI, OpenAI-compatible Chat Completions): `run_pipeline`, `diagnose/coach/verify`; emits legacy-named `fugu_delta`,`fugu_usage`.
-  *(M2: env-config the base URL/models/key/effort; emit `candidates_nominated`,`finding_verdict`.)*
-- `commands.rs` — `#[tauri::command]`s. Real: `query_profile`,`get_diagnosis`,`get_findings`,
-  `run_diagnosis`,`ask`,`hide_overlay`,`get_fix_preview`,`resolve_evidence`,`set_config`.
-  Stubs (return `not_in_slice`): apply/revert/voice/screen/fleet/`mute_pattern`.
-- `scaffold.rs` — `not_in_slice(feature)` seam helper. `redaction.rs` — PII scrub.
-- `lib.rs` — Tauri builder/`setup()`; `ActivationPolicy::Accessory`, tray menu, pre-warmed hidden
-  `overlay` window, click-through idle state, blur/Esc dismissal, startup backfill, live watchers,
-  and guarded ⌘⇧Space global shortcut.
-- `util.rs` — `default_db_path()` is the **env-helper template** to copy for new env vars.
-- M2 new: `config.rs` (`~/.warden/config.toml` loader), `scheduler.rs` (live-ingest tasks + on-ask trigger).
+> Full codemap (radar/scheduler submodule breakdown + the FSD import rule): **`ARCHITECTURE.md`**.
+> Refactor decision log + rationale: **`REFACTOR.md`**.
 
-**Frontend `src/`**
-- `index.html` — overlay DOM: `#war-room-root` R3F island mount, `#terminal`, `#screen`, `#prompt`/`#command`,
-  HUD `#hud-{sessions,events,findings,stage}`, `#status`.
-- `main.ts` — vanilla-TS screen router. Listens `warden_hotkey`,`ingest_progress`,`fugu_delta`,`fugu_usage`,
-  `candidates_nominated`,`finding_verdict`,`diagnosis_ready`; invokes `query_profile`,`get_diagnosis`,`run_diagnosis`.
-- `diagnosis.ts` — pure-DOM forensic readout: ranked holes, discrete severity meter, cost ledger, harness
-  badges, evidence drill-down (`resolve_evidence` fallback), read-only fix-preview diff. jsdom-unit-tested.
-- `warRoom.ts` — Three.js viz. *(M2: **retired**, replaced by the R3F island in `src/viz/`.)*
-- `style.css` — green-phosphor tokens: `--bg #020403`, `--green #76ff9d`, `--dim #1b6f3a`,
-  `--acid #b8ff6b`, `--warn #ffd166`, `--red #ff5470`, verdict `--amber #ff5a37`.
-- M2 new `src/viz/` — React + R3F + Remotion island: `WarRoom.tsx`, `compositions/` (`Intro`/`Reveal`/`Recap`
-  + pure `timing.ts` + shared `palette.ts`), `bridge.ts`, `harnessTheme.ts`, `PlayerHost.tsx`,
-  mounted once into `#war-room-root` on the pre-warmed hidden window.
+**Rust `src-tauri/src/`** — single crate; `tauri` confined to `lib.rs`/`commands.rs`. Layered
+`ingest → store → (featurizer · detectors · brain · forge · habits · radar) → commands/lib/scheduler`.
+- `ir.rs` canonical IR (single source of truth; every adapter maps raw → this) · `store.rs` rusqlite + FTS5
+  (16 tables, byte-offset watermarks) · helpers `util.rs` (env-helper template)/`config.rs`/`redaction.rs`/`scaffold.rs`/`window.rs`/`harness_theme.rs`.
+- `ingest/` — `Adapter` trait + `AdapterRegistry` + `claude_code.rs`/`codex.rs`. Top-level (consumed by
+  brain/commands/scheduler/radar/cli); adding a harness = one adapter, zero downstream changes.
+- `featurizer.rs` + `detectors.rs` (`nominate(store,profile)->Vec<Finding>`) · `brain.rs` (GLM-5.2 pipeline;
+  emits `fugu_delta`/`fugu_usage`) · `forge.rs` (M4 fix-preview + apply) · `habits.rs` (Living-Habits streak).
+- `radar.rs` + `radar/` — live agent-forest: façade + `model/assemble/agent/context/identity/live/status` + `composition/hierarchy/liveness`.
+- `scheduler.rs` + `scheduler/` — task drivers: `watch` (live-ingest) · `radar` (recompute + `RadarStateCache`) · `habits` (heartbeat).
+- `lib.rs` Tauri builder/`setup()` (`ActivationPolicy::Accessory`, tray, pre-warmed hidden `overlay`, ⌘⇧Space,
+  startup backfill, watchers) · `commands.rs` `#[tauri::command]`s (M5+ stubs → `not_in_slice`) · `bin/warden_cli.rs`.
+
+**Frontend `src/`** — FSD-lite island; imports point DOWN only (`app → views → modules → shared`, `pnpm check:arch` enforces); `@/` alias → `src/`.
+- `index.html` (`#war-room-root` mount, HUD `#hud-{sessions,events,findings,stage}`, `#status`) · `main.ts`
+  vanilla-TS Tauri router · `style.css` green-phosphor tokens (`--bg #020403`, `--green #76ff9d`, verdict `--amber #ff5a37`).
+- `src/viz/`: `app/` (mount) · `views/war-room/` (WarRoom + chrome/NavBar/FilterBar/Sidebar) ·
+  `modules/{habits,radar,diagnosis,cinematics}` (no sibling-module imports; `diagnosis` = the pure-DOM forensic
+  readout; lazy Remotion in `cinematics/`) · `shared/{state,types,theme,scene,lib}` (`bridge.ts` pure reducer in `state/`) · `dev/`.
 
 ## Conventions
 - **Env helper**: `std::env::var("X").ok().map(...).unwrap_or_else(default)` (see `util.rs`).
@@ -90,6 +81,12 @@ Env: `WARDEN_DB_PATH` (db override) · engine via `WARDEN_BRAIN_BASE_URL` + `WAR
   offset and read all bytes to EOF; do not trust event counts.
 - **Honest viz**: war-room nodes/flares map to *real* signals (candidate count, token deltas, verdicts).
   Engines without `orchestration_*` tokens (the current GLM-5.2/NEAR AI brain) → degrade to delta pulses + plain weight, never fake.
+- **FSD layering (frontend)**: imports point DOWN only — `app → views → modules → shared`; no sibling-module
+  imports; `dev/` exempt. Enforced by `pnpm check:arch`. Use the `@/` alias; colocate tests; no app-wide barrels.
+- **Rust module form**: `name.rs` + `name/` with a slim façade re-exporting a *narrow* public API (not a glob
+  `pub use *`); cross-submodule internals are `pub(crate)`.
+- **No production `unwrap()`**: clippy denies it (`unwrap_used = "deny"`); use `.expect("invariant")` for true
+  invariants and `?` to propagate. Tests are exempt (`clippy.toml`). `anyhow` everywhere (no `thiserror`).
 
 ## External transcript layouts (confirmed on this machine)
 - Claude: `~/.claude/projects/**/*.jsonl`.

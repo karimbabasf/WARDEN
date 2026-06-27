@@ -118,8 +118,10 @@ the **organization** is the problem. So the frontend job is ~95% *move files int
 - [x] **D3.1 — Targeted cuts (no mass deletion):** delete the orphan `windowChrome.test.ts` (verify it tests nothing live
       first); **do NOT** merge `harnessTheme.ts`/`radarTheme.ts` unless confirmed an exact dup (likely an intentional
       radar-specific palette). Resist merging small *pure+tested* files (e.g. `cameraFraming.ts`) — that separation is the good kind.
-- [ ] **D3.2 — Rewrite CLAUDE.md to match reality** + add a short `ARCHITECTURE.md` codemap (symbols, not prose) so the
-      map stays greppable. Standardize on default `rustfmt` (no custom bikeshed) + `cargo fmt --check`.
+- [x] **D3.2 — Rewrite CLAUDE.md to match reality** + add a short `ARCHITECTURE.md` codemap (symbols, not prose) so the
+      map stays greppable. ✅ DONE — refreshed CLAUDE.md repo-map/commands/conventions; added `ARCHITECTURE.md`.
+      **rustfmt deliberately NOT adopted:** `cargo fmt` would reformat ~107 sites across the codebase (intentional
+      compact style in places) — standardizing it is a separate, owner-approved sweep, not slipped into this refactor.
 
 ---
 
