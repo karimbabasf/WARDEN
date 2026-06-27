@@ -16,7 +16,7 @@ pub fn stable_id(parts: &[&str]) -> String {
 }
 pub fn hash64(bytes: &[u8]) -> u64 {
     let digest = Sha256::digest(bytes);
-    u64::from_be_bytes(digest[0..8].try_into().unwrap())
+    u64::from_be_bytes(digest[0..8].try_into().expect("32-byte SHA-256 digest yields an 8-byte array"))
 }
 pub fn parse_ts(v: Option<&serde_json::Value>) -> DateTime<Utc> {
     v.and_then(|x| x.as_str())
@@ -36,7 +36,7 @@ pub fn expand_tilde(p: &str) -> PathBuf {
 pub fn default_db_path() -> PathBuf {
     std::env::var("WARDEN_DB_PATH")
         .map(|s| expand_tilde(&s))
-        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".warden/warden.db"))
+        .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".warden/warden.db"))
 }
 /// Path to the user's `~/.warden/config.toml`. Same env-helper shape as
 /// `default_db_path`: `WARDEN_CONFIG_PATH` overrides (tests point it at a temp
@@ -44,7 +44,7 @@ pub fn default_db_path() -> PathBuf {
 pub fn warden_config_path() -> PathBuf {
     std::env::var("WARDEN_CONFIG_PATH")
         .map(|s| expand_tilde(&s))
-        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".warden/config.toml"))
+        .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".warden/config.toml"))
 }
 /// Path to the user's `~/.claude/CLAUDE.md` — the durable Claude Code guidance
 /// file that several fix-preview patterns target. `WARDEN_CLAUDE_MD` overrides
@@ -52,17 +52,17 @@ pub fn warden_config_path() -> PathBuf {
 pub fn claude_md_path() -> PathBuf {
     std::env::var("WARDEN_CLAUDE_MD")
         .map(|s| expand_tilde(&s))
-        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".claude/CLAUDE.md"))
+        .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".claude/CLAUDE.md"))
 }
 pub fn default_claude_projects() -> PathBuf {
     std::env::var("WARDEN_CLAUDE_PROJECTS")
         .map(|s| expand_tilde(&s))
-        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".claude/projects"))
+        .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".claude/projects"))
 }
 pub fn default_codex_sessions() -> PathBuf {
     std::env::var("WARDEN_CODEX_SESSIONS")
         .map(|s| expand_tilde(&s))
-        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".codex/sessions"))
+        .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".codex/sessions"))
 }
 /// RADAR: the Claude Code liveness registry directory `~/.claude/sessions`. Each
 /// `<pid>.json` records a currently-open session `{pid, sessionId, cwd, …}`.
@@ -72,7 +72,7 @@ pub fn default_codex_sessions() -> PathBuf {
 pub fn default_claude_sessions_dir() -> PathBuf {
     std::env::var("WARDEN_CLAUDE_SESSIONS")
         .map(|s| expand_tilde(&s))
-        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".claude/sessions"))
+        .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".claude/sessions"))
 }
 /// RADAR: transcript-mtime recency window (ms) for the LAST-RESORT liveness fallback —
 /// used ONLY when a session has no usable action events at all to read semantically
@@ -134,7 +134,7 @@ pub fn radar_terminate_grace_ms() -> u64 {
 pub fn default_codex_archived_sessions() -> PathBuf {
     std::env::var("WARDEN_CODEX_ARCHIVED_SESSIONS")
         .map(|s| expand_tilde(&s))
-        .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".codex/archived_sessions"))
+        .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".codex/archived_sessions"))
 }
 pub fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(p) = path.parent() {

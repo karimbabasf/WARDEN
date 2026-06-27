@@ -71,7 +71,7 @@ the **organization** is the problem. So the frontend job is ~95% *move files int
       (`ui/` = R3F/DOM components, `model/` = pure node-tested logic) with a **thin `index.ts` public API**.
       `shared/{scene, state, theme, ui, lib}` holds cross-cutting primitives (the pure `bridge` reducer lives in
       `shared/state`; only the impure Tauri subscription lives in `app/`).
-- [~] **D1.4 — Enforce exactly ONE rule:** dependencies point **down only** — `app → views → modules → shared`,
+- [x] **D1.4 — Enforce exactly ONE rule:** dependencies point **down only** — `app → views → modules → shared`,
       and **modules never import sibling modules**. Enforced by a single ESLint `import/no-restricted-paths` rule.
       That rule *is* the 80% of FSD's value; everything else is dropped.
       *(PARTIAL: the rule is followed by construction and grep-verified clean after Phase 1. The ESLint
@@ -100,7 +100,7 @@ the **organization** is the problem. So the frontend job is ~95% *move files int
   - `scheduler.rs` (2043) → `scheduler.rs` façade + `scheduler/{ingest, radar, habits}.rs`, separating **WHEN** things run
     (scheduler = thin task drivers) from **WHAT** runs (radar/habits domain logic).
   - *(Lower priority:* `forge.rs`, `store.rs`, `commands.rs`, `brain.rs` are large but cohesive — split only if a clean seam exists; `commands.rs` → move `AppState` out to `app_state.rs`.)*
-- [ ] **D2.3 — Error handling: `anyhow` everywhere, no `thiserror`** (no failure site is matched on — adding error enums
+- [x] **D2.3 — Error handling: `anyhow` everywhere, no `thiserror`** (no failure site is matched on — adding error enums
       is ceremony). Burn down `unwrap()` incrementally under `[lints.clippy] unwrap_used = "warn"` + `clippy.toml`
       `allow-unwrap-in-tests = true`; convert `anyhow::Error → String` only at the `#[tauri::command]` edge. CI/local gate:
       `cargo clippy -- -D warnings`.
@@ -110,7 +110,12 @@ the **organization** is the problem. So the frontend job is ~95% *move files int
 
 ### PHASE 3 — Conventions, docs, cleanup
 
-- [ ] **D3.1 — Targeted cuts (no mass deletion):** delete the orphan `windowChrome.test.ts` (verify it tests nothing live
+> **✅ Largely DONE — green on `refactor/architecture`.** Key finding: the "~680 unwraps" was a **measurement error** — that count included test code, where `unwrap()` is idiomatic. With `allow-unwrap-in-tests`, clippy finds only **20 production unwraps**, all converted to `.expect("invariant")` (zero behavior change — each is a static regex / freshly-built object / home-dir / JSON we serialized ourselves). `[lints.clippy] unwrap_used = "deny"` now hard-fails `cargo clippy` on any new production unwrap; `cargo test` still 268/0.
+> **D1.4** is enforced by a no-dependency `scripts/check-arch.mjs` (`pnpm check:arch`) instead of a full ESLint toolchain — passes clean.
+> **D3.1**: both "cut" candidates were FALSE ALARMS — `windowChrome.test.ts` is a real tauri-config/source regression test, and `harnessTheme`/`radarTheme` are distinct (not a dup) → correctly **no deletions**.
+> **Remaining: D3.2** (rewrite stale CLAUDE.md + add ARCHITECTURE.md) and the lock-audit half of D2.4.
+
+- [x] **D3.1 — Targeted cuts (no mass deletion):** delete the orphan `windowChrome.test.ts` (verify it tests nothing live
       first); **do NOT** merge `harnessTheme.ts`/`radarTheme.ts` unless confirmed an exact dup (likely an intentional
       radar-specific palette). Resist merging small *pure+tested* files (e.g. `cameraFraming.ts`) — that separation is the good kind.
 - [ ] **D3.2 — Rewrite CLAUDE.md to match reality** + add a short `ARCHITECTURE.md` codemap (symbols, not prose) so the
