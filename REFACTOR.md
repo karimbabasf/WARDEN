@@ -84,11 +84,16 @@ the **organization** is the problem. So the frontend job is ~95% *move files int
 
 ### PHASE 2 — Backend: split god-modules, keep one crate
 
-- [ ] **D2.1 — Stay single-crate.** Do **not** split into a `warden-core` workspace crate now. Keep domain modules
+> **✅ DONE (D2.1–D2.2) — green on `refactor/architecture`** (commits `0ed4570` radar, `fa2846a` scheduler). Both split with **zero behavior change**; `cargo test` **268 passed / 0 failed** throughout; every external caller byte-identical.
+> **Radar** (4,120 lines) → 40-line façade + 9 submodules: `model · assemble · agent · context · identity · live · status` (+ kept `composition/hierarchy/liveness`).
+> **Scheduler** (2,043) → 29-line façade + `watch · radar · habits` (named `watch`, not `ingest`, to avoid colliding with `crate::ingest`).
+> `AppState`→`app_state.rs` extraction **deferred** (low value). **D2.3** (clippy lint + ~680-`unwrap` burn-down) and the lock-encapsulation part of **D2.4** move to **Phase 3**; the `RadarStateCache` invalidation invariant was documented now.
+
+- [x] **D2.1 — Stay single-crate.** Do **not** split into a `warden-core` workspace crate now. Keep domain modules
       `tauri`-free by convention. *(The compile-time argument barely applies for a 2-crate graph, and `#[tauri::command]`
       doesn't move cleanly into a child crate.)* Revisit only when a second real binary needs the core. *(Note: `bin/warden_cli.rs`
       technically already consumes core — see Open Q3.)*
-- [ ] **D2.2 — Adopt modern `name.rs` + `name/` module form** (drop `mod.rs` style) and split the two worst god-modules
+- [x] **D2.2 — Adopt modern `name.rs` + `name/` module form** (drop `mod.rs` style) and split the two worst god-modules
       into **façade + submodules** (a slim parent that orchestrates + re-exports a *narrow* surface, not a glob forwarder):
   - `radar/mod.rs` (4120) → `radar.rs` façade + `radar/{model, assemble, agent, composition, hierarchy, liveness, identity}.rs`
     *(composition/hierarchy/liveness already exist — this mostly carves up the 4120-line `mod.rs`).*
@@ -99,7 +104,7 @@ the **organization** is the problem. So the frontend job is ~95% *move files int
       is ceremony). Burn down `unwrap()` incrementally under `[lints.clippy] unwrap_used = "warn"` + `clippy.toml`
       `allow-unwrap-in-tests = true`; convert `anyhow::Error → String` only at the `#[tauri::command]` edge. CI/local gate:
       `cargo clippy -- -D warnings`.
-- [ ] **D2.4 — Document state invariants.** Encapsulate `RadarStateCache`/locks behind methods; write down the cache
+- [~] **D2.4 — Document state invariants.** Encapsulate `RadarStateCache`/locks behind methods; write down the cache
       invalidation policy (what dirties it, how stale a reader may be); **never hold a lock across `.await`** (especially
       the `reqwest` LLM call). `std::sync::Mutex` stays correct for the rusqlite connection.
 
