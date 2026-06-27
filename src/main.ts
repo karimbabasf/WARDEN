@@ -10,7 +10,7 @@
 // the island (src/viz/), driven purely by the bridge's SceneState. No DOM here.
 
 import './style.css';
-import { mountWarRoom } from './viz/mount';
+import { mountWarRoom } from '@/viz/app/mount';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';

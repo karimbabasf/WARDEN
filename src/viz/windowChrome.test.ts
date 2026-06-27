@@ -3,8 +3,8 @@
 import { describe, expect, it } from 'vitest';
 import tauriConfigRaw from '../../src-tauri/tauri.conf.json?raw';
 import stylesSource from '../style.css?raw';
-import navBarSource from './NavBar.tsx?raw';
-import warRoomSource from './WarRoom.tsx?raw';
+import navBarSource from '@/viz/views/war-room/NavBar.tsx?raw';
+import warRoomSource from '@/viz/views/war-room/WarRoom.tsx?raw';
 
 function appWindow(): Record<string, unknown> {
   const config = JSON.parse(tauriConfigRaw);

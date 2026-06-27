@@ -45,31 +45,39 @@ the **organization** is the problem. So the frontend job is ~95% *move files int
 
 ### PHASE 0 — Stabilize to green *(must happen before any reorg)*
 
-- [ ] **D0.1 — Fix the toolchain blocker.** Add a pinned `rust-toolchain.toml` (channel = a current stable ≥ 1.85)
+- [x] **D0.1 — Fix the toolchain blocker.** ✅ DONE (`0b808b6`) — pinned `rust-toolchain.toml` to stable (resolved **1.96.0**). Add a pinned `rust-toolchain.toml` (channel = a current stable ≥ 1.85)
       so `edition2024` transitive deps resolve, and so the build is reproducible. *(Alternative: `cargo update -p getrandom --precise 0.2.x/0.3.x` to stay under the old MSRV — but edition2024 deps will keep arriving, so pinning the toolchain forward is the durable fix.)* **Recommend: pin toolchain forward.**
-- [ ] **D0.2 — Finish the `ingest` move by reverting it to top-level.** `ingest` is consumed by `lib.rs`,
+- [x] **D0.2 — Finish the `ingest` move by reverting it to top-level.** ✅ DONE (`0b808b6`) — restored `src/ingest/` from HEAD; orphan `radar/ingest/` parked out of tree. `ingest` is consumed by `lib.rs`,
       `commands.rs`, `scheduler.rs`, `bin/warden_cli.rs`, **and** `radar/*` — it is a **foundational** layer, not a
       radar submodule. Restore `src/ingest/` at the crate root (move the untracked `radar/ingest/` files back,
       re-add to git) so `pub mod ingest;` resolves. **Reject** nesting ingest under `radar/`. Get `cargo build` +
       `cargo test` green and `pnpm build` green.
-- [ ] **D0.3 — Commit the green baseline** before touching structure. One commit: "stabilize: green build + ingest
+- [x] **D0.3 — Commit the green baseline** ✅ DONE (`0b808b6`) — cargo check ok · cargo test 268/0 · pnpm build ok. before touching structure. One commit: "stabilize: green build + ingest
       restored to top-level". No refactoring rides along with it. *(No push / no PR — local commit only.)*
 
 ### PHASE 1 — Frontend: FSD-lite (your proposal, adapted)
 
-- [ ] **D1.1 — Adopt the 4-layer FSD-lite you proposed**, applied **inside `src/viz/`**: `app / views / modules / shared`.
+> **✅ DONE — green on `refactor/architecture`.** `pnpm build` ok (lazy `PlayerHost` chunk preserved) · `pnpm test` 27 files / 254 passed · 70 files moved as git renames (history preserved) · `@/*` path alias added (tsconfig + vite).
+> **Two refinements vs this draft, forced by the real import graph:** (1) shared contracts `orbTypes`/`radarTypes` live in `shared/types/` — not in a module, because `bridge` (shared) imports them; (2) `chrome`/`NavBar`/`FilterBar`/`Sidebar` live in `views/war-room/` — not `shared/ui`, because they're domain-aware.
+> **Simplifications:** modules flattened (no `ui/`/`model/` segments); **no per-module `index.ts` barrels** (Vite perf + protects the lazy Remotion chunk).
+> **Two pre-existing couplings the reorg exposed were fixed:** `AgentCore` promoted to `shared/scene/`; `frameloopFor` extracted from `WarRoom` to `shared/scene/frameloop.ts`. Final import-direction audit: fully clean.
+
+- [x] **D1.1 — Adopt the 4-layer FSD-lite you proposed**, applied **inside `src/viz/`**: `app / views / modules / shared`.
       This is a recognized, *lighter* variant (same model as bulletproof-react) — it drops FSD's heaviest part
       (the `entities`/`features`/`widgets` 3-way split), which is exactly the over-engineering you want gone.
-- [ ] **D1.2 — Reinterpret `views/` as "screens", not routes.** This app has no router. `views/` = the
+- [x] **D1.2 — Reinterpret `views/` as "screens", not routes.** This app has no router. `views/` = the
       composition roots the tab/state switch mounts (`WarRoom`, the diagnosis screen) — thin wiring, no logic.
-- [ ] **D1.3 — Module split by domain:** `modules/{habits, radar, diagnosis, cinematics}`. Each is self-contained
+- [x] **D1.3 — Module split by domain:** `modules/{habits, radar, diagnosis, cinematics}`. Each is self-contained
       (`ui/` = R3F/DOM components, `model/` = pure node-tested logic) with a **thin `index.ts` public API**.
       `shared/{scene, state, theme, ui, lib}` holds cross-cutting primitives (the pure `bridge` reducer lives in
       `shared/state`; only the impure Tauri subscription lives in `app/`).
-- [ ] **D1.4 — Enforce exactly ONE rule:** dependencies point **down only** — `app → views → modules → shared`,
+- [~] **D1.4 — Enforce exactly ONE rule:** dependencies point **down only** — `app → views → modules → shared`,
       and **modules never import sibling modules**. Enforced by a single ESLint `import/no-restricted-paths` rule.
       That rule *is* the 80% of FSD's value; everything else is dropped.
-- [ ] **D1.5 — Conventions (lowest-churn, fully conventional):** PascalCase components, camelCase logic/hooks,
+      *(PARTIAL: the rule is followed by construction and grep-verified clean after Phase 1. The ESLint
+      tooling itself is **deferred** — adding a linter to a repo that currently has none is a separate
+      toolchain decision; do it as a small follow-up if you want it machine-enforced.)*
+- [x] **D1.5 — Conventions (lowest-churn, fully conventional):** PascalCase components, camelCase logic/hooks,
       kebab-case folders, `UPPER_SNAKE` consts, PascalCase types. **Colocate tests inside their module** (`.test.ts`
       next to source). **No app-wide barrel file** (Vite perf + it would break the lazy Remotion chunk — keep
       `compositions/` imported only at the dynamic-import site).
