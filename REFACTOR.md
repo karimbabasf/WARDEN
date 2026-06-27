@@ -137,13 +137,22 @@ the **organization** is the problem. So the frontend job is ~95% *move files int
 > `macOSPrivateApi`, the `macos-private-api` feature) is left as-is — per-platform build config, documented in
 > `ARCHITECTURE.md`, to wire up when a target is actually brought up.
 
+### PHASE 6 — Rename frontend folder `src/` → `web/` (clarity)
+
+> **✅ DONE — green on `refactor/architecture`.** The Tauri default layout (`src/` = web frontend, `src-tauri/` =
+> Rust backend) reads as "two src" and hides which is which. Renamed the frontend folder `src/` → `web/` so the
+> tree is self-evident: **`web/` (frontend) + `src-tauri/` (backend)**. `src-tauri/` keeps its name — Tauri's CLI
+> hardcodes it; renaming it fights the framework. Thanks to the `@/` alias, **zero source imports changed**; only
+> ~10 config/HTML/script references (`vite.config.ts`, `tsconfig.json`, `index.html`, the four dev pages,
+> `scripts/check-arch.mjs`, `scripts/render-intro.mjs`) + docs. `pnpm build`/`test` green (254), `pnpm check:arch` OK.
+
 ---
 
 ## 2. Target trees
 
-### Frontend (`src/viz/`)
+### Frontend (`web/viz/`)
 ```
-src/viz/
+web/viz/
   app/            # runs once on the prewarmed window; may import anything below
     mount.tsx · bridge-host.ts (impure Tauri IPC subscription) · PlayerHost.tsx
   views/          # screens the tab/state switch mounts (no router)

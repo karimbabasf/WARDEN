@@ -63,10 +63,10 @@ Env: `WARDEN_DB_PATH` (db override) · engine via `WARDEN_BRAIN_BASE_URL` + `WAR
 - `lib.rs` Tauri builder/`setup()` (tray, pre-warmed hidden `overlay`, ⌘⌥⌃M hotkey, startup backfill, watchers;
   OS-specific bits via `platform::`) · `commands.rs` `#[tauri::command]`s (M5+ stubs → `not_in_slice`) · `bin/warden_cli.rs`.
 
-**Frontend `src/`** — FSD-lite island; imports point DOWN only (`app → views → modules → shared`, `pnpm check:arch` enforces); `@/` alias → `src/`.
+**Frontend `web/`** — FSD-lite island; imports point DOWN only (`app → views → modules → shared`, `pnpm check:arch` enforces); `@/` alias → `web/`.
 - `index.html` (`#war-room-root` mount, HUD `#hud-{sessions,events,findings,stage}`, `#status`) · `main.ts`
   vanilla-TS Tauri router · `style.css` green-phosphor tokens (`--bg #020403`, `--green #76ff9d`, verdict `--amber #ff5a37`).
-- `src/viz/`: `app/` (mount) · `views/war-room/` (WarRoom + chrome/NavBar/FilterBar/Sidebar) ·
+- `web/viz/`: `app/` (mount) · `views/war-room/` (WarRoom + chrome/NavBar/FilterBar/Sidebar) ·
   `modules/{habits,radar,diagnosis,cinematics}` (no sibling-module imports; `diagnosis` = the pure-DOM forensic
   readout; lazy Remotion in `cinematics/`) · `shared/{state,types,theme,scene,lib}` (`bridge.ts` pure reducer in `state/`) · `dev/`.
 

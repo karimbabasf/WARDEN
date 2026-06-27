@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Architecture guardrail (REFACTOR.md D1.4): enforce FSD-lite downward-only imports
-// inside src/viz. Dependencies may point DOWN only:  app -> views -> modules -> shared.
-// Modules may NOT import sibling modules. `dev/` and files at the src/viz root are exempt.
+// inside web/viz. Dependencies may point DOWN only:  app -> views -> modules -> shared.
+// Modules may NOT import sibling modules. `dev/` and files at the web/viz root are exempt.
 // No dependencies — run with `pnpm check:arch`. Exits non-zero on any violation.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = fileURLToPath(new URL('../src/viz', import.meta.url));
+const ROOT = fileURLToPath(new URL('../web/viz', import.meta.url));
 
 function walk(dir) {
   const out = [];
@@ -24,7 +24,7 @@ function classify(segments) {
   const [a, b] = segments;
   if (a === 'modules') return { layer: 'modules', module: b };
   if (a === 'app' || a === 'views' || a === 'shared' || a === 'dev') return { layer: a };
-  return { layer: 'root' }; // files directly under src/viz (e.g. windowChrome.test.ts)
+  return { layer: 'root' }; // files directly under web/viz (e.g. windowChrome.test.ts)
 }
 
 // May a file in `from` import target layer `tLayer` (module `tModule`)?
@@ -63,4 +63,4 @@ if (violations.length) {
   console.error('\nRule: app -> views -> modules -> shared (down only); no sibling-module imports.\n');
   process.exit(1);
 }
-console.log('Architecture check OK — src/viz imports are downward-only, no cross-module coupling.');
+console.log('Architecture check OK — web/viz imports are downward-only, no cross-module coupling.');

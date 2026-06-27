@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url))
+      '@': fileURLToPath(new URL('./web', import.meta.url))
     }
   },
   server: {
@@ -30,6 +30,6 @@ export default defineConfig({
     // jsdom` pragma (same pattern as mount.test.ts). The default env stays node;
     // broadening `include` to also match `.test.tsx` is all that is needed.
     environment: 'node',
-    include: ['src/**/*.test.ts', 'src/**/*.test.tsx']
+    include: ['web/**/*.test.ts', 'web/**/*.test.tsx']
   }
 });

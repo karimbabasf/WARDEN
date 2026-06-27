@@ -59,9 +59,10 @@ commands.rs* / lib.rs* / scheduler*          (Tauri shell: IPC, setup, task driv
 
 ---
 
-## Frontend — `src/viz/` (FSD-lite; imports point DOWN only)
+## Frontend — `web/viz/` (FSD-lite; imports point DOWN only)
 
-Vanilla `src/main.ts` routes Tauri events into the React/R3F island mounted once at `#war-room-root`.
+Vanilla `web/main.ts` routes Tauri events into the React/R3F island mounted once at `#war-room-root`.
+(The frontend folder is `web/`; the Rust backend lives in `src-tauri/`.)
 Layers (a file may import only from layers below; `dev/` exempt; enforced by `pnpm check:arch`):
 
 ```
@@ -73,7 +74,7 @@ shared/     → state/ (bridge reducer) · types/ (orbTypes, radarTypes) · them
 - **`shared/state/bridge.ts`** — the pure reducer: Tauri events → immutable `SceneState`. The honest seam every visual derives from. Imports only `shared/types`.
 - **`modules/cinematics/`** — Remotion compositions + `PlayerHost`, lazy-loaded via `React.lazy` in `WarRoom` (its own Vite chunk). No app-wide barrel imports it eagerly.
 - **Cross-layer contracts (`orbTypes`/`radarTypes`) live in `shared/types`** because `bridge` (shared) imports them — they cannot live in a module without breaking the import rule.
-- Imports use the `@/` alias (`@/* → src/*`; tsconfig + vite). Tests are colocated. Components PascalCase, logic camelCase, folders kebab-case.
+- Imports use the `@/` alias (`@/* → web/*`; tsconfig + vite). Tests are colocated. Components PascalCase, logic camelCase, folders kebab-case.
 
 ---
 
