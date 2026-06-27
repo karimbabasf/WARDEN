@@ -49,7 +49,11 @@ commands.rs* / lib.rs* / scheduler*          (Tauri shell: IPC, setup, task driv
 - Named `watch` (not `ingest`) to avoid colliding with the top-level `crate::ingest` adapter module.
 
 **App shell (Tauri)**
-- `lib.rs` — builder/`setup()`: `ActivationPolicy::Accessory`, tray, pre-warmed hidden `overlay` window, ⌘⇧Space shortcut, startup backfill, watcher wiring. `commands.rs` — `#[tauri::command]`s (`query_profile`, `get_diagnosis`, `run_diagnosis`, `ask`, `get_fix_preview`, `resolve_evidence`, `set_config`, …; M5+ stubs return `not_in_slice`). `main.rs` → `lib::run()`. `bin/warden_cli.rs` — headless backfill CLI.
+- `lib.rs` — builder/`setup()`: tray, pre-warmed hidden `overlay` window, ⌘⌥⌃M global hotkey, startup backfill, watcher wiring (OS-specific bits via `platform::`). `commands.rs` — `#[tauri::command]`s (`query_profile`, `get_diagnosis`, `run_diagnosis`, `ask`, `get_fix_preview`, `resolve_evidence`, `set_config`, …; M5+ stubs return `not_in_slice`). `main.rs` → `lib::run()`. `bin/warden_cli.rs` — headless backfill CLI.
+
+**Platform seam — `platform/`** (macOS today; prepared for ports). The single place OS-specific runtime code lives.
+- `mod.rs` is the **port** (stable interface: `apply_activation_policy`, `is_reopen_event`, `primary_hotkey`, `process_alive`); `macos.rs` is the macOS **adapter** (the only place macOS-only Tauri APIs are used); `fallback.rs` is the no-op adapter for other targets. No other module branches on the OS.
+- **Adding a platform** = implement one adapter file + a `#[cfg]` arm in `mod.rs` + a `tauri.conf.json` bundle target (Windows also needs an `OpenProcess`-based `process_alive`). See the `platform/mod.rs` doc.
 
 **Conventions:** `anyhow::Result` + `?` internally, `.expect("invariant")` for true invariants — production `.unwrap()` is **denied** by clippy (`Cargo.toml [lints.clippy] unwrap_used = "deny"`; tests exempt via `clippy.toml`). Module form is `name.rs` + `name/` (façade re-exports a narrow surface, not a glob).
 

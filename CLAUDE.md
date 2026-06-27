@@ -28,7 +28,7 @@ evidence-cited diagnosis overlay summoned by a global hotkey.
   assertions — see `superpowers:verification-before-completion`.
 - **M2 is preview-only.** No writes to user projects, ever. Fix preview renders diffs only; apply = M4.
 - **Never `git push` / open PR/MR** without Karim's explicit instruction in that specific message.
-- Package manager is **pnpm**. Platform target: macOS Apple Silicon.
+- Package manager is **pnpm**. Platform target: macOS Apple Silicon — OS-specific code is isolated in `platform/`, ready for future ports.
 
 ## Commands
 | Goal | Command |
@@ -53,15 +53,15 @@ Env: `WARDEN_DB_PATH` (db override) · engine via `WARDEN_BRAIN_BASE_URL` + `WAR
 **Rust `src-tauri/src/`** — single crate; `tauri` confined to `lib.rs`/`commands.rs`. Layered
 `ingest → store → (featurizer · detectors · brain · forge · habits · radar) → commands/lib/scheduler`.
 - `ir.rs` canonical IR (single source of truth; every adapter maps raw → this) · `store.rs` rusqlite + FTS5
-  (16 tables, byte-offset watermarks) · helpers `util.rs` (env-helper template)/`config.rs`/`redaction.rs`/`scaffold.rs`/`window.rs`/`harness_theme.rs`.
+  (16 tables, byte-offset watermarks) · helpers `util.rs` (env-helper template)/`config.rs`/`redaction.rs`/`scaffold.rs`/`window.rs`/`harness_theme.rs` · `platform/` (OS seam — macOS adapter today).
 - `ingest/` — `Adapter` trait + `AdapterRegistry` + `claude_code.rs`/`codex.rs`. Top-level (consumed by
   brain/commands/scheduler/radar/cli); adding a harness = one adapter, zero downstream changes.
 - `featurizer.rs` + `detectors.rs` (`nominate(store,profile)->Vec<Finding>`) · `brain.rs` (GLM-5.2 pipeline;
   emits `fugu_delta`/`fugu_usage`) · `forge.rs` (M4 fix-preview + apply) · `habits.rs` (Living-Habits streak).
 - `radar.rs` + `radar/` — live agent-forest: façade + `model/assemble/agent/context/identity/live/status` + `composition/hierarchy/liveness`.
 - `scheduler.rs` + `scheduler/` — task drivers: `watch` (live-ingest) · `radar` (recompute + `RadarStateCache`) · `habits` (heartbeat).
-- `lib.rs` Tauri builder/`setup()` (`ActivationPolicy::Accessory`, tray, pre-warmed hidden `overlay`, ⌘⇧Space,
-  startup backfill, watchers) · `commands.rs` `#[tauri::command]`s (M5+ stubs → `not_in_slice`) · `bin/warden_cli.rs`.
+- `lib.rs` Tauri builder/`setup()` (tray, pre-warmed hidden `overlay`, ⌘⌥⌃M hotkey, startup backfill, watchers;
+  OS-specific bits via `platform::`) · `commands.rs` `#[tauri::command]`s (M5+ stubs → `not_in_slice`) · `bin/warden_cli.rs`.
 
 **Frontend `src/`** — FSD-lite island; imports point DOWN only (`app → views → modules → shared`, `pnpm check:arch` enforces); `@/` alias → `src/`.
 - `index.html` (`#war-room-root` mount, HUD `#hud-{sessions,events,findings,stage}`, `#status`) · `main.ts`
@@ -87,6 +87,8 @@ Env: `WARDEN_DB_PATH` (db override) · engine via `WARDEN_BRAIN_BASE_URL` + `WAR
   `pub use *`); cross-submodule internals are `pub(crate)`.
 - **No production `unwrap()`**: clippy denies it (`unwrap_used = "deny"`); use `.expect("invariant")` for true
   invariants and `?` to propagate. Tests are exempt (`clippy.toml`). `anyhow` everywhere (no `thiserror`).
+- **Platform isolation**: all OS-specific runtime code lives in `platform/` (port + `macos.rs` adapter + `fallback.rs`);
+  no `#[cfg(target_os)]` scattered elsewhere. Adding an OS = one adapter file + a `tauri.conf.json` target (see `ARCHITECTURE.md`).
 
 ## External transcript layouts (confirmed on this machine)
 - Claude: `~/.claude/projects/**/*.jsonl`.

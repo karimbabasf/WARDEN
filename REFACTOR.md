@@ -123,6 +123,20 @@ the **organization** is the problem. So the frontend job is ~95% *move files int
       **rustfmt deliberately NOT adopted:** `cargo fmt` would reformat ~107 sites across the codebase (intentional
       compact style in places) — standardizing it is a separate, owner-approved sweep, not slipped into this refactor.
 
+### PHASE 5 — Platform seam (cross-platform readiness)
+
+> **✅ DONE — green on `refactor/architecture`.** Requested forward-prep: isolate OS-specific code so a future
+> Linux/Windows port is "implement one adapter", not "untangle `#[cfg]`s scattered across the tree". Added
+> `src-tauri/src/platform/`: `mod.rs` (the **port**: `apply_activation_policy`, `is_reopen_event`, `primary_hotkey`,
+> `process_alive`), `macos.rs` (the macOS **adapter** — the only place macOS-only Tauri APIs are used),
+> `fallback.rs` (no-op adapter for other targets). Routed the three scattered `#[cfg(target_os = "macos")]` sites in
+> `lib.rs` + the `libc::kill` liveness syscall through the seam; **`lib.rs` now has zero `#[cfg(target_os)]`**.
+> `cargo build`/`test` green (268/0), zero new clippy warnings.
+> **Adding a platform** = implement one adapter + a `#[cfg]` arm in `mod.rs` + a `tauri.conf.json` bundle target
+> (Windows also needs an `OpenProcess`-based `process_alive`). The macOS bundle config (`targets: "app"`,
+> `macOSPrivateApi`, the `macos-private-api` feature) is left as-is — per-platform build config, documented in
+> `ARCHITECTURE.md`, to wire up when a target is actually brought up.
+
 ---
 
 ## 2. Target trees
