@@ -44,7 +44,8 @@ describe('heatmapLevel', () => {
   });
 
   it('spreads a mid-volume day into a middle level, not the extremes', () => {
-    const lvl = heatmapLevel(5_000, 10_000);
+    // Under the log ramp the geometric middle of [1, max] lands mid-scale.
+    const lvl = heatmapLevel(100, 10_000);
     expect(lvl).toBeGreaterThan(0);
     expect(lvl).toBeLessThan(HEATMAP_LEVELS - 1);
   });

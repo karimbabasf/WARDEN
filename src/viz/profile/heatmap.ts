@@ -27,10 +27,13 @@ export function heatmapLevel(tokens: number, maxTokens: number): number {
   // active day at full intensity rather than vanishing.
   if (!Number.isFinite(maxTokens) || maxTokens <= 0) return HEATMAP_LEVELS - 1;
 
-  const ratio = Math.min(1, tokens / maxTokens);
-  // Map (0,1] across levels 1..(LEVELS-1). ceil keeps the smallest positive day
-  // at level 1 and the busiest day at the top level.
+  // Log scale: real-corpus token totals are heavy-tailed (p50 ~100k, max ~50M),
+  // so a linear ramp against the busiest day washes every normal day out to
+  // level 1 and lets one outlier day dominate. Log keeps the ramp meaningful and
+  // clamps outlier days to the top instead of flattening everything else.
+  // (Calibration: docs/superpowers/research/dossier-rubric-calibration.md, Finding 5.)
   const span = HEATMAP_LEVELS - 1; // 4
+  const ratio = Math.min(1, Math.log10(tokens + 1) / Math.log10(maxTokens + 1));
   const level = Math.ceil(ratio * span);
   return Math.min(span, Math.max(1, level));
 }
