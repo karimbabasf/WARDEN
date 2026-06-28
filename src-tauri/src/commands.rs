@@ -1028,6 +1028,33 @@ pub async fn warp_to_agent(_id: String) -> Result<(), String> {
     Err(not_in_slice("RADAR warp"))
 }
 
+/// DOSSIER: per-day, per-harness token-activity heatmap for a time `window`.
+///
+/// `window` is one of the frontend toggle strings (`all-time`/`6mo`/`3mo`/`30d`/
+/// `2wk`); an unknown string is an error rather than a silent default. Reads
+/// existing data only (sessions + features) — writes nothing.
+#[tauri::command]
+pub async fn get_activity_heatmap(
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<Vec<crate::dossier::heatmap::ActivityCell>, String> {
+    heatmap_for_window(&state.store, &window, Utc::now())
+}
+
+/// Pure core of [`get_activity_heatmap`] (clock injected so it is deterministically
+/// testable): parse the window string and aggregate, mapping every failure to a
+/// `String` for the IPC boundary.
+fn heatmap_for_window(
+    store: &Store,
+    window: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<crate::dossier::heatmap::ActivityCell>, String> {
+    let w = window
+        .parse::<crate::dossier::scope::Window>()
+        .map_err(|e| e.to_string())?;
+    crate::dossier::heatmap::activity_heatmap(store, w, now).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1612,5 +1639,29 @@ mod tests {
         assert_eq!(blo.credits, 0, "three consecutive slips leave zero credits");
         assert!(!blo.fixed, "an all-slip habit is never fixed");
         assert_eq!(blo.last_credit_at, None);
+    }
+
+    /// DOSSIER `get_activity_heatmap` core: a valid window string over a seeded
+    /// store returns a non-empty per-day heatmap (the value the command hands the
+    /// frontend), and the actual `token_burn_total` flows through.
+    #[test]
+    fn heatmap_for_window_returns_cells_for_valid_window() {
+        let store = Store::memory().unwrap();
+        seed_session(&store, "c1", Harness::ClaudeCode, 1);
+        store.save_feature(&context_feature("c1"), "test").unwrap();
+
+        let cells = heatmap_for_window(&store, "all-time", Utc::now()).unwrap();
+        assert_eq!(cells.len(), 1, "one seeded session → one day cell");
+        assert_eq!(cells[0].total_tokens, 1_000);
+        assert_eq!(cells[0].by_harness[0].harness, "claude_code");
+    }
+
+    /// DOSSIER `get_activity_heatmap` core: an unknown window string is mapped to
+    /// an `Err(String)` (the error the command surfaces), not a silent default.
+    #[test]
+    fn heatmap_for_window_errors_on_bad_window() {
+        let store = Store::memory().unwrap();
+        let err = heatmap_for_window(&store, "last-tuesday", Utc::now());
+        assert!(err.is_err(), "an unknown window string must be an error");
     }
 }
