@@ -942,6 +942,75 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// Created lazily (not in `migrate`) so this dossier-only table is additive
+    /// and the rest of the schema is untouched. One row per `content_hash` (PK);
+    /// the vector is stored as a JSON `[f32, ...]` array and tagged with the
+    /// `model` that produced it. Keying reads on `(content_hash, model)` means a
+    /// model swap is a clean cache miss — an embedding from a different model is
+    /// never silently reused (mirrors the `summarizer_version` invalidation on
+    /// the summary cache).
+    fn ensure_dossier_embeddings_table(&self) -> Result<()> {
+        self.conn().execute_batch(
+            "CREATE TABLE IF NOT EXISTS dossier_embeddings(\
+                 content_hash TEXT PRIMARY KEY,\
+                 vector_json TEXT,\
+                 model TEXT,\
+                 created_at TEXT\
+             );",
+        )?;
+        Ok(())
+    }
+
+    /// DOSSIER Phase 4 — read a cached embedding, but ONLY when both the stored
+    /// `content_hash` and `model` match: a different model is a cache miss
+    /// (returns `None`) so the caller re-embeds under the current model rather
+    /// than mixing vector spaces. A row whose `vector_json` fails to parse back
+    /// into `Vec<f32>` is treated as a miss too (a corrupt/legacy row is
+    /// re-embedded rather than poisoning a cluster).
+    pub fn dossier_embedding_get(
+        &self,
+        content_hash: &str,
+        model: &str,
+    ) -> Result<Option<Vec<f32>>> {
+        self.ensure_dossier_embeddings_table()?;
+        let json: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT vector_json FROM dossier_embeddings \
+                 WHERE content_hash=? AND model=?",
+                params![content_hash, model],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str::<Vec<f32>>(&j).ok()))
+    }
+
+    /// DOSSIER Phase 4 — upsert one text's embedding under its `content_hash` and
+    /// the producing `model`. PK `content_hash`, so re-embedding the same text
+    /// (e.g. under a new model) replaces the row in place. The vector is encoded
+    /// as a JSON `[f32, ...]` array.
+    pub fn dossier_embedding_put(
+        &self,
+        content_hash: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<()> {
+        self.ensure_dossier_embeddings_table()?;
+        let vector_json = serde_json::to_string(vector)?;
+        self.conn().execute(
+            "INSERT OR REPLACE INTO dossier_embeddings\
+             (content_hash,vector_json,model,created_at) \
+             VALUES(?,?,?,?)",
+            params![
+                content_hash,
+                vector_json,
+                model,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 const ARTIFACT_SELECT_BY_ID: &str = "SELECT id,finding_id,kind,target_path,diff,status,applied_at,backup_path,block,pre_image_sha256,post_image_sha256 FROM artifacts WHERE id=? LIMIT 1";
@@ -1345,6 +1414,65 @@ mod tests {
                 .unwrap(),
             None,
             "a changed data_hash is a cache miss (sessions changed → rebuild)"
+        );
+    }
+
+    /// DOSSIER Phase 4 — the embedding cache. A `put` then a `get` with the SAME
+    /// `(content_hash, model)` returns the stored vector verbatim (the happy path
+    /// that lets an unchanged descriptor reuse one embedding forever — only
+    /// uncached texts ever hit the model).
+    #[test]
+    fn dossier_embedding_roundtrip() {
+        let store = Store::memory().unwrap();
+        let vec = vec![0.1_f32, -0.2, 0.3, 0.4];
+        store
+            .dossier_embedding_put("hash-abc", "BGESmallENV15", &vec)
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_embedding_get("hash-abc", "BGESmallENV15")
+                .unwrap(),
+            Some(vec),
+            "matching content_hash + model returns the cached vector verbatim"
+        );
+    }
+
+    /// The cache is invalidated when the embedding model changes: the stored
+    /// row's `model` no longer matches, so the vector is from a different space
+    /// and must be re-embedded (get ⇒ None). Mirrors the summarizer_version
+    /// invalidation on the summary cache.
+    #[test]
+    fn dossier_embedding_stale_model_returns_none() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_embedding_put("hash-abc", "old-model", &[0.5_f32, 0.5])
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_embedding_get("hash-abc", "BGESmallENV15")
+                .unwrap(),
+            None,
+            "a different model is a cache miss (vector spaces differ → re-embed)"
+        );
+    }
+
+    /// A re-`put` under the same `content_hash` replaces the row in place (PK is
+    /// `content_hash`), so the latest vector for a text is the only one retained.
+    #[test]
+    fn dossier_embedding_put_replaces_in_place() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_embedding_put("hash-abc", "BGESmallENV15", &[1.0_f32, 0.0])
+            .unwrap();
+        store
+            .dossier_embedding_put("hash-abc", "BGESmallENV15", &[0.0_f32, 1.0])
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_embedding_get("hash-abc", "BGESmallENV15")
+                .unwrap(),
+            Some(vec![0.0_f32, 1.0]),
+            "re-put under the same content_hash overwrites the prior vector"
         );
     }
 
