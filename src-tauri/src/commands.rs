@@ -1055,6 +1055,36 @@ fn heatmap_for_window(
     crate::dossier::heatmap::activity_heatmap(store, w, now).map_err(|e| e.to_string())
 }
 
+/// DOSSIER: pinned-rubric efficiency score (headline 0..1 + per-family
+/// breakdown) for a time `window`.
+///
+/// `window` is one of the frontend toggle strings (`all-time`/`6mo`/`3mo`/`30d`/
+/// `2wk`); an unknown string is an error rather than a silent default. Reads
+/// existing per-session features only (`features_since`) — writes nothing. The
+/// score is reproducible: same sessions + same `RUBRIC_VERSION` → same headline.
+#[tauri::command]
+pub async fn get_efficiency_score(
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<crate::dossier::efficiency::EfficiencyScore, String> {
+    efficiency_for_window(&state.store, &window, Utc::now())
+}
+
+/// Pure core of [`get_efficiency_score`] (clock injected so it is
+/// deterministically testable): parse the window string, then aggregate the
+/// window's per-session efficiency into the headline + family breakdown, mapping
+/// every failure to a `String` for the IPC boundary.
+fn efficiency_for_window(
+    store: &Store,
+    window: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<crate::dossier::efficiency::EfficiencyScore, String> {
+    let w = window
+        .parse::<crate::dossier::scope::Window>()
+        .map_err(|e| e.to_string())?;
+    crate::dossier::efficiency::window_efficiency(store, w, now).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1662,6 +1692,41 @@ mod tests {
     fn heatmap_for_window_errors_on_bad_window() {
         let store = Store::memory().unwrap();
         let err = heatmap_for_window(&store, "last-tuesday", Utc::now());
+        assert!(err.is_err(), "an unknown window string must be an error");
+    }
+
+    /// DOSSIER `get_efficiency_score` core: a valid window returns a reproducible
+    /// `EfficiencyScore` over the in-window features. Two seeded sessions →
+    /// `session_count == 2`, the pinned rubric version, and a headline that is
+    /// byte-identical on a repeat call (the golden reproducibility property).
+    #[test]
+    fn efficiency_for_window_scores_seeded_features() {
+        let store = Store::memory().unwrap();
+        seed_session(&store, "c1", Harness::ClaudeCode, 1);
+        seed_session(&store, "c2", Harness::ClaudeCode, 1);
+        store.save_feature(&context_feature("c1"), "test").unwrap();
+        store.save_feature(&context_feature("c2"), "test").unwrap();
+
+        let a = efficiency_for_window(&store, "all-time", Utc::now()).unwrap();
+        assert_eq!(a.session_count, 2, "two seeded sessions in window");
+        assert_eq!(a.rubric_version, "dossier-rubric-v1");
+        assert_eq!(a.families.len(), 7);
+        assert!((0.0..=1.0).contains(&a.headline));
+
+        let b = efficiency_for_window(&store, "all-time", Utc::now()).unwrap();
+        assert_eq!(
+            a.headline.to_bits(),
+            b.headline.to_bits(),
+            "same input + same RUBRIC_VERSION → identical headline"
+        );
+    }
+
+    /// DOSSIER `get_efficiency_score` core: an unknown window string is an
+    /// `Err(String)`, not a silent default (mirrors the heatmap contract).
+    #[test]
+    fn efficiency_for_window_errors_on_bad_window() {
+        let store = Store::memory().unwrap();
+        let err = efficiency_for_window(&store, "yesterday-ish", Utc::now());
         assert!(err.is_err(), "an unknown window string must be an error");
     }
 }

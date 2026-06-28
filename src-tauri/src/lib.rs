@@ -339,7 +339,8 @@ pub fn run() {
             list_fleet,
             locate_agent,
             warp_to_agent,
-            get_activity_heatmap
+            get_activity_heatmap,
+            get_efficiency_score
         ])
         .on_window_event(|window, event| {
             // The red traffic-light button (and ⌘W) asks the window to CLOSE. WARDEN
