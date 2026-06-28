@@ -5,4 +5,5 @@
 //! first submodule is [`scope`], which defines the time-[`scope::Window`] toggle
 //! and the session-scoping helper every aggregator builds on.
 
+pub mod heatmap;
 pub mod scope;
