@@ -7,6 +7,7 @@
 
 pub mod aggregate;
 pub mod archetype;
+pub mod build;
 pub mod efficiency;
 pub mod heatmap;
 pub mod outcome;
