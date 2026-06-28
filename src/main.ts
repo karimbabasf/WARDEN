@@ -11,6 +11,7 @@
 
 import './style.css';
 import { mountWarRoom } from './viz/mount';
+import { closeProfile, isProfileOpen, openProfile, toggleProfile } from './viz/profile/mount';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -140,4 +141,37 @@ appWindow.onResized(async () => {
   }
 }).catch(() => {});
 
+// ── DOSSIER full-page Profile surface ──────────────────────────────────────────
+// A separate React root (src/viz/profile/) opened OVER the war room. It is fully
+// additive: the warm R3F island is never touched. Open via the always-present
+// #open-profile button or the "D" hotkey; close via the panel's Close button or
+// Escape. The opener button hides itself while the Profile is open so it never
+// floats over its own header.
+const openBtn = document.getElementById('open-profile');
+function syncOpenBtn() {
+  if (openBtn) openBtn.style.display = isProfileOpen() ? 'none' : '';
+}
+openBtn?.addEventListener('click', () => {
+  toggleProfile();
+  syncOpenBtn();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && isProfileOpen()) {
+    closeProfile();
+    syncOpenBtn();
+    return;
+  }
+  // "D" toggles the dossier, but only when the operator isn't typing into a field.
+  const t = e.target as HTMLElement | null;
+  const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+  if (!typing && (e.key === 'd' || e.key === 'D') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    toggleProfile();
+    syncOpenBtn();
+  }
+});
+syncOpenBtn();
+
 boot();
+
+// Surface the opener imperatively too, so other code paths can summon the Profile.
+export { openProfile };

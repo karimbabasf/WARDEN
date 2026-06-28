@@ -1613,3 +1613,28 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
   .wd-roster-dot.is-working { animation: none; }
 }
+
+/* ── DOSSIER opener ─────────────────────────────────────────────────────────
+   Always-present button that summons the full-page Profile. Sits top-left above
+   the war-room chrome; hidden by main.ts while the Profile is open. The Profile
+   surface itself is styled inline in ProfileScreen.tsx (functionality-first). */
+#open-profile {
+  position: fixed;
+  top: 14px;
+  left: 16px;
+  z-index: var(--z-controls);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  padding: 6px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--hair-bright);
+  background: var(--panel-strong);
+  color: var(--green);
+  cursor: pointer;
+}
+#open-profile:hover {
+  border-color: var(--green);
+  box-shadow: var(--glow);
+}
+#profile-root:empty { display: none; }
