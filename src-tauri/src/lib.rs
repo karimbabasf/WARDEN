@@ -2,6 +2,7 @@ pub mod brain;
 pub mod commands;
 pub mod config;
 pub mod detectors;
+pub mod dossier;
 pub mod featurizer;
 pub mod forge;
 pub mod habits;
