@@ -9,6 +9,7 @@ pub mod aggregate;
 pub mod efficiency;
 pub mod heatmap;
 pub mod outcome;
+pub mod proof;
 pub mod rubric;
 pub mod scope;
 pub mod summarize;
