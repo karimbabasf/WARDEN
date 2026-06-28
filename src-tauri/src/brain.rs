@@ -55,6 +55,106 @@ impl Brain {
         self.api_key.as_ref().is_some_and(|s| !s.trim().is_empty())
             && self.api_url.as_ref().is_some_and(|s| !s.trim().is_empty())
     }
+
+    /// DOSSIER Phase 3 — the per-session micro-summary LLM stage (spec §9 + §19).
+    ///
+    /// PRIVACY (hard, non-negotiable): the prompt is built ONLY from distilled
+    /// signals — session metadata (harness, model, project, started_at,
+    /// duration), the `FeatureVector` numbers, and at most ~3 SHORT,
+    /// `redaction::excerpt`-scrubbed user-prompt snippets. The raw transcript is
+    /// NEVER sent. This is the only network egress, and it carries aggregates +
+    /// scrubbed samples only (§19).
+    ///
+    /// Returns a ≤120-word factual micro-summary of what the session worked on
+    /// and how it went. Degrades by returning `Err` (never panics) when the brain
+    /// is unconfigured, so the orchestration layer can fall back.
+    pub async fn summarize_session(
+        &self,
+        session: &Session,
+        features: &FeatureVector,
+        sample_prompts: &[String],
+    ) -> Result<String> {
+        if !self.available() {
+            return Err(anyhow!(
+                "brain unavailable (WARDEN_BRAIN_API_KEY / WARDEN_BRAIN_BASE_URL unset); cannot summarize session"
+            ));
+        }
+
+        // DISTILLED signals only — never the raw transcript.
+        let duration_minutes = session.ended_at.map(|end| {
+            (end - session.started_at).num_seconds().max(0) as f64 / 60.0
+        });
+        let project = session
+            .project
+            .as_ref()
+            .map(|p| p.cwd.display().to_string());
+        let distilled = json!({
+            "metadata": {
+                "harness": session.harness.as_str(),
+                "models": session.model_ids,
+                "project": project,
+                "started_at": session.started_at.to_rfc3339(),
+                "duration_minutes": duration_minutes,
+            },
+            "features": {
+                "token_burn_total": features.token_burn_total,
+                "context_saturation_peak": features.context_saturation_peak,
+                "cache_read_ratio": features.cache_read_ratio,
+                "search_in_main_context": features.search_in_main_context,
+                "subagent_spawn_count": features.subagent_spawn_count,
+                "subagent_delegation_rate": features.subagent_delegation_rate,
+                "tool_call_count": features.tool_call_count,
+                "tool_error_rate": features.tool_error_rate,
+                "ignored_error_count": features.ignored_error_count,
+                "reprompt_count": features.reprompt_count,
+                "prompt_specificity": features.prompt_specificity,
+                "file_churn": features.file_churn,
+                "thrash_index": features.thrash_index,
+                "planning_ratio": features.planning_ratio,
+                "verification_present": features.verification_present,
+                "permission_friction": features.permission_friction,
+            },
+            // At most ~3 SHORT, redaction-scrubbed snippets — secrets/emails removed,
+            // each capped well under a full prompt. Raw transcript stays on-device.
+            "sample_prompts": sample_prompts
+                .iter()
+                .take(3)
+                .map(|p| excerpt(p, 240))
+                .collect::<Vec<_>>(),
+        });
+
+        let body = json!({
+            "model": brain_diagnose_model(),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are WARDEN's session summarizer. From distilled signals only (no raw transcript is provided), write a single factual micro-summary of at most 120 words describing what the coding session was working on and how it went (efficiency, verification, rework, delegation). Be concrete and neutral; do not invent facts beyond the supplied signals; output prose only, no preamble."
+                },
+                {
+                    "role": "user",
+                    "content": serde_json::to_string(&distilled)?
+                }
+            ],
+            "stream": false,
+            "max_tokens": 400
+        });
+
+        let resp = self.send_chat_completions(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "brain summarize_session HTTP {status}: {}",
+                text.chars().take(800).collect::<String>()
+            ));
+        }
+        let response: Value = resp.json().await?;
+        let summary = extract_chat_message_content(&response);
+        if summary.trim().is_empty() {
+            return Err(anyhow!("brain summarize_session returned empty content"));
+        }
+        Ok(summary)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
