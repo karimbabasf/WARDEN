@@ -6,4 +6,5 @@
 //! and the session-scoping helper every aggregator builds on.
 
 pub mod heatmap;
+pub mod outcome;
 pub mod scope;
