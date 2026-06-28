@@ -14,5 +14,6 @@ pub mod proof;
 pub mod rubric;
 pub mod scope;
 pub mod summarize;
+pub mod synthesize;
 pub mod trajectory;
 pub mod types;

@@ -155,6 +155,72 @@ impl Brain {
         }
         Ok(summary)
     }
+
+    /// DOSSIER Phase 5b — the profile-synthesis LLM stage (spec §5, §11, §16).
+    ///
+    /// PRIVACY (hard, non-negotiable, §19): `context` is the DISTILLED synthesis
+    /// context built by `dossier::synthesize::build_llm_context` — aggregate
+    /// numbers, family sub-scores, archetype/trajectory summaries, length-capped
+    /// rollup digests, and an evidence MENU of finding titles + `session_id`s. The
+    /// raw transcript is NEVER sent. This call carries aggregates only.
+    ///
+    /// Returns the model's JSON object (dimensions / ranked_leaks /
+    /// proposed_weights) for the caller to validate, evidence-map and proof-gate.
+    /// Degrades by returning `Err` (never panics) when the brain is unconfigured
+    /// or the response is non-2xx / unparseable, so the synthesis layer can fall
+    /// back to the deterministic detector-only profile.
+    pub async fn synthesize_profile(&self, context: Value) -> Result<Value> {
+        if !self.available() {
+            return Err(anyhow!(
+                "brain unavailable (WARDEN_BRAIN_API_KEY / WARDEN_BRAIN_BASE_URL unset); cannot synthesize profile"
+            ));
+        }
+
+        let body = json!({
+            "model": brain_diagnose_model(),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are WARDEN's profile synthesizer. From the distilled signals provided (no raw transcript is given), write the operator's longitudinal profile. Cite ONLY the session_ids that appear in the provided evidence_menu — never invent ids. Return ONLY a JSON object with this shape: {\"dimensions\":[{\"key\",\"narrative\",\"claims\":[{\"text\",\"confidence\",\"evidence_session_ids\":[...]}]}],\"ranked_leaks\":[{\"title\",\"est_cost_tokens\",\"est_cost_minutes\",\"evidence_session_ids\":[...]}],\"proposed_weights\":[{\"key\",\"weight\",\"rationale\"}]}. Use the dimension_keys exactly. Be concrete and neutral; do not invent facts beyond the supplied signals; output JSON only, no preamble or code fences."
+                },
+                {
+                    "role": "user",
+                    "content": serde_json::to_string(&context)?
+                }
+            ],
+            "stream": false,
+            "max_tokens": 1600
+        });
+
+        let resp = self.send_chat_completions(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "brain synthesize_profile HTTP {status}: {}",
+                text.chars().take(800).collect::<String>()
+            ));
+        }
+        let response: Value = resp.json().await?;
+        let content = extract_chat_message_content(&response);
+        if content.trim().is_empty() {
+            return Err(anyhow!("brain synthesize_profile returned empty content"));
+        }
+        // The model is asked for a bare JSON object; tolerate stray code fences.
+        let cleaned = content
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+        let parsed: Value = serde_json::from_str(cleaned).with_context(|| {
+            format!(
+                "brain synthesize_profile content was not valid JSON: {}",
+                cleaned.chars().take(400).collect::<String>()
+            )
+        })?;
+        Ok(parsed)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
