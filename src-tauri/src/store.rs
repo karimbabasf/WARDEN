@@ -878,6 +878,70 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// Created lazily (not in `migrate`) so this dossier-only table is additive
+    /// and the rest of the schema is untouched. One row per `window` (PK
+    /// `window`); a re-build under a new `data_hash` replaces the row in place
+    /// via `put`. The `data_hash` column is the freshness fingerprint of the
+    /// scoped session set — `get` only returns a row whose hash still matches.
+    fn ensure_dossier_profile_table(&self) -> Result<()> {
+        self.conn().execute_batch(
+            "CREATE TABLE IF NOT EXISTS dossier_profiles(\
+                 window TEXT PRIMARY KEY,\
+                 data_hash TEXT,\
+                 profile_json TEXT,\
+                 created_at TEXT\
+             );",
+        )?;
+        Ok(())
+    }
+
+    /// DOSSIER Phase 6 — read a cached profile, but ONLY when the stored
+    /// `data_hash` matches the caller's freshly computed hash of the scoped
+    /// session set. A mismatch means the underlying sessions changed since the
+    /// profile was built, so the row is stale and `get` returns `None` (the
+    /// caller then rebuilds). The cache is keyed by `window` alone — one row per
+    /// window — so the latest build for a window is the only one retained.
+    pub fn dossier_profile_get(
+        &self,
+        window: &str,
+        data_hash: &str,
+    ) -> Result<Option<String>> {
+        self.ensure_dossier_profile_table()?;
+        self.conn()
+            .query_row(
+                "SELECT profile_json FROM dossier_profiles \
+                 WHERE window=? AND data_hash=?",
+                params![window, data_hash],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// DOSSIER Phase 6 — upsert a window's profile under its current
+    /// `data_hash`. PK `window`, so a re-build (after the scoped session set
+    /// changed) replaces the stale row in place (one row per window).
+    pub fn dossier_profile_put(
+        &self,
+        window: &str,
+        data_hash: &str,
+        profile_json: &str,
+    ) -> Result<()> {
+        self.ensure_dossier_profile_table()?;
+        self.conn().execute(
+            "INSERT OR REPLACE INTO dossier_profiles\
+             (window,data_hash,profile_json,created_at) \
+             VALUES(?,?,?,?)",
+            params![
+                window,
+                data_hash,
+                profile_json,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 const ARTIFACT_SELECT_BY_ID: &str = "SELECT id,finding_id,kind,target_path,diff,status,applied_at,backup_path,block,pre_image_sha256,post_image_sha256 FROM artifacts WHERE id=? LIMIT 1";
@@ -1243,6 +1307,44 @@ mod tests {
                 .unwrap(),
             None,
             "a changed summarizer_version is a cache miss (re-summarize under new prompt)"
+        );
+    }
+
+    /// DOSSIER Phase 6 — `put` then `get` with the SAME `(window, data_hash)`
+    /// returns the stored profile JSON verbatim. This is the cache-hit path that
+    /// lets a re-open of an unchanged window serve the prior synthesis for free.
+    #[test]
+    fn dossier_profile_roundtrip() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_profile_put("30d", "hash-abc", "{\"window\":\"30d\"}")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_profile_get("30d", "hash-abc")
+                .unwrap(),
+            Some("{\"window\":\"30d\"}".to_string()),
+            "matching window + data_hash returns the cached profile JSON"
+        );
+    }
+
+    /// The profile cache is invalidated when the scoped session set changed: the
+    /// stored row's `data_hash` no longer matches the freshly computed hash, so
+    /// the cached profile is stale and `get` returns `None` (caller rebuilds).
+    /// The cache is keyed by `window` alone (one row per window), so a re-`put`
+    /// under a new hash replaces the row in place.
+    #[test]
+    fn dossier_profile_stale_hash_returns_none() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_profile_put("30d", "hash-OLD", "{\"old\":true}")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_profile_get("30d", "hash-NEW")
+                .unwrap(),
+            None,
+            "a changed data_hash is a cache miss (sessions changed → rebuild)"
         );
     }
 
