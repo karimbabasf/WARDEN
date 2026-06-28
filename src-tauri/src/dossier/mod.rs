@@ -11,3 +11,4 @@ pub mod heatmap;
 pub mod outcome;
 pub mod rubric;
 pub mod scope;
+pub mod summarize;
