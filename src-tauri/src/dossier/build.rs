@@ -39,12 +39,16 @@ use crate::detectors::nominate_windowed;
 use crate::ir::{FeatureVector, Finding, Session};
 use crate::store::Store;
 
-/// Cap on the number of sessions micro-summarized on a first (cache-cold) build.
-/// Summaries are per-session LLM calls; without a cap an "all-time over 6 months"
-/// build would fan out into thousands of requests. The most-recent
-/// `SUMMARY_BUILD_CAP` sessions feed the week/project rollups; older sessions
-/// still count in the deterministic aggregate, just not the narrative digests.
-pub const SUMMARY_BUILD_CAP: usize = 40;
+/// Cap on the number of sessions micro-summarized **synchronously** during an
+/// interactive build. Each summary is a serial, cache-cold LLM call (~20s), so a
+/// non-trivial cap turns "Build profile" into a multi-minute block before
+/// anything renders (40 sessions ≈ 13 min). The deterministic profile is already
+/// complete in milliseconds and the single synthesis call carries the narrative,
+/// so the interactive path generates NO bulk summaries (cap 0). The per-session
+/// summary cache, `build_summaries`, and the rollups all remain intact for a
+/// future background/opt-in warmer; synthesis degrades gracefully to the
+/// aggregate numbers + findings when the rollups are empty.
+pub const SUMMARY_BUILD_CAP: usize = 0;
 
 /// The single trait the v1 trajectory series tracks: mean per-week outcome.
 const TRAJECTORY_TRAIT: &str = "outcome";
@@ -181,6 +185,7 @@ pub async fn build_profile(
         week_summaries,
         project_summaries,
     };
+    emit(app, serde_json::json!({"stage": "synthesize", "status": "started"}));
     let profile = synthesize_profile_via_brain(&inputs, now, brain).await;
     emit(
         app,
@@ -476,6 +481,17 @@ mod tests {
 
     /// The hash is order-independent (sort by id) and content-sensitive (a
     /// changed `raw_hash` flips it).
+    #[test]
+    fn summary_build_cap_stays_interactive() {
+        // Each summary is a serial, cache-cold ~20s LLM call; a large cap turns an
+        // interactive "Build profile" into a multi-minute block before anything
+        // renders. Keep it tiny (0 = none synchronously). Would fail at the old 40.
+        assert!(
+            SUMMARY_BUILD_CAP <= 8,
+            "SUMMARY_BUILD_CAP={SUMMARY_BUILD_CAP} would block interactive builds on serial LLM calls"
+        );
+    }
+
     #[test]
     fn data_hash_is_deterministic_and_order_independent() {
         let now = fixed_now();
