@@ -67,6 +67,39 @@ fn ensure_model_cache_dir() {
     }
 }
 
+/// Whether embedding calls should fail fast (forcing the deterministic keyword
+/// heuristic downstream).
+///
+/// **Production:** an operator kill switch — set `WARDEN_DOSSIER_DISABLE_EMBEDDINGS`
+/// to `1`/`true` to pin the heuristic without removing the model from disk.
+///
+/// **Tests:** embeddings are *disabled by default* so the whole suite stays
+/// offline, fast, and deterministic — no test accidentally loads the ~130 MB
+/// ONNX model or hits the network. The model-dependent (`#[ignore]`d) tests opt
+/// back in by setting `WARDEN_DOSSIER_ENABLE_EMBEDDINGS_IN_TEST=1`. This makes the
+/// degradation contract testable with zero process-global env racing: default
+/// tests uniformly see the disabled path; ignored tests run only under
+/// `--ignored` (in isolation), where they enable it.
+#[cfg(test)]
+fn embeddings_disabled() -> bool {
+    !matches!(
+        std::env::var("WARDEN_DOSSIER_ENABLE_EMBEDDINGS_IN_TEST")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true")
+    )
+}
+
+#[cfg(not(test))]
+fn embeddings_disabled() -> bool {
+    matches!(
+        std::env::var("WARDEN_DOSSIER_DISABLE_EMBEDDINGS")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true")
+    )
+}
+
 /// Initialize (once) and borrow the shared model, or return the remembered
 /// init error. Network/model-load failures surface here as `Err`.
 fn model() -> Result<&'static Mutex<TextEmbedding>, anyhow::Error> {
@@ -98,6 +131,14 @@ pub fn content_hash(text: &str) -> String {
 pub fn embed_texts(texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
+    }
+    // Kill switch: `WARDEN_DOSSIER_DISABLE_EMBEDDINGS=1` forces the
+    // model-unavailable path without removing the model from disk. Lets an
+    // operator pin the deterministic heuristic, and lets tests exercise the
+    // degradation contract in-process (the model is a process-wide OnceLock, so
+    // "unavailable" can't otherwise be simulated once any test has loaded it).
+    if embeddings_disabled() {
+        anyhow::bail!("embeddings disabled via WARDEN_DOSSIER_DISABLE_EMBEDDINGS");
     }
     let model = model()?;
     let mut guard = model
@@ -248,26 +289,46 @@ pub fn cluster_archetypes(
     if project_texts.is_empty() {
         return Ok(Vec::new());
     }
-
     let descriptors: Vec<String> = project_texts.iter().map(|(_, d)| d.clone()).collect();
     let vectors = embed_texts(&descriptors)?;
-    let k = project_texts.len().min(6);
-    let assignments = kmeans_cosine(&vectors, k);
+    let names: Vec<String> = project_texts.iter().map(|(p, _)| p.clone()).collect();
+    Ok(archetypes_from_vectors(&names, &vectors))
+}
+
+/// Cluster pre-computed vectors into named [`ProjectArchetype`]s — the pure,
+/// model-free core of [`cluster_archetypes`], split out so a cache-aware caller
+/// (the build layer, which embeds through the `dossier_embeddings` cache) can
+/// reuse the *exact* same k-means + labeling without re-embedding.
+///
+/// `names[i]` is the project name for `vectors[i]` (1:1, same order). k-means
+/// into `min(6, n)`; each cluster named by its members' dominant heuristic label
+/// (deterministic). Returns archetypes with `session_count` = member-project
+/// count (the build layer reconciles real session totals), sorted by count desc
+/// then archetype name asc — identical ordering to the heuristic.
+pub fn archetypes_from_vectors(
+    names: &[String],
+    vectors: &[Vec<f32>],
+) -> Vec<ProjectArchetype> {
+    if names.is_empty() || vectors.is_empty() {
+        return Vec::new();
+    }
+    let k = names.len().min(6);
+    let assignments = kmeans_cosine(vectors, k);
+
+    // Pair (name, "") so the existing dominant_label helper (which reads names)
+    // can be reused unchanged.
+    let project_texts: Vec<(String, String)> =
+        names.iter().map(|n| (n.clone(), String::new())).collect();
 
     // Fold members into clusters, then collapse clusters sharing the same
     // dominant heuristic label (so "two web_app clusters" present as one
     // archetype, matching the heuristic's per-archetype rollup shape).
     use std::collections::BTreeMap;
     let mut by_label: BTreeMap<&'static str, BTreeMap<String, ()>> = BTreeMap::new();
-    for (idx, (project, _)) in project_texts.iter().enumerate() {
+    for (idx, name) in names.iter().enumerate() {
         let cluster = assignments[idx];
-        // Dominant label for this vector's cluster = the most common
-        // classify_one over the cluster's member project names.
-        let label = dominant_label(project_texts, &assignments, cluster);
-        by_label
-            .entry(label)
-            .or_default()
-            .insert(project.clone(), ());
+        let label = dominant_label(&project_texts, &assignments, cluster);
+        by_label.entry(label).or_default().insert(name.clone(), ());
     }
 
     let mut out: Vec<ProjectArchetype> = by_label
@@ -297,7 +358,7 @@ pub fn cluster_archetypes(
             .then_with(|| a.archetype.cmp(&b.archetype))
     });
 
-    Ok(out)
+    out
 }
 
 /// The most common heuristic archetype label among the member project *names* of
@@ -426,6 +487,43 @@ mod tests {
         assert_ne!(content_hash("abc"), content_hash("abd"));
     }
 
+    /// archetypes_from_vectors (the pure, model-free core) clusters injected
+    /// vectors and labels them via the heuristic — no model needed. A web bundle
+    /// and an infra bundle separate into their two heuristic labels, every project
+    /// accounted for once, output sorted by count desc.
+    #[test]
+    fn archetypes_from_vectors_clusters_and_labels() {
+        let names = vec![
+            "acme-web".to_string(),
+            "shop-ui".to_string(),
+            "deploy-infra".to_string(),
+            "ops-docker".to_string(),
+        ];
+        let vectors = vec![
+            vec![1.0, 0.0],   // web bundle
+            vec![0.97, 0.03], // web bundle
+            vec![0.0, 1.0],   // infra bundle
+            vec![0.03, 0.97], // infra bundle
+        ];
+        let out = archetypes_from_vectors(&names, &vectors);
+        let total: usize = out.iter().map(|a| a.projects.len()).sum();
+        assert_eq!(total, 4, "every project appears exactly once");
+        let labels: Vec<&str> = out.iter().map(|a| a.archetype.as_str()).collect();
+        assert!(labels.contains(&"web_app"), "got {labels:?}");
+        assert!(labels.contains(&"infra"), "got {labels:?}");
+        // Deterministic ordering: counts desc then archetype asc.
+        for w in out.windows(2) {
+            assert!(
+                w[0].session_count > w[1].session_count
+                    || (w[0].session_count == w[1].session_count
+                        && w[0].archetype <= w[1].archetype),
+                "output must be sorted count-desc, name-asc"
+            );
+        }
+        // Empty inputs ⇒ empty output (no panic).
+        assert!(archetypes_from_vectors(&[], &[]).is_empty());
+    }
+
     /// dominant_label picks the most common heuristic label in a cluster, ties to
     /// the alphabetically-first label. Cluster 0 here is all web_app names.
     #[test]
@@ -447,6 +545,7 @@ mod tests {
     #[test]
     #[ignore = "requires the BGE-small ONNX model (network/HF cache)"]
     fn embed_texts_smoke() {
+        std::env::set_var("WARDEN_DOSSIER_ENABLE_EMBEDDINGS_IN_TEST", "1");
         let out = embed_texts(&["hello world".to_string(), "goodbye world".to_string()]).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].len(), out[1].len());
@@ -459,6 +558,7 @@ mod tests {
     #[test]
     #[ignore = "requires the BGE-small ONNX model (network/HF cache)"]
     fn cluster_archetypes_smoke() {
+        std::env::set_var("WARDEN_DOSSIER_ENABLE_EMBEDDINGS_IN_TEST", "1");
         let pt = vec![
             ("acme-web".to_string(), "a react frontend single page web app".to_string()),
             ("shop-ui".to_string(), "a vue storefront user interface".to_string()),
