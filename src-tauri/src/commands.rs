@@ -1085,6 +1085,72 @@ fn efficiency_for_window(
     crate::dossier::efficiency::window_efficiency(store, w, now).map_err(|e| e.to_string())
 }
 
+/// DOSSIER Phase 6 — build (or serve from cache) the full operator [`Profile`]
+/// for one `window`, emitting a `dossier_progress` event at each pipeline stage.
+///
+/// `window` is one of the frontend toggle strings (`all-time`/`6mo`/`3mo`/`30d`/
+/// `2wk`); an unknown string is an error, not a silent default. Holds `run_lock`
+/// for the whole build so two builds (or a build and a diagnosis run) can't race
+/// — both walk the same store/cache and a concurrent rebuild would waste LLM
+/// calls. Synthesis degrades internally, so this returns a profile even with no
+/// engine configured and never touches the network in that case.
+#[tauri::command]
+pub async fn build_profile(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<crate::dossier::types::Profile, String> {
+    let _guard = state.run_lock.lock().await;
+    let w = window
+        .parse::<crate::dossier::scope::Window>()
+        .map_err(|e| e.to_string())?;
+    let brain = Brain::new(state.store.clone());
+    crate::dossier::build::build_profile(&state.store, &brain, w, Utc::now(), Some(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// DOSSIER Phase 6 — return the cached [`Profile`] for `window` IFF it is fresh,
+/// else `None` (the frontend then calls [`build_profile`]).
+///
+/// "Fresh" means the cached row's `data_hash` still equals the hash of the
+/// window's CURRENT scoped session set — so an ingest since the last build is a
+/// miss. Read-only: no lock, no LLM, no writes.
+#[tauri::command]
+pub async fn get_profile(
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<Option<crate::dossier::types::Profile>, String> {
+    cached_profile_for_window(&state.store, &window, Utc::now())
+}
+
+/// Pure core of [`get_profile`] (clock injected for deterministic tests): parse
+/// the window, recompute the scoped session set's `data_hash`, and return the
+/// cached profile only if the stored hash matches. Every failure maps to a
+/// `String` for the IPC boundary.
+fn cached_profile_for_window(
+    store: &Store,
+    window: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<crate::dossier::types::Profile>, String> {
+    let w = window
+        .parse::<crate::dossier::scope::Window>()
+        .map_err(|e| e.to_string())?;
+    let sessions =
+        crate::dossier::scope::scoped_sessions(store, w, now).map_err(|e| e.to_string())?;
+    let hash = crate::dossier::build::data_hash(&sessions);
+    let kebab = serde_json::to_value(w)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .ok_or_else(|| "failed to encode window".to_string())?;
+    match store.dossier_profile_get(&kebab, &hash).map_err(|e| e.to_string())? {
+        Some(json) => serde_json::from_str(&json)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1728,5 +1794,70 @@ mod tests {
         let store = Store::memory().unwrap();
         let err = efficiency_for_window(&store, "yesterday-ish", Utc::now());
         assert!(err.is_err(), "an unknown window string must be an error");
+    }
+
+    /// DOSSIER `get_profile` core: with nothing built, a fresh-cache lookup
+    /// returns `Ok(None)` (frontend then builds); once a profile is cached under
+    /// the window's current `data_hash`, the same lookup returns `Some`. Proves
+    /// the freshness gate keys on `(window, data_hash)` and never invents data.
+    #[test]
+    fn cached_profile_for_window_miss_then_hit() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        seed_session(&store, "c1", Harness::ClaudeCode, 1);
+        store.save_feature(&context_feature("c1"), "test").unwrap();
+
+        // Cache cold ⇒ None (no row for this window yet).
+        assert!(
+            cached_profile_for_window(&store, "all-time", now)
+                .unwrap()
+                .is_none(),
+            "no cached profile ⇒ Ok(None)"
+        );
+
+        // Persist a profile under the window's CURRENT hash, then it's a hit.
+        let sessions =
+            crate::dossier::scope::scoped_sessions(&store, crate::dossier::scope::Window::AllTime, now)
+                .unwrap();
+        let hash = crate::dossier::build::data_hash(&sessions);
+        let json = serde_json::to_string(&fixture_profile()).unwrap();
+        store.dossier_profile_put("all-time", &hash, &json).unwrap();
+
+        let hit = cached_profile_for_window(&store, "all-time", now).unwrap();
+        assert!(hit.is_some(), "a fresh cached row ⇒ Some(profile)");
+        assert_eq!(hit.unwrap().window, crate::dossier::scope::Window::ThirtyDays);
+    }
+
+    /// DOSSIER `get_profile` core: an unknown window string is an `Err(String)`,
+    /// never a silent default.
+    #[test]
+    fn cached_profile_for_window_errors_on_bad_window() {
+        let store = Store::memory().unwrap();
+        let err = cached_profile_for_window(&store, "last-tuesday", Utc::now());
+        assert!(err.is_err(), "an unknown window string must be an error");
+    }
+
+    /// A minimal valid `Profile` for cache round-trip tests (its `window` field
+    /// is a sentinel — `ThirtyDays` — distinct from the lookup window so the
+    /// test proves the row is returned verbatim, not re-derived).
+    fn fixture_profile() -> crate::dossier::types::Profile {
+        crate::dossier::types::Profile {
+            window: crate::dossier::scope::Window::ThirtyDays,
+            generated_at: Utc::now(),
+            data_hash: "sentinel".into(),
+            rubric_version: "dossier-rubric-v1".into(),
+            efficiency: crate::dossier::efficiency::EfficiencyScore {
+                headline: 0.5,
+                rubric_version: "dossier-rubric-v1".into(),
+                families: vec![],
+                session_count: 1,
+            },
+            dimensions: vec![],
+            ranked_leaks: vec![],
+            archetypes: vec![],
+            trajectory: vec![],
+            session_count: 1,
+            detector_only: true,
+        }
     }
 }
