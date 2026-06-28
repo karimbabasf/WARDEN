@@ -39,7 +39,11 @@ const ARCHETYPE_KEYWORDS: &[(&str, &[&str])] = &[
 /// Classify one project name into its archetype label. Case-insensitive
 /// substring match against [`ARCHETYPE_KEYWORDS`] in priority order; no match →
 /// `"unknown"`.
-fn classify_one(project: &str) -> &'static str {
+///
+/// `pub(crate)` so the Phase-4 embedding clusterer ([`super::cluster`]) can reuse
+/// the exact same keyword logic to *name* a cluster by its members' dominant
+/// heuristic archetype — keeping one source of truth for archetype labels.
+pub(crate) fn classify_one(project: &str) -> &'static str {
     let lower = project.to_lowercase();
     for (label, keywords) in ARCHETYPE_KEYWORDS {
         if keywords.iter().any(|kw| lower.contains(kw)) {

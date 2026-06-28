@@ -6,6 +6,10 @@
 /.env
 .DS_Store
 *.log
+
+# DOSSIER on-device embedding model weights (fastembed). Pinned to
+# ~/.warden/fastembed_cache at runtime; this guards the legacy default path.
+.fastembed_cache/
 .build_prompt.txt
 .resume_prompt.txt
 .autorestart.sh
