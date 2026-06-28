@@ -12,3 +12,4 @@ pub mod outcome;
 pub mod rubric;
 pub mod scope;
 pub mod summarize;
+pub mod types;
