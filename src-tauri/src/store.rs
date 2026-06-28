@@ -810,6 +810,74 @@ impl Store {
             .execute("DELETE FROM habit_resolutions WHERE pattern_id=?", params![pattern_id])?;
         Ok(())
     }
+
+    /// DOSSIER Phase 3 — ensure the per-session micro-summary cache table exists.
+    /// Created lazily (not in `migrate`) so this dossier-only table is additive
+    /// and the rest of the schema is untouched. One row per session (PK
+    /// `session_id`); a content change (new `raw_hash`) or a summarizer-prompt
+    /// change (new `summarizer_version`) replaces the row in place via `put`.
+    fn ensure_dossier_summary_table(&self) -> Result<()> {
+        self.conn().execute_batch(
+            "CREATE TABLE IF NOT EXISTS dossier_session_summaries(\
+                 session_id TEXT PRIMARY KEY,\
+                 raw_hash TEXT,\
+                 summarizer_version TEXT,\
+                 summary TEXT,\
+                 created_at TEXT\
+             );",
+        )?;
+        Ok(())
+    }
+
+    /// DOSSIER Phase 3 — read a cached micro-summary, but ONLY when both the
+    /// stored `raw_hash` and `summarizer_version` match: a mismatch on either is
+    /// a stale row (the transcript changed, or the summarizer prompt changed) and
+    /// returns `None` so the caller re-summarizes. This is what makes "all-time
+    /// over 6 months" tractable — unchanged sessions are never re-summarized.
+    pub fn dossier_summary_get(
+        &self,
+        session_id: &str,
+        raw_hash: &str,
+        summarizer_version: &str,
+    ) -> Result<Option<String>> {
+        self.ensure_dossier_summary_table()?;
+        self.conn()
+            .query_row(
+                "SELECT summary FROM dossier_session_summaries \
+                 WHERE session_id=? AND raw_hash=? AND summarizer_version=?",
+                params![session_id, raw_hash, summarizer_version],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// DOSSIER Phase 3 — upsert a session's micro-summary under its current
+    /// `(raw_hash, summarizer_version)`. PK `session_id`, so a re-summarize after
+    /// a content or prompt change replaces the stale row in place (one row per
+    /// session).
+    pub fn dossier_summary_put(
+        &self,
+        session_id: &str,
+        raw_hash: &str,
+        summarizer_version: &str,
+        summary: &str,
+    ) -> Result<()> {
+        self.ensure_dossier_summary_table()?;
+        self.conn().execute(
+            "INSERT OR REPLACE INTO dossier_session_summaries\
+             (session_id,raw_hash,summarizer_version,summary,created_at) \
+             VALUES(?,?,?,?,?)",
+            params![
+                session_id,
+                raw_hash,
+                summarizer_version,
+                summary,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 const ARTIFACT_SELECT_BY_ID: &str = "SELECT id,finding_id,kind,target_path,diff,status,applied_at,backup_path,block,pre_image_sha256,post_image_sha256 FROM artifacts WHERE id=? LIMIT 1";
@@ -1120,6 +1188,61 @@ mod tests {
             store.radar_token_cache_get("s1", 0xAABB).unwrap(),
             None,
             "the old change-key no longer hits (row was replaced, not duplicated)"
+        );
+    }
+
+    /// DOSSIER Phase 3 — the per-session micro-summary cache. A `put` then a
+    /// `get` with the SAME `(raw_hash, summarizer_version)` returns the stored
+    /// summary verbatim (the happy path that lets "all-time over 6 months" reuse
+    /// one summary forever).
+    #[test]
+    fn dossier_summary_roundtrip() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_summary_put("sess-1", "hash-abc", "dossier-sum-v1", "worked on the ingest watermark")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_summary_get("sess-1", "hash-abc", "dossier-sum-v1")
+                .unwrap(),
+            Some("worked on the ingest watermark".to_string()),
+            "matching session_id + raw_hash + version returns the cached summary"
+        );
+    }
+
+    /// The cache is invalidated when the transcript changed: the stored row's
+    /// `raw_hash` no longer matches the session's current content hash, so the
+    /// summary is stale and must be re-summarized (get ⇒ None).
+    #[test]
+    fn dossier_summary_stale_hash_returns_none() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_summary_put("sess-1", "hash-OLD", "dossier-sum-v1", "stale summary")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_summary_get("sess-1", "hash-NEW", "dossier-sum-v1")
+                .unwrap(),
+            None,
+            "a changed raw_hash is a cache miss (content changed → re-summarize)"
+        );
+    }
+
+    /// The cache is also invalidated when the summarizer prompt/version changes:
+    /// the same content under a newer `summarizer_version` must be re-summarized
+    /// so an old prompt's output is never silently reused.
+    #[test]
+    fn dossier_summary_stale_version_returns_none() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_summary_put("sess-1", "hash-abc", "dossier-sum-v0", "v0 summary")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_summary_get("sess-1", "hash-abc", "dossier-sum-v1")
+                .unwrap(),
+            None,
+            "a changed summarizer_version is a cache miss (re-summarize under new prompt)"
         );
     }
 
