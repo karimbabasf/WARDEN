@@ -23,6 +23,7 @@ import * as THREE from 'three';
 import type { LayoutNode } from './orbTypes';
 import { frameDistance, type Bounds } from './cameraFraming';
 import { cameraTargetForOrbitOverview } from './useOrbCamera';
+import { gestureBus, drainGesture } from './gesture/gestureBus';
 
 // Pulled back from the old 9.4 so the (now more widely spaced) constellation
 // opens with room to breathe instead of filling the frame.
@@ -32,6 +33,12 @@ const OVERVIEW_DIST = 12.6;
 // FOV taper below mops up whatever remains on the closest approach.
 const MIN_DIST = 5;
 const MAX_DIST = 24;
+
+// Polar (vertical) orbit clamp — keep the constellation upright-ish, never tipping over
+// the poles. Shared by the OrbitControls props AND the hand-gesture clamp below so mouse
+// and hand obey the exact same vertical limits.
+const MIN_POLAR = Math.PI * 0.16;
+const MAX_POLAR = Math.PI * 0.84;
 
 // FOV taper. The Canvas mounts the perspective camera at 46° (see WarRoom).
 // As the camera's distance to its target approaches MIN_DIST we ease the FOV
@@ -51,6 +58,24 @@ const FOV_EPS = 0.01;
 const FLY_MS = 700;
 
 const dir = new THREE.Vector3();
+
+// Hand-gesture steering (pinch-drag → orbit), fed frame-by-frame on the gestureBus.
+// Deltas arrive in radians (already throw-shaped + clamped by gestureOrbit). We rotate
+// the camera around the orbit target in spherical space, then the existing controls
+// `update()` reconciles it — the supported "manual transform + update()" path, so the
+// hand shares the mouse's exact damping + clamps. Flip a SIGN if a direction feels
+// inverted on your camera; nudge GAIN for a livelier/calmer hand.
+const GESTURE_AZIMUTH_SIGN = 1;
+const GESTURE_POLAR_SIGN = -1;
+const GESTURE_GAIN = 1;
+// Two-hand zoom: spreading the hands apart dollies IN (negative radius change), like
+// phone pinch-to-zoom. Flip GESTURE_ZOOM_SIGN to invert; GESTURE_ZOOM_GAIN converts the
+// normalized hand-spread delta into world distance units.
+const GESTURE_ZOOM_SIGN = -1;
+const GESTURE_ZOOM_GAIN = 18;
+// Hoisted scratch — never allocate inside useFrame (R3F perf rule).
+const gestureOffset = new THREE.Vector3();
+const gestureSpherical = new THREE.Spherical();
 
 // Expo ease-in-out on a normalized 0..1 clock. Slow lift-off, fast middle, soft
 // landing — the classic "camera move" feel.
@@ -229,6 +254,36 @@ export function CameraRig({
     if (!c) return;
     const dt = Math.min(dtRaw, 0.05);
 
+    // --- Hand-gesture orbit ---------------------------------------------------
+    // Drain the pinch-drag rotation the tracker accumulated since the last frame and
+    // apply it around the current orbit target in spherical space. We only steer while
+    // the rig is at REST (a fly-to/focus owns the camera), but we still drain during an
+    // animation so queued deltas can't pile up and lurch when it ends. The c.update() at
+    // the foot of this frame reconciles the manual move with OrbitControls' state.
+    if (gestureBus.enabled) {
+      const { theta, phi, radius } = drainGesture();
+      if (!animating.current && (theta !== 0 || phi !== 0 || radius !== 0)) {
+        gestureOffset.copy(c.object.position).sub(c.target);
+        gestureSpherical.setFromVector3(gestureOffset);
+        gestureSpherical.theta += theta * GESTURE_AZIMUTH_SIGN * GESTURE_GAIN;
+        gestureSpherical.phi = THREE.MathUtils.clamp(
+          gestureSpherical.phi + phi * GESTURE_POLAR_SIGN * GESTURE_GAIN,
+          MIN_POLAR,
+          MAX_POLAR,
+        );
+        // Two-hand spread → dolly, clamped to the SAME distance band the mouse wheel
+        // uses, so hand-zoom and scroll-zoom share one set of limits.
+        gestureSpherical.radius = THREE.MathUtils.clamp(
+          gestureSpherical.radius + radius * GESTURE_ZOOM_SIGN * GESTURE_ZOOM_GAIN,
+          MIN_DIST,
+          MAX_DIST,
+        );
+        gestureSpherical.makeSafe();
+        gestureOffset.setFromSpherical(gestureSpherical);
+        c.object.position.copy(c.target).add(gestureOffset);
+      }
+    }
+
     if (animating.current) {
       if (flyActive.current) {
         // Timed expo ease-in-out over FLY_MS. Interpolate from the captured start
@@ -295,8 +350,8 @@ export function CameraRig({
       maxDistance={MAX_DIST}
       // Keep the constellation upright-ish; allow looking from above/below but
       // never fully over the poles (avoids the disorienting flip).
-      minPolarAngle={Math.PI * 0.16}
-      maxPolarAngle={Math.PI * 0.84}
+      minPolarAngle={MIN_POLAR}
+      maxPolarAngle={MAX_POLAR}
     />
   );
 }

@@ -1019,6 +1019,101 @@ fn fresh_radar_state_for_read(state: &AppState) -> RadarState {
     state.cache_radar_state(radar.clone());
     radar
 }
+
+/// RADAR: forcefully terminate a live agent's OS process and erase its liveness
+/// registry entry, then recompute + push the forest so the globe implodes at once.
+///
+/// Flow: the FACE passes the agent's internal `agentId`. We resolve it to the
+/// session's external id (the key the registry uses), find the matching `<pid>.json`
+/// in the Claude liveness registry (`~/.claude/sessions`), signal that pid to quit
+/// (SIGTERM — see [`radar::liveness::kill_pid`]; a force SIGKILL of the Anthropic-
+/// signed agent is what endpoint-security tamper-protection blocks), and remove its
+/// registry file so the globe drops at once. A Claude subagent has no process of its own
+/// and returns an error the panel surfaces. A Codex agent has no per-session process —
+/// one shared `codex app-server` multiplexes every conversation — so termination SIGTERMs
+/// that server (force-quitting ALL of that surface's sessions, labeled honestly in the UI)
+/// and marks the session terminated so the globe drops at once.
+#[tauri::command]
+pub async fn terminate_agent(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+) -> Result<(), String> {
+    let sessions_dir = default_claude_sessions_dir();
+
+    // internal agent id → its session row. We need the harness + source path (not just the
+    // external id) to choose the right termination path.
+    let sessions = state.store.sessions().map_err(|e| e.to_string())?;
+    let session = sessions
+        .iter()
+        .find(|s| s.id == agent_id)
+        .ok_or_else(|| format!("agent {agent_id} is not a known session"))?;
+
+    match session.harness {
+        crate::ir::Harness::Codex => {
+            // Codex has NO per-session process — one shared `codex app-server` multiplexes
+            // every conversation. Find the server holding THIS rollout open and SIGTERM it;
+            // that force-quits ALL of that surface's sessions (the UI says so explicitly).
+            // An idle rollout no process holds open yields no pid — we still mark it
+            // terminated so the user's "stop this" intent clears the globe.
+            let pids = radar::liveness::codex_server_pids_for_rollout(&session.source_path);
+            let mut killed_any = false;
+            let mut last_err: Option<String> = None;
+            for pid in &pids {
+                match radar::liveness::kill_pid_labeled(*pid, "Codex app-server") {
+                    Ok(()) => killed_any = true,
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            // Found server processes but EVERY kill was refused → surface it; do NOT mark
+            // terminated and pretend it worked.
+            if !pids.is_empty() && !killed_any {
+                return Err(last_err
+                    .unwrap_or_else(|| "failed to force-quit the Codex app-server".to_string()));
+            }
+            // Mark terminated so the globe drops at once. It stays hidden until the rollout
+            // gets NEW activity (a resume writes past this timestamp → it reappears). No
+            // files under ~/.codex are moved or deleted.
+            let now = chrono::Utc::now().to_rfc3339();
+            state
+                .store
+                .merge_session_meta(
+                    &session.id,
+                    &serde_json::json!({ "warden_terminated_at": now }),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        _ => {
+            // Claude: each session is its own process. external id → (pid, registry file);
+            // absent ⇒ nothing on this machine to kill (a subagent has no process of its own).
+            let external_id = session.external_id.clone();
+            let (pid, registry_path) =
+                radar::liveness::registry_entry_for_session(&sessions_dir, &external_id)
+                    .ok_or_else(|| {
+                        "this agent has no live process to terminate — only top-level Claude \
+                         agents can be killed (a subagent has no process of its own)"
+                            .to_string()
+                    })?;
+            // Signal the process to quit, then erase its registry file so the forest drops
+            // it. On a refusal (endpoint-security tamper-protection) `kill_pid` returns the
+            // error and we DON'T touch the registry file — the agent is still alive.
+            radar::liveness::kill_pid(pid)?;
+            let _ = std::fs::remove_file(&registry_path);
+        }
+    }
+
+    // Recompute + emit `radar_state` now so the globe implodes without waiting for the
+    // next filesystem event (the kill writes no transcript, so none would fire).
+    crate::scheduler::recompute_and_emit_radar(
+        &state.store,
+        &sessions_dir,
+        &app,
+        &state.radar_state,
+        true,
+    );
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn locate_agent(_id: String) -> Result<(), String> {
     Err(not_in_slice("RADAR locate"))

@@ -39,6 +39,7 @@ import type { RadarAgent, RadarSceneModel } from './radarTypes';
 import { targetDim, matchesFilter, type EmphasisFilter } from './emphasis';
 import { subtreeBounds, type Bounds } from './cameraFraming';
 import IntroVideo from './IntroVideo';
+import { HandMode } from './gesture/HandMode';
 
 const PlayerHost = lazy(() => import('./PlayerHost'));
 
@@ -637,6 +638,20 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     }
   }, [bridge]);
 
+  // Terminate a live agent: kill its process on this machine, back out of the dive,
+  // and pull a fresh forest at once (the backend also pushes `radar_state`). A backend
+  // refusal — e.g. a subagent has no process of its own — rejects, and the detail panel
+  // renders the message inline. `invoke` also rejects in the browser QA harness (no
+  // Tauri); the panel surfaces that the same way.
+  const onTerminate = useCallback(
+    async (id: string) => {
+      await invoke('terminate_agent', { agentId: id });
+      onClear();
+      void fetchRadar();
+    },
+    [onClear, fetchRadar],
+  );
+
   useEffect(() => {
     if (displayTab !== 'radar' || !active) return;
     fetchRadar(); // immediate on entering the radar / on summon
@@ -858,6 +873,10 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           dock now — it replaced the removed StatusDeck). */}
       <FilterBar tab={tab} model={chromeModel} filter={emphasisFilter} onFilter={onFilter} />
 
+      {/* Hand mode — toggle a webcam pinch-to-orbit controller (camera off until asked).
+          Fixed-positioned chrome; gated on `active` so minimising releases the camera. */}
+      <HandMode active={active} />
+
       {/* Chrome is the Habits inspector (keys off node.issue/agent). On the radar
           tab the live selection flows to RadarSceneBody via selectedId; the radar
           detail panel is Phase 3, so keep the Habits inspector closed here rather
@@ -899,6 +918,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
             children={selectedRadarChildren}
             onJumpTo={onRadarJump}
             onClose={onClear}
+            onTerminate={onTerminate}
           />
         ) : null}
       </div>

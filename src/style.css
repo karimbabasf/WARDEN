@@ -427,6 +427,40 @@ html, body {
 }
 .wd-detail-close:hover { background: rgba(255, 90, 55, 0.12); color: var(--amber); border-color: rgba(255, 90, 55, 0.5); }
 
+/* Header action cluster: the destructive Terminate control sits beside the close X. */
+.wd-detail-actions { flex: none; display: flex; align-items: center; gap: 8px; }
+.wd-detail-terminate {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--red) 55%, transparent);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  color: var(--red);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.wd-detail-terminate:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 24%, transparent);
+  border-color: var(--red);
+  color: #fff;
+  box-shadow: 0 0 18px color-mix(in srgb, var(--red) 35%, transparent);
+}
+.wd-detail-terminate:disabled { opacity: 0.55; cursor: default; }
+.wd-detail-term-error {
+  margin: 8px 0 0;
+  padding: 6px 9px;
+  border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+  color: var(--red);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
 .wd-detail p { margin: 12px 0; font-size: 12px; line-height: 1.55; color: var(--ink-soft); }
 
 .wd-severity { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; width: 150px; margin: 10px 0; }

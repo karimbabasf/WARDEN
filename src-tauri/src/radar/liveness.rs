@@ -13,7 +13,7 @@
 
 use crate::ir::{Event, EventRecord, Turn};
 use chrono::{DateTime, Utc};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// An agent's live status. `Working` = generating now (recent transcript write),
 /// `Idle` = open but quiet, `Closed` = gone (dead PID / archived) → imploded away,
@@ -65,10 +65,19 @@ pub struct LiveSession {
 /// heuristic baked in here. Keeping it injected preserves this function as a pure
 /// router and lets the store-backed rule live in `assemble`. Entries missing a
 /// `sessionId` are skipped.
+///
+/// "Show use, not mere existence" (`is_active`): an alive PID is NOT sufficient to be
+/// live. An IDE (VS Code) keeps a Claude process — and its PID — alive long after the
+/// session is done, and an opened-but-never-used historical chat has a live PID whose
+/// last real activity is ancient. So an alive session that is NOT actively `Working` is
+/// kept ONLY when `is_active(session_id)` is true (recent meaningful activity within the
+/// root-idle window). A `Working` session is always kept regardless of `is_active` — a
+/// long tool run may write nothing for a while and must not be gated on recency.
 pub fn partition_claude(
     session_files: &[(u32, serde_json::Value)],
     is_alive: &dyn Fn(u32) -> bool,
     fallback_status: &dyn Fn(&str) -> AgentStatus,
+    is_active: &dyn Fn(&str) -> bool,
 ) -> Vec<(LiveSession, AgentStatus)> {
     let mut out = Vec::new();
     for (pid, v) in session_files {
@@ -90,6 +99,14 @@ pub fn partition_claude(
             Some(_) => AgentStatus::Idle,
             None => fallback_status(session_id),
         };
+        // "Show use, not mere existence": an alive PID that is not actively Working is kept
+        // ONLY when it has recent meaningful activity. This drops an IDE-pinned PID (VS Code
+        // keeps the process — and its PID — alive until it quits) and an opened-but-never-
+        // used historical chat: both have a live PID but no recent work. A Working session
+        // is never gated on recency (a long tool run is quiet for a while).
+        if status != AgentStatus::Working && !is_active(session_id) {
+            continue;
+        }
         out.push((
             LiveSession {
                 session_id: session_id.to_string(),
@@ -258,6 +275,115 @@ pub fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+/// Resolve a Claude external `sessionId` → the OS pid AND the `<pid>.json` registry
+/// file it lives in, by scanning the liveness dir. Returns the REAL on-disk path
+/// (not a reconstructed `<pid>.json`) so the caller can delete exactly the file it
+/// matched. `None` when no registry file names this session — a subagent (no process
+/// of its own) or a Codex/unknown agent has no entry here. A `pid <= 0` entry is
+/// skipped: it can never be a valid kill target (0/negative pid_t broadcast a signal
+/// to a whole process group — see [`kill_pid`]). Used by the terminate-agent command.
+pub fn registry_entry_for_session(dir: &Path, session_id: &str) -> Option<(u32, PathBuf)> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|x| x != "json").unwrap_or(true) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if v.get("sessionId").and_then(|s| s.as_str()) != Some(session_id) {
+            continue;
+        }
+        let pid = v
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .map(|p| p as u32)
+            .or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.parse::<u32>().ok())
+            })
+            .filter(|p| *p > 0);
+        if let Some(pid) = pid {
+            return Some((pid, path));
+        }
+    }
+    None
+}
+
+/// Terminate `pid` by asking it to quit with SIGTERM (the graceful "please shut down"
+/// signal), NOT SIGKILL. Two reasons: it lets the agent exit cleanly (flush state,
+/// remove its own registry file), and — critically on this machine — the Claude Code
+/// processes are signed by Anthropic, and endpoint-security/tamper-protection treats
+/// an external SIGKILL of a protected app as tampering and blocks it. SIGTERM is the
+/// signal a security policy is least likely to refuse. Returns `Ok` when the signal
+/// was delivered OR the process was already gone (`ESRCH`).
+///
+/// Guards the `u32 → pid_t` cast: `0` targets the CALLER's own process group and any
+/// value above `i32::MAX` casts to a NEGATIVE `pid_t` (also a process-group
+/// broadcast). Either would signal far more than the one agent — so both are refused
+/// outright. This is the boundary that keeps a garbage `0.json` registry entry from
+/// turning a "terminate one agent" click into "kill WARDEN and all its children".
+pub fn kill_pid(pid: u32) -> Result<(), String> {
+    kill_pid_labeled(pid, "Claude Code")
+}
+
+/// As [`kill_pid`], but names the target in the endpoint-security refusal message so it
+/// is accurate per harness (`Claude Code` vs `Codex app-server`) — both are code-signed,
+/// so an external SIGTERM can be refused by tamper-protection on either.
+pub fn kill_pid_labeled(pid: u32, what: &str) -> Result<(), String> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(format!("refusing to signal invalid pid {pid}"));
+    }
+    // SAFETY: kill delivers a signal to another process; it never touches our memory.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        // ESRCH = "no such process": it already exited → terminated. Success.
+        Some(code) if code == libc::ESRCH => Ok(()),
+        // EPERM = the OS refused the signal. On macOS this is typically endpoint-
+        // security tamper-protection shielding the code-signed agent process from an
+        // external (here adhoc-signed) app. That is a security control, not a WARDEN
+        // bug — surface it as an actionable message.
+        Some(code) if code == libc::EPERM => Err(format!(
+            "endpoint security blocked terminating pid {pid} — tamper protection on the \
+             {what} process. Allowlist WARDEN in your security software, or end the \
+             session from its own app."
+        )),
+        _ => Err(format!("failed to terminate pid {pid}: {err}")),
+    }
+}
+
+/// Find the `codex` process(es) currently holding `rollout_path` open — the app-server
+/// that owns this Codex session. Codex multiplexes ALL its conversations through one
+/// shared `codex app-server` (there is NO per-session process), so this shared server is
+/// the only killable handle: SIGTERM-ing it force-quits EVERY session on that surface
+/// (the UI labels the action honestly as "all sessions"). Shells out to `lsof` (terse
+/// `-t`, ANDed with the `-c codex` command filter so only a codex process is ever
+/// returned, for the one file) — a thin wrapper kept OUT of the unit-tested path. Empty
+/// when the rollout is idle (no process holds it open) or `lsof` is unavailable.
+pub fn codex_server_pids_for_rollout(rollout_path: &Path) -> Vec<u32> {
+    let Ok(out) = std::process::Command::new("lsof")
+        .args(["-t", "-a", "-c", "codex", "--"])
+        .arg(rollout_path)
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .filter(|p| *p > 0)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,7 +410,7 @@ mod tests {
             _ => AgentStatus::Idle,
         };
 
-        let live = partition_claude(&files, &is_alive, &fallback);
+        let live = partition_claude(&files, &is_alive, &fallback, &|_| true);
         // Dead pid 300 excluded → exactly two live sessions.
         assert_eq!(live.len(), 2, "dead pid must be dropped from the live set");
 
@@ -339,7 +465,7 @@ mod tests {
             "nostatus-fresh" => AgentStatus::Working,
             _ => AgentStatus::Idle,
         };
-        let live = partition_claude(&files, &is_alive, &fallback);
+        let live = partition_claude(&files, &is_alive, &fallback, &|_| true);
         let st = |sid: &str| {
             live.iter()
                 .find(|(s, _)| s.session_id == sid)
@@ -367,8 +493,49 @@ mod tests {
     #[test]
     fn partition_claude_unknown_mtime_is_idle() {
         let files = vec![(1u32, json!({"sessionId":"s","cwd":"/x"}))];
-        let live = partition_claude(&files, &|_| true, &|_| AgentStatus::Idle);
+        let live = partition_claude(&files, &|_| true, &|_| AgentStatus::Idle, &|_| true);
         assert_eq!(live[0].1, AgentStatus::Idle);
+    }
+
+    /// "Show use, not mere existence": an alive PID is NOT enough to be live. An alive
+    /// session that is not actively Working is kept ONLY when it has recent activity
+    /// (`is_active`). This is the gate that stops an IDE-pinned PID (VS Code keeps the
+    /// process alive until it quits) or an opened-but-never-used historical chat from
+    /// lingering on the radar forever.
+    #[test]
+    fn partition_claude_drops_idle_sessions_without_recent_activity() {
+        let files = vec![
+            (
+                10u32,
+                json!({"sessionId":"busy-quiet","cwd":"/a","pid":10,"status":"busy"}),
+            ),
+            (
+                20u32,
+                json!({"sessionId":"idle-active","cwd":"/b","pid":20,"status":"idle"}),
+            ),
+            (
+                30u32,
+                json!({"sessionId":"idle-stale","cwd":"/c","pid":30,"status":"idle"}),
+            ),
+        ];
+        let is_alive = |_pid: u32| true;
+        let fallback = |_: &str| AgentStatus::Idle;
+        // Only idle-active has recent meaningful activity.
+        let is_active = |sid: &str| sid == "idle-active";
+        let live = partition_claude(&files, &is_alive, &fallback, &is_active);
+        let ids: Vec<&str> = live.iter().map(|(s, _)| s.session_id.as_str()).collect();
+        assert!(
+            ids.contains(&"busy-quiet"),
+            "a Working session is kept even when not recently active (a long tool run is quiet)"
+        );
+        assert!(
+            ids.contains(&"idle-active"),
+            "an idle session with recent activity stays on the radar"
+        );
+        assert!(
+            !ids.contains(&"idle-stale"),
+            "an idle session with no recent activity is dropped (show use, not mere existence)"
+        );
     }
 
     /// Codex: archived → Closed; live + fresh → Working; live + stale → Idle;
@@ -413,6 +580,57 @@ mod tests {
     #[test]
     fn read_claude_registry_missing_dir_is_empty() {
         assert!(read_claude_registry(Path::new("/no/such/dir/warden-x")).is_empty());
+    }
+
+    /// terminate-agent mapping: an external `sessionId` resolves to its pid AND the
+    /// real `<pid>.json` path (so the caller deletes exactly the matched file), and a
+    /// session with no registry file resolves to `None` (a subagent / Codex agent).
+    #[test]
+    fn registry_entry_for_session_finds_pid_and_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("2222.json"),
+            r#"{"pid":2222,"sessionId":"live-1","cwd":"/w"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("3333.json"),
+            r#"{"pid":3333,"sessionId":"live-2","cwd":"/w"}"#,
+        )
+        .unwrap();
+
+        let hit = registry_entry_for_session(dir.path(), "live-2").expect("session is live");
+        assert_eq!(hit.0, 3333);
+        assert_eq!(hit.1, dir.path().join("3333.json"));
+        assert!(
+            registry_entry_for_session(dir.path(), "not-live").is_none(),
+            "a session with no registry file has no killable process"
+        );
+    }
+
+    /// A `pid:0` registry entry is NEVER returned as a kill target — pid 0 would
+    /// signal the caller's own process group.
+    #[test]
+    fn registry_entry_for_session_skips_pid_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("bad.json"),
+            r#"{"pid":0,"sessionId":"bad"}"#,
+        )
+        .unwrap();
+        assert!(registry_entry_for_session(dir.path(), "bad").is_none());
+    }
+
+    /// `kill_pid` refuses the two casts that would broadcast a signal to a whole
+    /// process group instead of one agent: pid 0 (caller's group) and a pid above
+    /// `i32::MAX` (casts to a negative `pid_t`). Neither performs a real syscall here.
+    #[test]
+    fn kill_pid_refuses_process_group_broadcasts() {
+        assert!(kill_pid(0).is_err(), "pid 0 must be refused");
+        assert!(
+            kill_pid(u32::MAX).is_err(),
+            "a pid that casts to a negative pid_t must be refused"
+        );
     }
 
     /// B4: a finished subagent's wire status. New snake_case value in the

@@ -40,7 +40,8 @@
     "shortDescription": "The agent that watches your agents",
     "longDescription": "WARDEN ingests local agent transcripts and diagnoses agentic workflow leaks using Sakana Fugu.",
     "macOS": {
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "entitlements": "./Entitlements.plist"
     }
   }
 }

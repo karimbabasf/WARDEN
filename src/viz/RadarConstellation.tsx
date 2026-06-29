@@ -53,6 +53,11 @@ export function radarNodeColor(agent: RadarAgent): string {
  * threshold and the working ones are the only things that light the room. Fill is
  * intentionally absent: context is the SIZE channel, not the brightness channel.
  * Selection/hover/legend-emphasis add on top so the focused globe still pops.
+ *
+ * A `terminated` globe is its own case: it wears verdict-amber (see `RadarGlobe`'s
+ * `baseHex`) and gets a small "dying ember" lift — brighter than idle's dim floor so
+ * the kill is RECOGNIZABLE as it implodes, but well under a working blaze so it never
+ * competes with a live agent. Distinct hue + distinct brightness = never mistaken for idle.
  */
 export function radarGlowTarget({
   agent,
@@ -68,10 +73,13 @@ export function radarGlowTarget({
   hovered: boolean;
 }): number {
   const working = agent.status === 'working';
+  const terminated = agent.status === 'terminated';
   // Dim resting floor (idle) vs a strong live blaze (working). The ~9× gap is what
   // makes a running agent unmistakable against the dulled-down rest of the forest.
   const restFloor = isRoot ? 0.22 : 0.16;
-  const liveLift = working ? 2.7 : 0;
+  // working blazes; a terminated globe glows as a mid amber ember (visible, not live);
+  // idle/closed stay at the dim floor.
+  const liveLift = working ? 2.7 : terminated ? 0.85 : 0;
   return Math.max(
     0.05,
     restFloor +
@@ -657,18 +665,22 @@ function LifecycleDriver({
   live,
   mapRef,
   goneIdsRef,
+  tombstoneRef,
   onRenderSetChange,
 }: {
   live: LiveId[];
   mapRef: MutableRefObject<LifecycleMap>;
   /** Ids whose globe should unmount this frame (finished imploding). */
   goneIdsRef: MutableRefObject<Set<string>>;
+  /** Ids that were explicitly killed (`terminated`) — persists across prunes so a
+   *  late/out-of-order payload can never resurrect a killed agent. */
+  tombstoneRef: MutableRefObject<Set<string>>;
   onRenderSetChange: () => void;
 }) {
   const sigRef = useRef('');
   useFrame((_, dtRaw) => {
     const dt = Math.min(dtRaw, 0.05);
-    const reconciled = reconcileLifecycle(mapRef.current, live, dt);
+    const reconciled = reconcileLifecycle(mapRef.current, live, dt, tombstoneRef.current);
 
     // ids that just finished imploding (drop them from the mount set) + ids still
     // mid-implosion that are no longer live (ghosts kept mounted to finish the anim).
@@ -773,6 +785,11 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
   // promptly. `renderTick` is bumped by the driver ONLY when this set (or the live
   // ghost set) changes, so the unmount happens without waiting for the next emit.
   const goneIdsRef = useRef<Set<string>>(new Set());
+  // Ids that were explicitly killed (`terminated`). Unlike the lifecycle map, this set
+  // is NEVER pruned within the session, so a once-killed agent can't be resurrected by
+  // a stray late `radar_state` re-listing it as working/idle before the backend's
+  // terminate write lands. (Reconciler reads + writes it; see radarLifecycle.ts.)
+  const tombstoneRef = useRef<Set<string>>(new Set());
   const [renderTick, setRenderTick] = useState(0);
   const nodeCache = useRef<Map<string, LayoutNode>>(new Map());
   const layoutModel = useMemo(() => radarModelWithoutGone(model, goneIdsRef.current), [model, renderTick]);
@@ -825,6 +842,7 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
         live={live}
         mapRef={lifecycleRef}
         goneIdsRef={goneIdsRef}
+        tombstoneRef={tombstoneRef}
         onRenderSetChange={() => setRenderTick((v) => v + 1)}
       />
 

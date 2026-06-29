@@ -7,5 +7,11 @@
 	     makes the *bundled* .app Dock-less even before Rust runs. -->
 	<key>LSUIElement</key>
 	<true/>
+	<!-- Camera usage string: REQUIRED for macOS to surface the TCC camera
+	     permission prompt on first getUserMedia() call inside the WKWebView.
+	     Without this key macOS silently denies camera access (the prompt never
+	     appears). Used by the in-app MediaPipe hand-gesture navigation. -->
+	<key>NSCameraUsageDescription</key>
+	<string>WARDEN uses your camera for in-app hand-gesture navigation. Video never leaves your machine.</string>
 </dict>
 </plist>

@@ -1,0 +1,138 @@
+/* handMode.css — hand-mode chrome (toggle, camera-live badge, HUD canvas).
+   Uses WARDEN's green-phosphor tokens with literal fallbacks so it renders even if a
+   token is renamed. Positioned bottom-left (toggle) + bottom-right (HUD) to clear the
+   top-left roster button, the NavBar, and the bottom-centre FilterBar. */
+
+.wd-hand-dock {
+  position: fixed;
+  left: 18px;
+  bottom: 18px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  pointer-events: none; /* only the button itself is clickable */
+}
+
+.wd-hand-toggle {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 13px 7px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--dim, #1b6f3a);
+  background: color-mix(in srgb, var(--bg, #020403) 72%, transparent);
+  -webkit-backdrop-filter: blur(7px);
+  backdrop-filter: blur(7px);
+  color: var(--green, #76ff9d);
+  font-family: var(--mono, ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: border-color 160ms ease, color 160ms ease, box-shadow 220ms ease;
+}
+
+.wd-hand-toggle:hover {
+  border-color: var(--green, #76ff9d);
+}
+
+.wd-hand-toggle:focus-visible {
+  outline: none;
+  border-color: var(--acid, #b8ff6b);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--acid, #b8ff6b) 45%, transparent);
+}
+
+.wd-hand-toggle.is-on {
+  border-color: var(--acid, #b8ff6b);
+  color: var(--acid, #b8ff6b);
+  box-shadow: 0 0 18px -4px color-mix(in srgb, var(--acid, #b8ff6b) 60%, transparent);
+}
+
+.wd-hand-glyph {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
+.wd-hand-label {
+  white-space: nowrap;
+}
+
+.wd-hand-live {
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg, #020403) 64%, transparent);
+  color: var(--warn, #ffd166);
+  font-family: var(--mono, ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.wd-hand-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red, #ff5470);
+  box-shadow: 0 0 8px 1px color-mix(in srgb, var(--red, #ff5470) 80%, transparent);
+  animation: wd-hand-pulse 1.4s ease-in-out infinite;
+}
+
+.wd-hand-notice {
+  pointer-events: none;
+  padding: 3px 9px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg, #020403) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn, #ffd166) 55%, transparent);
+  color: var(--warn, #ffd166);
+  font-family: var(--mono, ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
+/* The stylised hand HUD — bottom-right, subtle, non-interactive. Backing canvas is
+   360×420; CSS scales it down for a crisp 2× render. */
+.wd-hand-hud {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 180px;
+  height: 210px;
+  z-index: 19;
+  pointer-events: none;
+  opacity: 0.92;
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--green, #76ff9d) 22%, transparent));
+}
+
+/* Hidden but decoding: present in the DOM and playing so MediaPipe gets frames, but
+   visually gone. Not display:none (which can stop frame production in some engines). */
+.wd-hand-video {
+  position: fixed;
+  width: 2px;
+  height: 2px;
+  right: 0;
+  bottom: 0;
+  opacity: 0.01;
+  pointer-events: none;
+  z-index: -1;
+}
+
+@keyframes wd-hand-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wd-hand-live-dot {
+    animation: none;
+  }
+  .wd-hand-toggle {
+    transition: none;
+  }
+}

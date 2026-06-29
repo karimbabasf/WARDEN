@@ -6,6 +6,10 @@
 /.env
 .DS_Store
 *.log
+
+# DOSSIER on-device embedding model weights (fastembed). Pinned to
+# ~/.warden/fastembed_cache at runtime; this guards the legacy default path.
+.fastembed_cache/
 .build_prompt.txt
 .resume_prompt.txt
 .autorestart.sh
@@ -28,3 +32,7 @@ status.sh
 /warp-flight.png
 /warp-streaks.png
 /radar-real.html
+
+# dev/profile screenshots at repo root (public/ runtime assets stay tracked)
+/*.jpeg
+/*.jpg

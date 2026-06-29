@@ -154,7 +154,19 @@ pub fn assemble(
     let fallback_status = |ext: &str| {
         claude_conversation_status(store, &sessions, ext, now, stale_secs, &mtime_secs_ago)
     };
-    let live = partition_claude(&registry, is_alive, &fallback_status);
+    // "Show use, not mere existence": an alive PID alone is not liveness. An IDE (VS Code)
+    // keeps a Claude process — and its PID — alive long after the session is done, and an
+    // opened-but-never-used historical chat has a live PID whose last activity is ancient.
+    // So a session that is not actively Working is kept only when its last MEANINGFUL
+    // activity is within the root-idle window. `0` disables the gate (PID-only liveness).
+    let root_idle_secs = crate::util::radar_root_idle_secs();
+    let is_active = |ext: &str| {
+        root_idle_secs == 0
+            || claude_last_activity_secs_ago(store, &sessions, ext, now, &mtime_secs_ago)
+                .map(|secs| secs <= root_idle_secs)
+                .unwrap_or(false)
+    };
+    let live = partition_claude(&registry, is_alive, &fallback_status, &is_active);
     let claude_status: HashMap<String, AgentStatus> =
         live.into_iter().map(|(s, st)| (s.session_id, st)).collect();
 
@@ -558,6 +570,70 @@ fn claude_conversation_status(
     match mtime_secs_ago(external_id) {
         Some(secs) if secs < working_secs => AgentStatus::Working,
         _ => AgentStatus::Idle,
+    }
+}
+
+/// Seconds since the session's most recent MEANINGFUL activity (an operator prompt, a
+/// tool call, a tool result, or an assistant turn) across ALL its store rows — the signal
+/// behind the "show use, not mere existence" membership gate. Bookkeeping events
+/// (`TokenUsage`/`Thinking`/`SystemNotice`/...) are ignored: they trail the real action
+/// and would make a long-finished session look freshly active. Falls back to transcript
+/// mtime ONLY when the session has no ingested action events yet (a live session that
+/// predates WARDEN and isn't in the store), and returns `None` when there is no transcript
+/// at all (an opened-but-never-used session → not live).
+fn claude_last_activity_secs_ago(
+    store: &Store,
+    sessions: &[Session],
+    external_id: &str,
+    now: DateTime<Utc>,
+    mtime_secs_ago: &dyn Fn(&str) -> Option<u64>,
+) -> Option<u64> {
+    let newest = sessions
+        .iter()
+        .filter(|s| s.external_id == external_id)
+        .filter_map(|s| {
+            store
+                .session_events(&s.id)
+                .unwrap_or_default()
+                .iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e.event,
+                        Event::UserPrompt { .. }
+                            | Event::ToolCall { .. }
+                            | Event::ToolResult { .. }
+                            | Event::AssistantText { .. }
+                    )
+                })
+                .map(|(_, e)| e.ts)
+                .max()
+        })
+        .max();
+    match newest {
+        Some(ts) => Some(now.signed_duration_since(ts).num_seconds().max(0) as u64),
+        // No ingested action events → file mtime (covers a not-yet-ingested live session);
+        // None when there is no transcript at all (opened-but-never-used).
+        None => mtime_secs_ago(external_id),
+    }
+}
+
+/// Pure: is a Codex session hidden by a WARDEN force-quit? It is hidden iff it carries a
+/// `warden_terminated_at` marker AND the rollout has produced NO newer activity than the
+/// kill (`mtime <= killed_at`). A resume rewrites the rollout past the timestamp, so the
+/// session is shown again. Kept pure (mtime injected) so the resume-safety logic is unit
+/// tested without the filesystem; the `is_codex_open` closure does the `stat`.
+fn codex_force_quit_hidden_at(meta: &serde_json::Value, mtime: Option<DateTime<Utc>>) -> bool {
+    let Some(killed_at) = meta
+        .get("warden_terminated_at")
+        .and_then(|v| v.as_str())
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&Utc))
+    else {
+        return false; // no marker → never hidden
+    };
+    match mtime {
+        Some(m) => m <= killed_at, // no new activity since the kill → still hidden
+        None => true,              // rollout unreadable/gone → stay hidden
     }
 }
 
@@ -1576,7 +1652,20 @@ pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> RadarState {
     let codex_sessions_dir = crate::util::default_codex_sessions();
     let codex_archived_dir = crate::util::default_codex_archived_sessions();
     let live_codex = live_codex_rollout_ids(&codex_sessions_dir, &codex_archived_dir);
-    let is_codex_open = |s: &Session| live_codex.contains(s.external_id.as_str());
+    let is_codex_open = |s: &Session| {
+        if !live_codex.contains(s.external_id.as_str()) {
+            return false;
+        }
+        // A WARDEN force-quit (terminate on a Codex agent) marks the session terminated.
+        // Hide it until the rollout produces NEW activity after the kill (a resume rewrites
+        // it past the timestamp → shown again). Without this the rollout stays under
+        // ~/.codex/sessions, so the globe would linger as idle until the stale cutoff.
+        let mtime = std::fs::metadata(&s.source_path)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(DateTime::<Utc>::from);
+        !codex_force_quit_hidden_at(&s.meta, mtime)
+    };
     assemble(
         store,
         sessions_dir,
@@ -2031,7 +2120,38 @@ mod tests {
             "/tmp/proj/root-ext/subagents/agent-child.jsonl",
             now + chrono::Duration::seconds(20),
         );
-        store.upsert_session_batch(&root, &[], &[], 0).unwrap();
+        // The root needs recent activity to clear the "show use, not mere existence" gate
+        // (an alive registry PID alone no longer keeps a session live). A trailing
+        // UserPrompt at `now` marks it actively in use — the realistic shape of a live root.
+        let root_turn = Turn {
+            id: "root-t0".into(),
+            session_id: "root".into(),
+            parent_id: None,
+            role: Role::User,
+            index: 1,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let root_events = vec![EventRecord {
+            id: "root-p".into(),
+            turn_id: "root-t0".into(),
+            session_id: "root".into(),
+            ts: now,
+            event: Event::UserPrompt {
+                text: "go".into(),
+                attachments: vec![],
+                is_meta: false,
+            },
+            raw_ref: RawRef {
+                source_path: root.source_path.clone(),
+                offset: 0,
+                line: 1,
+            },
+        }];
+        store
+            .upsert_session_batch(&root, &[root_turn], &root_events, 0)
+            .unwrap();
         store.upsert_session_batch(&duplicate, &[], &[], 0).unwrap();
         store.upsert_session_batch(&child, &[], &[], 0).unwrap();
         store.link_child_session("child", "root").unwrap();
@@ -2052,6 +2172,32 @@ mod tests {
         );
         let child = state.agents.iter().find(|a| a.id == "child").unwrap();
         assert_eq!(child.parent_id.as_deref(), Some("root"));
+    }
+
+    /// A force-quit Codex session (carrying `warden_terminated_at`) is hidden until the
+    /// rollout shows NEW activity past the kill — so the globe drops at once, but a resume
+    /// (which rewrites the rollout) brings it back. No marker → never hidden.
+    #[test]
+    fn codex_force_quit_hidden_until_resumed() {
+        let killed_at = Utc::now();
+        let marked = serde_json::json!({ "warden_terminated_at": killed_at.to_rfc3339() });
+        let unmarked = serde_json::json!({});
+        // No marker → visible.
+        assert!(!codex_force_quit_hidden_at(&unmarked, Some(killed_at)));
+        // Marker + no newer activity (mtime before the kill) → hidden.
+        assert!(codex_force_quit_hidden_at(
+            &marked,
+            Some(killed_at - chrono::Duration::seconds(5))
+        ));
+        // Marker + mtime exactly at the kill → hidden (`<=`).
+        assert!(codex_force_quit_hidden_at(&marked, Some(killed_at)));
+        // Marker + NEW activity after the kill (a resume) → visible again.
+        assert!(!codex_force_quit_hidden_at(
+            &marked,
+            Some(killed_at + chrono::Duration::seconds(5))
+        ));
+        // Marker + unreadable/gone rollout → stay hidden.
+        assert!(codex_force_quit_hidden_at(&marked, None));
     }
 
     #[test]

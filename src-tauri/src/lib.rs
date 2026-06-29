@@ -336,6 +336,7 @@ pub fn run() {
             mute_pattern,
             get_radar_state,
             list_fleet,
+            terminate_agent,
             locate_agent,
             warp_to_agent
         ])

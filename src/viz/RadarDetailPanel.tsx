@@ -12,6 +12,7 @@
 // the backend when available, and fall back to honest occupancy/free-space rows.
 
 import type { CSSProperties } from 'react';
+import { useState } from 'react';
 import type { RadarAgent, RadarContextRow } from './radarTypes';
 import { radarSubtitle } from './radarTypes';
 import { radarHarness } from './radarTheme';
@@ -307,12 +308,95 @@ export type RadarDetailPanelProps = {
   /** Fly the camera to a child globe (select + focus). */
   onJumpTo?: (id: string) => void;
   onClose?: () => void;
+  /**
+   * Forcefully terminate this agent. What this does depends on the harness (see
+   * `terminateAffordance` below): a Claude root kills its own process; a Claude
+   * subagent has no process and the control is disabled; a Codex agent force-quits
+   * the shared app-server and so closes EVERY Codex session — which is why that
+   * variant requires an explicit confirm before it fires.
+   */
+  onTerminate?: (id: string) => void | Promise<void>;
 };
 
-export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: RadarDetailPanelProps) {
+/** What the Terminate control should be for a given agent — gated by what's actually
+ *  killable on this machine, so we never show an enabled button that always errors.
+ *   • claude root (depth 0)        → "Terminate", fires straight through.
+ *   • claude subagent (depth > 0)  → DISABLED: it ends with its parent, no own process.
+ *   • codex (any)                  → "Force-quit Codex (all sessions)", confirm-gated:
+ *     it force-quits the shared `codex app-server`, closing every Codex conversation. */
+export type TerminateAffordance = {
+  /** Resting button label (paired with the ⏻ glyph). */
+  label: string;
+  /** false → render the button greyed out with `reason` as subtext. */
+  enabled: boolean;
+  /** true → first click arms a confirm step; only the confirm invokes. */
+  confirm: boolean;
+  /** Short why-line: the disabled reason, or the confirm warning. '' when neither. */
+  reason: string;
+};
+
+export function terminateAffordance(agent: Pick<RadarAgent, 'harness' | 'depth' | 'parentId'>): TerminateAffordance {
+  if (agent.harness === 'codex') {
+    return {
+      label: 'Force-quit Codex (all sessions)',
+      enabled: true,
+      confirm: true,
+      reason: 'Codex shares one process — this closes every Codex session on this machine.',
+    };
+  }
+  const isSubagent = agent.depth > 0 || agent.parentId != null;
+  if (isSubagent) {
+    return {
+      label: 'Terminate',
+      enabled: false,
+      confirm: false,
+      reason: 'Subagents end with their parent — no separate process to terminate.',
+    };
+  }
+  return { label: 'Terminate', enabled: true, confirm: false, reason: '' };
+}
+
+export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose, onTerminate }: RadarDetailPanelProps) {
   const theme = radarHarness(agent.harness);
   const title = agent.label || agent.nickname || agent.id;
   const subtitle = radarSubtitle(agent);
+
+  // What the kill control is for THIS agent (label / enabled / confirm-gated / reason).
+  const term = terminateAffordance(agent);
+
+  // Local guard so a double-click can't fire two kills; surfaces a backend refusal
+  // (e.g. a subagent has no process to kill) inline instead of swallowing it.
+  const [terminating, setTerminating] = useState(false);
+  const [termError, setTermError] = useState<string | null>(null);
+  // Codex force-quit is destructive across ALL its sessions, so the first click only
+  // ARMS a confirm; the second click actually fires. Resets if the user cancels.
+  const [armed, setArmed] = useState(false);
+
+  const fire = async () => {
+    if (terminating || !onTerminate) return;
+    setArmed(false);
+    setTerminating(true);
+    setTermError(null);
+    try {
+      await onTerminate(agent.id);
+    } catch (e) {
+      // Backend rejection (Codex EPERM, a Claude subagent, or no Tauri in the QA
+      // harness) bubbles here verbatim — surface it inline, re-enable, never swallow.
+      setTermError(typeof e === 'string' ? e : (e as Error)?.message ?? 'Termination failed');
+      setTerminating(false);
+    }
+    // On success the agent's globe disappears and this panel unmounts, so there is no
+    // need to reset `terminating` — leaving it true keeps the button inert until then.
+  };
+
+  const handleTerminate = () => {
+    if (terminating || !term.enabled) return;
+    if (term.confirm && !armed) {
+      setArmed(true); // first click arms the confirm; the Confirm button calls `fire`.
+      return;
+    }
+    void fire();
+  };
 
   // Accent is the flat harness hue — colour no longer encodes fill (that's the
   // globe's SIZE channel). CSS resolves `--heat` → `--harness` via its fallback.
@@ -334,12 +418,96 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
           <h2 className="wd-detail-title">{title}</h2>
           {subtitle ? <div className="wd-detail-sub">{subtitle}</div> : null}
         </div>
-        {onClose ? (
-          <button className="wd-detail-close" type="button" onClick={onClose} aria-label="Close detail">
-            ✕
-          </button>
-        ) : null}
+        <div className="wd-detail-actions">
+          {onTerminate ? (
+            armed ? (
+              // Codex confirm state — force-quit closes ALL Codex sessions, so make the
+              // user say so explicitly. Confirm fires; Cancel disarms. (No dedicated CSS:
+              // styled inline from the same palette tokens style.css uses, since the
+              // confirm UI is radar-local.)
+              <div
+                className="wd-detail-actions"
+                role="group"
+                aria-label="Confirm force-quit"
+                style={{ gap: 8 }}
+              >
+                <span
+                  style={{
+                    color: 'var(--warn)',
+                    fontSize: 10,
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  Force-quit ALL Codex sessions?
+                </span>
+                <button
+                  className="wd-detail-terminate"
+                  type="button"
+                  onClick={() => void fire()}
+                  disabled={terminating}
+                  aria-label="Confirm — force-quit every Codex session on this machine"
+                >
+                  <span aria-hidden>⏻</span> {terminating ? 'Quitting…' : 'Confirm'}
+                </button>
+                <button
+                  className="wd-detail-close"
+                  type="button"
+                  onClick={() => setArmed(false)}
+                  disabled={terminating}
+                  aria-label="Cancel force-quit"
+                  style={{ width: 'auto', padding: '0 8px', fontSize: 10, letterSpacing: '0.06em', textTransform: 'uppercase' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                className="wd-detail-terminate"
+                type="button"
+                onClick={handleTerminate}
+                disabled={terminating || !term.enabled}
+                aria-label={term.enabled ? term.label : `${term.label} (unavailable) — ${term.reason}`}
+                title={term.reason || term.label}
+              >
+                <span aria-hidden>⏻</span> {terminating ? 'Terminating…' : term.label}
+              </button>
+            )
+          ) : null}
+          {onClose ? (
+            <button className="wd-detail-close" type="button" onClick={onClose} aria-label="Close detail">
+              ✕
+            </button>
+          ) : null}
+        </div>
       </div>
+      {/* Why the kill control is disabled (a subagent has no own process). Shown only
+          when there's a reason AND the button isn't enabled — never under a live button.
+          Muted/info tone (NOT the red error tone) and styled inline from palette tokens,
+          since this note is radar-local with no dedicated CSS rule. */}
+      {onTerminate && !term.enabled && term.reason ? (
+        <div
+          className="wd-detail-term-note"
+          role="note"
+          style={{
+            margin: '8px 0 0',
+            padding: '6px 9px',
+            borderLeft: '2px solid var(--hair)',
+            background: 'rgba(118, 255, 157, 0.04)',
+            color: 'var(--ink-faint)',
+            fontSize: 11,
+            letterSpacing: '0.03em',
+            lineHeight: 1.5,
+          }}
+        >
+          {term.reason}
+        </div>
+      ) : null}
+      {termError ? (
+        <div className="wd-detail-term-error" role="alert">
+          {termError}
+        </div>
+      ) : null}
 
       <ContextSection agent={agent} />
       <ActivitySection agent={agent} />

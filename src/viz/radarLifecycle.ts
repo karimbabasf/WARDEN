@@ -41,17 +41,36 @@ const CROSSFADE_LAMBDA = 6;
 /**
  * Fold one frame of the live forest into the lifecycle map, returning a NEW map.
  * `dt` is the frame delta in seconds (clamp upstream for tab-away spikes).
+ *
+ * `tombstones` (optional, in/out) is the set of ids that were once `terminated` — an
+ * EXPLICIT kill. Unlike the per-frame map (which `pruneGone` empties), the tombstone
+ * set persists across prunes, so a killed agent can never be resurrected by a late or
+ * out-of-order `radar_state` that re-lists its id as working/idle before the backend's
+ * terminate write has propagated. Any id seen `terminated` is added to the set; any id
+ * already IN the set is forced to stay `gone` whatever status the payload now claims.
+ * `closed` (a natural process exit) is intentionally NOT tombstoned — it may legitimately
+ * reappear (the operator reopens the session), so only an explicit kill is permanent.
+ * Omit the arg (the default) for the pure spawn/implode behaviour with no kill memory.
  */
-export function reconcileLifecycle(prev: LifecycleMap, live: LiveId[], dt: number): LifecycleMap {
+export function reconcileLifecycle(
+  prev: LifecycleMap,
+  live: LiveId[],
+  dt: number,
+  tombstones?: Set<string>,
+): LifecycleMap {
   const next: LifecycleMap = {};
   const liveById = new Map(live.map((l) => [l.id, l]));
 
   // 1) Every live (non-closed) id: spawn or stay alive.
   for (const { id, status } of live) {
     const was = prev[id];
+    // Record an explicit kill so it can never bloom back, even after prune drops its
+    // entry and a stray later payload re-tags it working/idle.
+    if (status === 'terminated') tombstones?.add(id);
     // `closed` (root/process gone) and `terminated` (a finished subagent) are both
-    // terminal: implode once, then stay gone (no resurrection bloom).
-    const closed = status === 'closed' || status === 'terminated';
+    // terminal: implode once, then stay gone (no resurrection bloom). A tombstoned id
+    // (was terminated earlier) is terminal too, no matter what status it now reports.
+    const closed = status === 'closed' || status === 'terminated' || (tombstones?.has(id) ?? false);
 
     if (closed) {
       // A closed id whose gone entry was already pruned (or that first appears

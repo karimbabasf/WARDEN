@@ -110,6 +110,22 @@ pub fn radar_working_stale_secs() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(180)
 }
+/// RADAR: how long since a ROOT session's last MEANINGFUL activity (an operator prompt /
+/// tool call / tool result / assistant turn) it may stay on the radar while merely idle,
+/// before it is dropped from the live forest — the "show use, not mere existence" gate.
+/// This decouples liveness from the OS process: an IDE (VS Code) keeps a Claude process,
+/// and thus its PID, alive long after the session is done — and an opened-but-never-used
+/// historical chat has a live PID whose last activity is ancient — so a PID-only liveness
+/// rule lights both up until the IDE quits. A session that is actively *working* (registry
+/// `status:"busy"`, or an in-flight tool / unanswered prompt) is never dropped by this gate
+/// regardless of age. `WARDEN_RADAR_ROOT_IDLE_SECS` overrides; default 1800s (30min); `0`
+/// disables the gate (revert to PID-only liveness).
+pub fn radar_root_idle_secs() -> u64 {
+    std::env::var("WARDEN_RADAR_ROOT_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(1800)
+}
 /// RADAR: how long a subagent may be silent (no transcript writes) while its parent
 /// is still alive before it is treated as terminated — a BACKSTOP only; the primary
 /// signal is the parent's tool-result for the subagent's call. `WARDEN_RADAR_SUBAGENT_TERMINATE_MS`

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Camera device entitlement.
+	     Only enforced when the app is signed with the Hardened Runtime (release
+	     notarization) or App Sandbox. It is IGNORED for the unsigned/ad-hoc
+	     `pnpm tauri dev` build, so it is safe to keep here and does not change
+	     dev behavior. It is what lets a *signed* WARDEN.app reach the camera for
+	     the in-app MediaPipe hand-gesture navigation without being killed by the
+	     runtime. Paired with NSCameraUsageDescription in Info.plist (the prompt
+	     string). -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+</dict>
+</plist>
