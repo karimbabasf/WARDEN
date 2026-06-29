@@ -810,6 +810,207 @@ impl Store {
             .execute("DELETE FROM habit_resolutions WHERE pattern_id=?", params![pattern_id])?;
         Ok(())
     }
+
+    /// DOSSIER Phase 3 — ensure the per-session micro-summary cache table exists.
+    /// Created lazily (not in `migrate`) so this dossier-only table is additive
+    /// and the rest of the schema is untouched. One row per session (PK
+    /// `session_id`); a content change (new `raw_hash`) or a summarizer-prompt
+    /// change (new `summarizer_version`) replaces the row in place via `put`.
+    fn ensure_dossier_summary_table(&self) -> Result<()> {
+        self.conn().execute_batch(
+            "CREATE TABLE IF NOT EXISTS dossier_session_summaries(\
+                 session_id TEXT PRIMARY KEY,\
+                 raw_hash TEXT,\
+                 summarizer_version TEXT,\
+                 summary TEXT,\
+                 created_at TEXT\
+             );",
+        )?;
+        Ok(())
+    }
+
+    /// DOSSIER Phase 3 — read a cached micro-summary, but ONLY when both the
+    /// stored `raw_hash` and `summarizer_version` match: a mismatch on either is
+    /// a stale row (the transcript changed, or the summarizer prompt changed) and
+    /// returns `None` so the caller re-summarizes. This is what makes "all-time
+    /// over 6 months" tractable — unchanged sessions are never re-summarized.
+    pub fn dossier_summary_get(
+        &self,
+        session_id: &str,
+        raw_hash: &str,
+        summarizer_version: &str,
+    ) -> Result<Option<String>> {
+        self.ensure_dossier_summary_table()?;
+        self.conn()
+            .query_row(
+                "SELECT summary FROM dossier_session_summaries \
+                 WHERE session_id=? AND raw_hash=? AND summarizer_version=?",
+                params![session_id, raw_hash, summarizer_version],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// DOSSIER Phase 3 — upsert a session's micro-summary under its current
+    /// `(raw_hash, summarizer_version)`. PK `session_id`, so a re-summarize after
+    /// a content or prompt change replaces the stale row in place (one row per
+    /// session).
+    pub fn dossier_summary_put(
+        &self,
+        session_id: &str,
+        raw_hash: &str,
+        summarizer_version: &str,
+        summary: &str,
+    ) -> Result<()> {
+        self.ensure_dossier_summary_table()?;
+        self.conn().execute(
+            "INSERT OR REPLACE INTO dossier_session_summaries\
+             (session_id,raw_hash,summarizer_version,summary,created_at) \
+             VALUES(?,?,?,?,?)",
+            params![
+                session_id,
+                raw_hash,
+                summarizer_version,
+                summary,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Created lazily (not in `migrate`) so this dossier-only table is additive
+    /// and the rest of the schema is untouched. One row per `window` (PK
+    /// `window`); a re-build under a new `data_hash` replaces the row in place
+    /// via `put`. The `data_hash` column is the freshness fingerprint of the
+    /// scoped session set — `get` only returns a row whose hash still matches.
+    fn ensure_dossier_profile_table(&self) -> Result<()> {
+        self.conn().execute_batch(
+            "CREATE TABLE IF NOT EXISTS dossier_profiles(\
+                 window TEXT PRIMARY KEY,\
+                 data_hash TEXT,\
+                 profile_json TEXT,\
+                 created_at TEXT\
+             );",
+        )?;
+        Ok(())
+    }
+
+    /// DOSSIER Phase 6 — read a cached profile, but ONLY when the stored
+    /// `data_hash` matches the caller's freshly computed hash of the scoped
+    /// session set. A mismatch means the underlying sessions changed since the
+    /// profile was built, so the row is stale and `get` returns `None` (the
+    /// caller then rebuilds). The cache is keyed by `window` alone — one row per
+    /// window — so the latest build for a window is the only one retained.
+    pub fn dossier_profile_get(
+        &self,
+        window: &str,
+        data_hash: &str,
+    ) -> Result<Option<String>> {
+        self.ensure_dossier_profile_table()?;
+        self.conn()
+            .query_row(
+                "SELECT profile_json FROM dossier_profiles \
+                 WHERE window=? AND data_hash=?",
+                params![window, data_hash],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// DOSSIER Phase 6 — upsert a window's profile under its current
+    /// `data_hash`. PK `window`, so a re-build (after the scoped session set
+    /// changed) replaces the stale row in place (one row per window).
+    pub fn dossier_profile_put(
+        &self,
+        window: &str,
+        data_hash: &str,
+        profile_json: &str,
+    ) -> Result<()> {
+        self.ensure_dossier_profile_table()?;
+        self.conn().execute(
+            "INSERT OR REPLACE INTO dossier_profiles\
+             (window,data_hash,profile_json,created_at) \
+             VALUES(?,?,?,?)",
+            params![
+                window,
+                data_hash,
+                profile_json,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Created lazily (not in `migrate`) so this dossier-only table is additive
+    /// and the rest of the schema is untouched. One row per `content_hash` (PK);
+    /// the vector is stored as a JSON `[f32, ...]` array and tagged with the
+    /// `model` that produced it. Keying reads on `(content_hash, model)` means a
+    /// model swap is a clean cache miss — an embedding from a different model is
+    /// never silently reused (mirrors the `summarizer_version` invalidation on
+    /// the summary cache).
+    fn ensure_dossier_embeddings_table(&self) -> Result<()> {
+        self.conn().execute_batch(
+            "CREATE TABLE IF NOT EXISTS dossier_embeddings(\
+                 content_hash TEXT PRIMARY KEY,\
+                 vector_json TEXT,\
+                 model TEXT,\
+                 created_at TEXT\
+             );",
+        )?;
+        Ok(())
+    }
+
+    /// DOSSIER Phase 4 — read a cached embedding, but ONLY when both the stored
+    /// `content_hash` and `model` match: a different model is a cache miss
+    /// (returns `None`) so the caller re-embeds under the current model rather
+    /// than mixing vector spaces. A row whose `vector_json` fails to parse back
+    /// into `Vec<f32>` is treated as a miss too (a corrupt/legacy row is
+    /// re-embedded rather than poisoning a cluster).
+    pub fn dossier_embedding_get(
+        &self,
+        content_hash: &str,
+        model: &str,
+    ) -> Result<Option<Vec<f32>>> {
+        self.ensure_dossier_embeddings_table()?;
+        let json: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT vector_json FROM dossier_embeddings \
+                 WHERE content_hash=? AND model=?",
+                params![content_hash, model],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str::<Vec<f32>>(&j).ok()))
+    }
+
+    /// DOSSIER Phase 4 — upsert one text's embedding under its `content_hash` and
+    /// the producing `model`. PK `content_hash`, so re-embedding the same text
+    /// (e.g. under a new model) replaces the row in place. The vector is encoded
+    /// as a JSON `[f32, ...]` array.
+    pub fn dossier_embedding_put(
+        &self,
+        content_hash: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<()> {
+        self.ensure_dossier_embeddings_table()?;
+        let vector_json = serde_json::to_string(vector)?;
+        self.conn().execute(
+            "INSERT OR REPLACE INTO dossier_embeddings\
+             (content_hash,vector_json,model,created_at) \
+             VALUES(?,?,?,?)",
+            params![
+                content_hash,
+                vector_json,
+                model,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 const ARTIFACT_SELECT_BY_ID: &str = "SELECT id,finding_id,kind,target_path,diff,status,applied_at,backup_path,block,pre_image_sha256,post_image_sha256 FROM artifacts WHERE id=? LIMIT 1";
@@ -1120,6 +1321,158 @@ mod tests {
             store.radar_token_cache_get("s1", 0xAABB).unwrap(),
             None,
             "the old change-key no longer hits (row was replaced, not duplicated)"
+        );
+    }
+
+    /// DOSSIER Phase 3 — the per-session micro-summary cache. A `put` then a
+    /// `get` with the SAME `(raw_hash, summarizer_version)` returns the stored
+    /// summary verbatim (the happy path that lets "all-time over 6 months" reuse
+    /// one summary forever).
+    #[test]
+    fn dossier_summary_roundtrip() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_summary_put("sess-1", "hash-abc", "dossier-sum-v1", "worked on the ingest watermark")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_summary_get("sess-1", "hash-abc", "dossier-sum-v1")
+                .unwrap(),
+            Some("worked on the ingest watermark".to_string()),
+            "matching session_id + raw_hash + version returns the cached summary"
+        );
+    }
+
+    /// The cache is invalidated when the transcript changed: the stored row's
+    /// `raw_hash` no longer matches the session's current content hash, so the
+    /// summary is stale and must be re-summarized (get ⇒ None).
+    #[test]
+    fn dossier_summary_stale_hash_returns_none() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_summary_put("sess-1", "hash-OLD", "dossier-sum-v1", "stale summary")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_summary_get("sess-1", "hash-NEW", "dossier-sum-v1")
+                .unwrap(),
+            None,
+            "a changed raw_hash is a cache miss (content changed → re-summarize)"
+        );
+    }
+
+    /// The cache is also invalidated when the summarizer prompt/version changes:
+    /// the same content under a newer `summarizer_version` must be re-summarized
+    /// so an old prompt's output is never silently reused.
+    #[test]
+    fn dossier_summary_stale_version_returns_none() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_summary_put("sess-1", "hash-abc", "dossier-sum-v0", "v0 summary")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_summary_get("sess-1", "hash-abc", "dossier-sum-v1")
+                .unwrap(),
+            None,
+            "a changed summarizer_version is a cache miss (re-summarize under new prompt)"
+        );
+    }
+
+    /// DOSSIER Phase 6 — `put` then `get` with the SAME `(window, data_hash)`
+    /// returns the stored profile JSON verbatim. This is the cache-hit path that
+    /// lets a re-open of an unchanged window serve the prior synthesis for free.
+    #[test]
+    fn dossier_profile_roundtrip() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_profile_put("30d", "hash-abc", "{\"window\":\"30d\"}")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_profile_get("30d", "hash-abc")
+                .unwrap(),
+            Some("{\"window\":\"30d\"}".to_string()),
+            "matching window + data_hash returns the cached profile JSON"
+        );
+    }
+
+    /// The profile cache is invalidated when the scoped session set changed: the
+    /// stored row's `data_hash` no longer matches the freshly computed hash, so
+    /// the cached profile is stale and `get` returns `None` (caller rebuilds).
+    /// The cache is keyed by `window` alone (one row per window), so a re-`put`
+    /// under a new hash replaces the row in place.
+    #[test]
+    fn dossier_profile_stale_hash_returns_none() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_profile_put("30d", "hash-OLD", "{\"old\":true}")
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_profile_get("30d", "hash-NEW")
+                .unwrap(),
+            None,
+            "a changed data_hash is a cache miss (sessions changed → rebuild)"
+        );
+    }
+
+    /// DOSSIER Phase 4 — the embedding cache. A `put` then a `get` with the SAME
+    /// `(content_hash, model)` returns the stored vector verbatim (the happy path
+    /// that lets an unchanged descriptor reuse one embedding forever — only
+    /// uncached texts ever hit the model).
+    #[test]
+    fn dossier_embedding_roundtrip() {
+        let store = Store::memory().unwrap();
+        let vec = vec![0.1_f32, -0.2, 0.3, 0.4];
+        store
+            .dossier_embedding_put("hash-abc", "BGESmallENV15", &vec)
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_embedding_get("hash-abc", "BGESmallENV15")
+                .unwrap(),
+            Some(vec),
+            "matching content_hash + model returns the cached vector verbatim"
+        );
+    }
+
+    /// The cache is invalidated when the embedding model changes: the stored
+    /// row's `model` no longer matches, so the vector is from a different space
+    /// and must be re-embedded (get ⇒ None). Mirrors the summarizer_version
+    /// invalidation on the summary cache.
+    #[test]
+    fn dossier_embedding_stale_model_returns_none() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_embedding_put("hash-abc", "old-model", &[0.5_f32, 0.5])
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_embedding_get("hash-abc", "BGESmallENV15")
+                .unwrap(),
+            None,
+            "a different model is a cache miss (vector spaces differ → re-embed)"
+        );
+    }
+
+    /// A re-`put` under the same `content_hash` replaces the row in place (PK is
+    /// `content_hash`), so the latest vector for a text is the only one retained.
+    #[test]
+    fn dossier_embedding_put_replaces_in_place() {
+        let store = Store::memory().unwrap();
+        store
+            .dossier_embedding_put("hash-abc", "BGESmallENV15", &[1.0_f32, 0.0])
+            .unwrap();
+        store
+            .dossier_embedding_put("hash-abc", "BGESmallENV15", &[0.0_f32, 1.0])
+            .unwrap();
+        assert_eq!(
+            store
+                .dossier_embedding_get("hash-abc", "BGESmallENV15")
+                .unwrap(),
+            Some(vec![0.0_f32, 1.0]),
+            "re-put under the same content_hash overwrites the prior vector"
         );
     }
 

@@ -2,6 +2,7 @@ pub mod brain;
 pub mod commands;
 pub mod config;
 pub mod detectors;
+pub mod dossier;
 pub mod featurizer;
 pub mod forge;
 pub mod habits;
@@ -338,7 +339,11 @@ pub fn run() {
             list_fleet,
             terminate_agent,
             locate_agent,
-            warp_to_agent
+            warp_to_agent,
+            get_activity_heatmap,
+            get_efficiency_score,
+            build_profile,
+            get_profile
         ])
         .on_window_event(|window, event| {
             // The red traffic-light button (and ⌘W) asks the window to CLOSE. WARDEN

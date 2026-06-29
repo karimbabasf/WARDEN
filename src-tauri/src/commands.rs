@@ -1123,6 +1123,129 @@ pub async fn warp_to_agent(_id: String) -> Result<(), String> {
     Err(not_in_slice("RADAR warp"))
 }
 
+/// DOSSIER: per-day, per-harness token-activity heatmap for a time `window`.
+///
+/// `window` is one of the frontend toggle strings (`all-time`/`6mo`/`3mo`/`30d`/
+/// `2wk`); an unknown string is an error rather than a silent default. Reads
+/// existing data only (sessions + features) — writes nothing.
+#[tauri::command]
+pub async fn get_activity_heatmap(
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<Vec<crate::dossier::heatmap::ActivityCell>, String> {
+    heatmap_for_window(&state.store, &window, Utc::now())
+}
+
+/// Pure core of [`get_activity_heatmap`] (clock injected so it is deterministically
+/// testable): parse the window string and aggregate, mapping every failure to a
+/// `String` for the IPC boundary.
+fn heatmap_for_window(
+    store: &Store,
+    window: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<crate::dossier::heatmap::ActivityCell>, String> {
+    let w = window
+        .parse::<crate::dossier::scope::Window>()
+        .map_err(|e| e.to_string())?;
+    crate::dossier::heatmap::activity_heatmap(store, w, now).map_err(|e| e.to_string())
+}
+
+/// DOSSIER: pinned-rubric efficiency score (headline 0..1 + per-family
+/// breakdown) for a time `window`.
+///
+/// `window` is one of the frontend toggle strings (`all-time`/`6mo`/`3mo`/`30d`/
+/// `2wk`); an unknown string is an error rather than a silent default. Reads
+/// existing per-session features only (`features_since`) — writes nothing. The
+/// score is reproducible: same sessions + same `RUBRIC_VERSION` → same headline.
+#[tauri::command]
+pub async fn get_efficiency_score(
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<crate::dossier::efficiency::EfficiencyScore, String> {
+    efficiency_for_window(&state.store, &window, Utc::now())
+}
+
+/// Pure core of [`get_efficiency_score`] (clock injected so it is
+/// deterministically testable): parse the window string, then aggregate the
+/// window's per-session efficiency into the headline + family breakdown, mapping
+/// every failure to a `String` for the IPC boundary.
+fn efficiency_for_window(
+    store: &Store,
+    window: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<crate::dossier::efficiency::EfficiencyScore, String> {
+    let w = window
+        .parse::<crate::dossier::scope::Window>()
+        .map_err(|e| e.to_string())?;
+    crate::dossier::efficiency::window_efficiency(store, w, now).map_err(|e| e.to_string())
+}
+
+/// DOSSIER Phase 6 — build (or serve from cache) the full operator [`Profile`]
+/// for one `window`, emitting a `dossier_progress` event at each pipeline stage.
+///
+/// `window` is one of the frontend toggle strings (`all-time`/`6mo`/`3mo`/`30d`/
+/// `2wk`); an unknown string is an error, not a silent default. Holds `run_lock`
+/// for the whole build so two builds (or a build and a diagnosis run) can't race
+/// — both walk the same store/cache and a concurrent rebuild would waste LLM
+/// calls. Synthesis degrades internally, so this returns a profile even with no
+/// engine configured and never touches the network in that case.
+#[tauri::command]
+pub async fn build_profile(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<crate::dossier::types::Profile, String> {
+    let _guard = state.run_lock.lock().await;
+    let w = window
+        .parse::<crate::dossier::scope::Window>()
+        .map_err(|e| e.to_string())?;
+    let brain = Brain::new(state.store.clone());
+    crate::dossier::build::build_profile(&state.store, &brain, w, Utc::now(), Some(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// DOSSIER Phase 6 — return the cached [`Profile`] for `window` IFF it is fresh,
+/// else `None` (the frontend then calls [`build_profile`]).
+///
+/// "Fresh" means the cached row's `data_hash` still equals the hash of the
+/// window's CURRENT scoped session set — so an ingest since the last build is a
+/// miss. Read-only: no lock, no LLM, no writes.
+#[tauri::command]
+pub async fn get_profile(
+    state: tauri::State<'_, AppState>,
+    window: String,
+) -> Result<Option<crate::dossier::types::Profile>, String> {
+    cached_profile_for_window(&state.store, &window, Utc::now())
+}
+
+/// Pure core of [`get_profile`] (clock injected for deterministic tests): parse
+/// the window, recompute the scoped session set's `data_hash`, and return the
+/// cached profile only if the stored hash matches. Every failure maps to a
+/// `String` for the IPC boundary.
+fn cached_profile_for_window(
+    store: &Store,
+    window: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<crate::dossier::types::Profile>, String> {
+    let w = window
+        .parse::<crate::dossier::scope::Window>()
+        .map_err(|e| e.to_string())?;
+    let sessions =
+        crate::dossier::scope::scoped_sessions(store, w, now).map_err(|e| e.to_string())?;
+    let hash = crate::dossier::build::data_hash(&sessions);
+    let kebab = serde_json::to_value(w)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .ok_or_else(|| "failed to encode window".to_string())?;
+    match store.dossier_profile_get(&kebab, &hash).map_err(|e| e.to_string())? {
+        Some(json) => serde_json::from_str(&json)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1707,5 +1830,129 @@ mod tests {
         assert_eq!(blo.credits, 0, "three consecutive slips leave zero credits");
         assert!(!blo.fixed, "an all-slip habit is never fixed");
         assert_eq!(blo.last_credit_at, None);
+    }
+
+    /// DOSSIER `get_activity_heatmap` core: a valid window string over a seeded
+    /// store returns a non-empty per-day heatmap (the value the command hands the
+    /// frontend), and the actual `token_burn_total` flows through.
+    #[test]
+    fn heatmap_for_window_returns_cells_for_valid_window() {
+        let store = Store::memory().unwrap();
+        seed_session(&store, "c1", Harness::ClaudeCode, 1);
+        store.save_feature(&context_feature("c1"), "test").unwrap();
+
+        let cells = heatmap_for_window(&store, "all-time", Utc::now()).unwrap();
+        assert_eq!(cells.len(), 1, "one seeded session → one day cell");
+        assert_eq!(cells[0].total_tokens, 1_000);
+        assert_eq!(cells[0].by_harness[0].harness, "claude_code");
+    }
+
+    /// DOSSIER `get_activity_heatmap` core: an unknown window string is mapped to
+    /// an `Err(String)` (the error the command surfaces), not a silent default.
+    #[test]
+    fn heatmap_for_window_errors_on_bad_window() {
+        let store = Store::memory().unwrap();
+        let err = heatmap_for_window(&store, "last-tuesday", Utc::now());
+        assert!(err.is_err(), "an unknown window string must be an error");
+    }
+
+    /// DOSSIER `get_efficiency_score` core: a valid window returns a reproducible
+    /// `EfficiencyScore` over the in-window features. Two seeded sessions →
+    /// `session_count == 2`, the pinned rubric version, and a headline that is
+    /// byte-identical on a repeat call (the golden reproducibility property).
+    #[test]
+    fn efficiency_for_window_scores_seeded_features() {
+        let store = Store::memory().unwrap();
+        seed_session(&store, "c1", Harness::ClaudeCode, 1);
+        seed_session(&store, "c2", Harness::ClaudeCode, 1);
+        store.save_feature(&context_feature("c1"), "test").unwrap();
+        store.save_feature(&context_feature("c2"), "test").unwrap();
+
+        let a = efficiency_for_window(&store, "all-time", Utc::now()).unwrap();
+        assert_eq!(a.session_count, 2, "two seeded sessions in window");
+        assert_eq!(a.rubric_version, "dossier-rubric-v1");
+        assert_eq!(a.families.len(), 7);
+        assert!((0.0..=1.0).contains(&a.headline));
+
+        let b = efficiency_for_window(&store, "all-time", Utc::now()).unwrap();
+        assert_eq!(
+            a.headline.to_bits(),
+            b.headline.to_bits(),
+            "same input + same RUBRIC_VERSION → identical headline"
+        );
+    }
+
+    /// DOSSIER `get_efficiency_score` core: an unknown window string is an
+    /// `Err(String)`, not a silent default (mirrors the heatmap contract).
+    #[test]
+    fn efficiency_for_window_errors_on_bad_window() {
+        let store = Store::memory().unwrap();
+        let err = efficiency_for_window(&store, "yesterday-ish", Utc::now());
+        assert!(err.is_err(), "an unknown window string must be an error");
+    }
+
+    /// DOSSIER `get_profile` core: with nothing built, a fresh-cache lookup
+    /// returns `Ok(None)` (frontend then builds); once a profile is cached under
+    /// the window's current `data_hash`, the same lookup returns `Some`. Proves
+    /// the freshness gate keys on `(window, data_hash)` and never invents data.
+    #[test]
+    fn cached_profile_for_window_miss_then_hit() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        seed_session(&store, "c1", Harness::ClaudeCode, 1);
+        store.save_feature(&context_feature("c1"), "test").unwrap();
+
+        // Cache cold ⇒ None (no row for this window yet).
+        assert!(
+            cached_profile_for_window(&store, "all-time", now)
+                .unwrap()
+                .is_none(),
+            "no cached profile ⇒ Ok(None)"
+        );
+
+        // Persist a profile under the window's CURRENT hash, then it's a hit.
+        let sessions =
+            crate::dossier::scope::scoped_sessions(&store, crate::dossier::scope::Window::AllTime, now)
+                .unwrap();
+        let hash = crate::dossier::build::data_hash(&sessions);
+        let json = serde_json::to_string(&fixture_profile()).unwrap();
+        store.dossier_profile_put("all-time", &hash, &json).unwrap();
+
+        let hit = cached_profile_for_window(&store, "all-time", now).unwrap();
+        assert!(hit.is_some(), "a fresh cached row ⇒ Some(profile)");
+        assert_eq!(hit.unwrap().window, crate::dossier::scope::Window::ThirtyDays);
+    }
+
+    /// DOSSIER `get_profile` core: an unknown window string is an `Err(String)`,
+    /// never a silent default.
+    #[test]
+    fn cached_profile_for_window_errors_on_bad_window() {
+        let store = Store::memory().unwrap();
+        let err = cached_profile_for_window(&store, "last-tuesday", Utc::now());
+        assert!(err.is_err(), "an unknown window string must be an error");
+    }
+
+    /// A minimal valid `Profile` for cache round-trip tests (its `window` field
+    /// is a sentinel — `ThirtyDays` — distinct from the lookup window so the
+    /// test proves the row is returned verbatim, not re-derived).
+    fn fixture_profile() -> crate::dossier::types::Profile {
+        crate::dossier::types::Profile {
+            window: crate::dossier::scope::Window::ThirtyDays,
+            generated_at: Utc::now(),
+            data_hash: "sentinel".into(),
+            rubric_version: "dossier-rubric-v1".into(),
+            efficiency: crate::dossier::efficiency::EfficiencyScore {
+                headline: 0.5,
+                rubric_version: "dossier-rubric-v1".into(),
+                families: vec![],
+                session_count: 1,
+            },
+            dimensions: vec![],
+            ranked_leaks: vec![],
+            archetypes: vec![],
+            trajectory: vec![],
+            session_count: 1,
+            detector_only: true,
+        }
     }
 }

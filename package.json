@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
+    "dev": "vite",
+    "dev:app": "node scripts/warden-dev.mjs",
     "build": "tsc && vite build",
     "test": "vitest run",
     "tauri": "tauri"
