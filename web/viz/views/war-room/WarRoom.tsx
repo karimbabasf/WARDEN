@@ -37,7 +37,7 @@ import { radarHarness } from '@/viz/modules/radar/radarTheme';
 import { TransitionDriver, FoldGroup, makeTransition, beginTransition } from '@/viz/shared/scene/Transition';
 import type { RadarAgent, RadarSceneModel } from '@/viz/shared/types/radarTypes';
 import { targetDim, matchesFilter, type EmphasisFilter } from '@/viz/shared/lib/emphasis';
-import { subtreeBounds, type Bounds } from '@/viz/shared/scene/cameraFraming';
+import { subtreeBounds, enclosingBounds, type Bounds } from '@/viz/shared/scene/cameraFraming';
 import { frameloopFor } from '@/viz/shared/scene/frameloop';
 import IntroVideo from '@/viz/modules/cinematics/IntroVideo';
 
@@ -268,6 +268,8 @@ function SceneShell({
   emphasisFilter,
   focusBounds,
   homeSignal,
+  sceneBounds,
+  flyMode,
   scaleRef,
   onHover,
   onLeave,
@@ -286,6 +288,10 @@ function SceneShell({
   focusBounds: Bounds | null;
   /** Monotonic signal that asks the shared CameraRig to return to home. */
   homeSignal: number;
+  /** Bounding sphere of the active forest; scales the camera's zoom + framing. */
+  sceneBounds: Bounds | null;
+  /** When true, the shared CameraRig switches to free-fly (WASD) navigation. */
+  flyMode: boolean;
   scaleRef: { current: number };
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
@@ -323,7 +329,13 @@ function SceneShell({
           deliberately subordinate so the data reads first (see StarCatalog.tsx). */}
       <StarCatalog />
 
-      <CameraRig selected={selected} focusBounds={focusBounds} homeSignal={homeSignal} />
+      <CameraRig
+        selected={selected}
+        focusBounds={focusBounds}
+        homeSignal={homeSignal}
+        sceneBounds={sceneBounds}
+        flyMode={flyMode}
+      />
 
       {/* The ONLY thing that swaps on a tab change — folded to nothing at the swap
           midpoint, then bloomed back. The shell around it never remounts. */}
@@ -463,6 +475,43 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const activeLayout = displayTab === 'radar' ? radarLayout : layout;
   const selectedNode = useMemo(() => activeLayout.nodes.find((n) => n.id === selectedId) ?? null, [activeLayout, selectedId]);
   const hoveredNode = useMemo(() => activeLayout.nodes.find((n) => n.id === hoveredId) ?? null, [activeLayout, hoveredId]);
+
+  // Bounding sphere of the active forest, measured from the same laid-out positions
+  // the forest renders — feeds the camera so zoom-out + framing SCALE to however
+  // large the constellation is (fixes "can't zoom out / can't reach far agents"
+  // once the forest grows past the old fixed cage).
+  const sceneBounds = useMemo<Bounds | null>(
+    () =>
+      enclosingBounds(
+        activeLayout.nodes.map((n) => ({
+          pos: [n.position.x, n.position.y, n.position.z] as [number, number, number],
+          radius: n.radius,
+        })),
+      ),
+    [activeLayout],
+  );
+
+  // Free-fly toggle: `F` flips the shared camera between uncaged orbit and a 6DOF
+  // fly camera; `Esc` exits fly. Guarded so it never fires while typing in the ask
+  // bar (or any input / contenteditable).
+  const [flyMode, setFlyMode] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      const typing =
+        !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+      if (typing) return;
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        setFlyMode((v) => !v);
+      } else if (e.key === 'Escape') {
+        setFlyMode((v) => (v ? false : v));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   // Roster (left sidebar) content for the constellation on screen: radar agents
   // grouped by harness with subagents nested, or the habit orbs grouped by harness.
@@ -812,6 +861,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           emphasisFilter={emphasisFilter}
           focusBounds={focusBounds}
           homeSignal={homeSignal}
+          sceneBounds={sceneBounds}
+          flyMode={flyMode}
           scaleRef={foldScale}
           onHover={onHover}
           onLeave={onLeave}
@@ -819,6 +870,31 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           onClear={onClear}
         />
       </Canvas>
+
+      {flyMode && (
+        <div
+          role="status"
+          style={{
+            position: 'fixed',
+            bottom: 18,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 20,
+            padding: '6px 14px',
+            borderRadius: 6,
+            background: 'rgba(2,4,3,0.82)',
+            border: '1px solid #1b6f3a',
+            color: '#76ff9d',
+            font: '11px/1 "SF Mono", Menlo, monospace',
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            pointerEvents: 'none',
+            boxShadow: '0 0 18px rgba(118,255,157,0.18)',
+          }}
+        >
+          ✈ free fly · W A S D move · Q / E roll · R / F up·down · drag to look · F or Esc to exit
+        </div>
+      )}
 
       <NavBar
         tab={tab}

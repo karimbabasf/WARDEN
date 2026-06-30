@@ -1,59 +1,55 @@
-// CameraRig.tsx — free orbit + cinematic focus + fly-to framing.
+// CameraRig.tsx — uncaged orbit (scaled to the forest) + cinematic focus + free fly.
 //
-// The old camera could only snap between a fixed overview and a fixed per-node
-// pose (no drag at all), which is exactly why the scene "felt locked". This rig
-// gives drei OrbitControls with inertia (drag to spin the constellation like a
-// 3D model, scroll to dolly) AND a damped focus move: when an orb is selected we
-// glide the orbit target onto it and pull the camera in, KEEPING the user's
-// current viewing angle (we only recenter + change distance). Crucially, we also
-// REMEMBER the exact pose the user dove FROM, and restore it verbatim when they
-// back out — so zooming out never leaves the camera tilted at a strange angle.
+// HISTORY: the first rig was a deliberately *caged* turntable — pan off, a fixed
+// maxDistance of 24, the pivot pinned to origin, tilt clamped. That was right for
+// a small cluster but with a large agent forest it traps you: you can't dolly out
+// far enough to see everything, and you can't move the pivot to reach agents far
+// from centre. This rig removes the cage and scales to the actual scene:
 //
-// This file also tames the close-zoom fisheye (FOV taper), locks the orbit pivot
-// to the constellation centre (no pan; zoom dollies to centre, not the cursor) so
-// the cluster can never be roamed off-screen, and adds a cinematic fly-to that
-// frames a bounded subtree (`focusBounds`) over ~700ms with an expo ease — again
-// preserving the current viewing angle, and easing back to the overview pose
-// when the bounds clear.
+//   • ZOOM + FRAMING SCALE TO BOUNDS. Given the forest's bounding sphere
+//     (`sceneBounds`), max dolly and the camera far-plane grow to contain it, and
+//     "home"/overview frames the whole thing — so you can always pull back to see
+//     every agent, however many there are.
+//   • PAN + ZOOM-TO-CURSOR + FREE ROTATION. Right-drag pans the pivot across the
+//     forest, the wheel dollies toward the cursor, and tilt is (almost) unclamped
+//     — so distant agents are reachable and you can turn freely.
+//   • FREE-FLY MODE (`flyMode`). Swaps OrbitControls for a 6DOF fly camera
+//     (WASD/QE + drag-look) for soaring through a big forest; on exit it re-pivots
+//     the orbit onto whatever you were looking at, so the handoff is seamless.
+//
+// The cinematic moves are unchanged: selecting an orb glides the target onto it
+// (preserving your viewing angle) and remembers the dive-from pose to restore on
+// back-out; `focusBounds` flies to frame a subtree over ~700ms; `homeSignal`
+// eases back to the (now bounds-framed) overview.
 
-import { useEffect, useRef } from 'react';
-import { useFrame } from '@react-three/fiber';
-import { OrbitControls } from '@react-three/drei';
+import { useEffect, useMemo, useRef } from 'react';
+import { useFrame, useThree } from '@react-three/fiber';
+import { OrbitControls, FlyControls } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode } from '@/viz/shared/types/orbTypes';
 import { frameDistance, type Bounds } from './cameraFraming';
-import { cameraTargetForOrbitOverview } from './useOrbCamera';
 
-// Pulled back from the old 9.4 so the (now more widely spaced) constellation
-// opens with room to breathe instead of filling the frame.
+// Fallbacks used when no scene bounds are available yet (empty forest).
 const OVERVIEW_DIST = 12.6;
-// Raised from 3 → 5: at 3 the camera sat so close that the wide-angle lens
-// bent the scene (fisheye). 5 keeps you out of that distortion zone, and the
-// FOV taper below mops up whatever remains on the closest approach.
 const MIN_DIST = 5;
-const MAX_DIST = 24;
+const MAX_DIST_BASE = 24; // floor — small scenes keep the original cosy range.
+const DEFAULT_FAR = 140;
+const FOV_FALLBACK = 46; // matches the <Canvas camera> fov in WarRoom.
 
-// FOV taper. The Canvas mounts the perspective camera at 46° (see WarRoom).
-// As the camera's distance to its target approaches MIN_DIST we ease the FOV
-// down toward FOV_NEAR — a narrower lens flattens perspective and counteracts
-// the wide-angle stretch you get up close. `FOV_TAPER_START` is the distance at
-// which the taper begins; beyond it the lens stays at its natural 46°.
+// FOV taper (orbit only): ease the lens from FOV_FAR toward FOV_NEAR on close
+// approach to counteract wide-angle fisheye.
 const FOV_FAR = 46;
 const FOV_NEAR = 38;
 const FOV_TAPER_START = 9;
-// Below this projection-matrix delta we skip updateProjectionMatrix() — no point
-// reuploading the matrix for a sub-hundredth-of-a-degree change every frame.
 const FOV_EPS = 0.01;
 
-// Fly-to framing timing — an explicit ~700ms expo ease-in-out (per spec), so the
-// move reads as a deliberate cinematic push rather than the springy settle used
-// for orb selection.
+// Fly-to framing timing — explicit ~700ms expo ease (a deliberate cinematic push).
 const FLY_MS = 700;
 
 const dir = new THREE.Vector3();
+// A pleasant 3/4 overview angle the home/reset pose is framed along.
+const OVERVIEW_DIR = new THREE.Vector3(0.35, 0.28, 1).normalize();
 
-// Expo ease-in-out on a normalized 0..1 clock. Slow lift-off, fast middle, soft
-// landing — the classic "camera move" feel.
 function easeInOutExpo(t: number): number {
   if (t <= 0) return 0;
   if (t >= 1) return 1;
@@ -66,41 +62,82 @@ export function CameraRig({
   selected,
   focusBounds = null,
   homeSignal = 0,
+  sceneBounds = null,
+  flyMode = false,
 }: {
   selected: LayoutNode | null;
-  // Fly-to target: when non-null we frame this bounded subtree; when it returns
-  // to null we ease back to the overview/home pose. Defaults to null so callers
-  // that don't drive it yet (and the type-checker) are happy.
   focusBounds?: Bounds | null;
   homeSignal?: number;
+  /** Bounding sphere of the whole active forest; scales zoom range + framing. */
+  sceneBounds?: Bounds | null;
+  /** When true, swap OrbitControls for the free-fly camera. */
+  flyMode?: boolean;
 }) {
-  // OrbitControls instance — typed loosely to avoid importing three's controls type.
+  const { camera } = useThree();
   const controls = useRef<any>(null);
-  // The pose we're animating toward — both the orbit target AND the camera position,
-  // lerped together so focus-in and back-out are one consistent motion.
   const targetGoal = useRef(new THREE.Vector3(0, 0, 0));
   const posGoal = useRef(new THREE.Vector3(0, 1, OVERVIEW_DIST));
   const animating = useRef(false);
   const wasSelected = useRef(false);
-  // The exact pose (camera position + orbit target) the user was viewing from BEFORE
-  // diving into an orb. Captured on the overview→focus edge and restored on back-out.
   const homeTarget = useRef(new THREE.Vector3(0, 0, 0));
   const homePos = useRef<THREE.Vector3 | null>(null);
 
-  // Timed fly-to state. When `flyActive` is set we interpolate from a captured
-  // start pose to the goal pose over FLY_MS using the expo ease, taking priority
-  // over the damped-lerp path. The decay-lerp then settles any residual.
   const flyActive = useRef(false);
   const flyClock = useRef(0);
   const flyFromTarget = useRef(new THREE.Vector3());
   const flyFromPos = useRef(new THREE.Vector3());
-  // Edge detector for focusBounds (compare by value — center + radius — so a
-  // re-rendered-but-identical Bounds object doesn't retrigger the flight).
   const lastFocusKey = useRef<string | null>(null);
   const lastHomeSignal = useRef(homeSignal);
+  const wasFly = useRef(false);
 
-  // Kick off a timed fly-to toward the current goal poses (already set by the
-  // caller below). Captures the live pose as the interpolation start.
+  // Derive the scaled limits from the forest bounds. overviewDist frames the whole
+  // forest at ~50% fill (breathing room); maxDist gives headroom beyond that; far
+  // grows to contain the farthest dolly. Clamped so a pathological layout can't
+  // produce an absurd projection.
+  const fit = useMemo(() => {
+    if (!sceneBounds || sceneBounds.radius <= 0) {
+      return {
+        center: new THREE.Vector3(0, 0, 0),
+        radius: 0,
+        overviewDist: OVERVIEW_DIST,
+        maxDist: MAX_DIST_BASE,
+        far: DEFAULT_FAR,
+      };
+    }
+    const r = sceneBounds.radius;
+    const overviewDist = frameDistance(r, FOV_FALLBACK, 0.5);
+    const maxDist = Math.min(1400, Math.max(MAX_DIST_BASE, overviewDist * 1.35));
+    const far = Math.min(4000, Math.max(DEFAULT_FAR, (maxDist + r) * 1.3));
+    return {
+      center: new THREE.Vector3(sceneBounds.center[0], sceneBounds.center[1], sceneBounds.center[2]),
+      radius: r,
+      overviewDist,
+      maxDist,
+      far,
+    };
+  }, [sceneBounds]);
+  // Latest-value ref so the [selected]/[focusBounds]/[homeSignal] effects and the
+  // frame loop read current limits WITHOUT taking sceneBounds as a dependency
+  // (which would re-fire the cinematic moves on every layout tick).
+  const fitRef = useRef(fit);
+  fitRef.current = fit;
+
+  // Grow the camera far-plane to contain the scaled dolly range.
+  useEffect(() => {
+    const cam = camera as THREE.PerspectiveCamera;
+    if (cam.far !== fit.far) {
+      cam.far = fit.far;
+      cam.updateProjectionMatrix();
+    }
+  }, [camera, fit.far]);
+
+  // Bounds-framed overview/home pose (replaces the old static one).
+  function writeOverviewPose(target: THREE.Vector3, pos: THREE.Vector3) {
+    const f = fitRef.current;
+    target.copy(f.center);
+    pos.copy(f.center).addScaledVector(OVERVIEW_DIR, f.overviewDist);
+  }
+
   function beginFly() {
     const c = controls.current;
     if (c) {
@@ -115,13 +152,11 @@ export function CameraRig({
     animating.current = true;
   }
 
-  // --- Orb selection focus (unchanged behaviour: damped glide that preserves
-  // angle, with verbatim home capture/restore on the focus edge). ---
+  // --- Orb selection focus: damped glide that preserves angle, with verbatim home
+  // capture/restore on the focus edge. ---
   useEffect(() => {
     const c = controls.current;
     if (selected) {
-      // Capture the dive-from pose ONCE, on the null→selected edge, so a back-out
-      // returns exactly here (orb→orb jumps keep the original home).
       if (!wasSelected.current && c) {
         homeTarget.current.copy(c.target);
         homePos.current = (homePos.current ?? new THREE.Vector3()).copy(c.object.position);
@@ -129,9 +164,11 @@ export function CameraRig({
       wasSelected.current = true;
 
       targetGoal.current.set(selected.position.x, selected.position.y, selected.position.z);
-      const dist = THREE.MathUtils.clamp(2.6 + Math.max(0.6, selected.radius) * 3.4, MIN_DIST, MAX_DIST);
-      // Glide in along the CURRENT viewing direction (preserve the user's angle):
-      // recenter on the orb, sit `dist` back along the existing view ray.
+      const dist = THREE.MathUtils.clamp(
+        2.6 + Math.max(0.6, selected.radius) * 3.4,
+        MIN_DIST,
+        fitRef.current.maxDist,
+      );
       if (c) {
         dir.copy(c.object.position).sub(c.target);
         if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1);
@@ -142,37 +179,27 @@ export function CameraRig({
       posGoal.current.copy(targetGoal.current).addScaledVector(dir, dist);
     } else {
       wasSelected.current = false;
-      // Restore the captured dive-from pose verbatim so backing out returns to the
-      // exact angle + zoom the user left — never thrown off. Fallback to a canonical
-      // overview only if nothing was ever captured (shouldn't happen in practice).
       if (homePos.current) {
         targetGoal.current.copy(homeTarget.current);
         posGoal.current.copy(homePos.current);
       } else {
-        targetGoal.current.set(0, 0, 0);
-        posGoal.current.set(0, 1, OVERVIEW_DIST);
+        writeOverviewPose(targetGoal.current, posGoal.current);
       }
     }
     animating.current = true;
-    // A selection move cancels any in-flight fly-to (they target the same poses).
     flyActive.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
 
-  // --- Cinematic fly-to framing. On a focusBounds *change*, frame the bounded
-  // subtree by easing camera + target over FLY_MS, PRESERVING the current view
-  // angle (we recenter on the bounds centre and dolly along the existing ray to
-  // the frameDistance). When focusBounds clears, ease back to the home/overview
-  // pose the same way. ---
+  // --- Cinematic fly-to framing on focusBounds change (preserve view angle). ---
   useEffect(() => {
     const c = controls.current;
 
     if (focusBounds) {
       const key = `${focusBounds.center[0]},${focusBounds.center[1]},${focusBounds.center[2]}:${focusBounds.radius}`;
-      if (key === lastFocusKey.current) return; // identical bounds — nothing to do.
+      if (key === lastFocusKey.current) return;
       lastFocusKey.current = key;
 
-      // Capture the dive-from pose once, on the overview→framed edge, so clearing
-      // the bounds returns to exactly where the user was (mirrors orb focus).
       if (homePos.current == null && c) {
         homeTarget.current.copy(c.target);
         homePos.current = new THREE.Vector3().copy(c.object.position);
@@ -180,8 +207,7 @@ export function CameraRig({
 
       targetGoal.current.set(focusBounds.center[0], focusBounds.center[1], focusBounds.center[2]);
       const fov = c ? c.object.fov : FOV_FAR;
-      const dist = THREE.MathUtils.clamp(frameDistance(focusBounds.radius, fov), MIN_DIST, MAX_DIST);
-      // Preserve the current viewing direction (don't snap to a canned angle).
+      const dist = THREE.MathUtils.clamp(frameDistance(focusBounds.radius, fov), MIN_DIST, fitRef.current.maxDist);
       if (c) {
         dir.copy(c.object.position).sub(c.target);
         if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1);
@@ -192,16 +218,13 @@ export function CameraRig({
       posGoal.current.copy(targetGoal.current).addScaledVector(dir, dist);
       beginFly();
     } else {
-      // Cleared. If we were framed, ease back to the captured home pose (or the
-      // canonical overview if none was captured), again over the timed expo.
       if (lastFocusKey.current !== null) {
         lastFocusKey.current = null;
         if (homePos.current) {
           targetGoal.current.copy(homeTarget.current);
           posGoal.current.copy(homePos.current);
         } else {
-          targetGoal.current.set(0, 0, 0);
-          posGoal.current.set(0, 1, OVERVIEW_DIST);
+          writeOverviewPose(targetGoal.current, posGoal.current);
         }
         beginFly();
       }
@@ -213,26 +236,58 @@ export function CameraRig({
     if (homeSignal === lastHomeSignal.current) return;
     lastHomeSignal.current = homeSignal;
 
-    const home = cameraTargetForOrbitOverview();
-    targetGoal.current.set(home.lookAt.x, home.lookAt.y, home.lookAt.z);
-    posGoal.current.set(home.position.x, home.position.y, home.position.z);
+    writeOverviewPose(targetGoal.current, posGoal.current);
     homeTarget.current.copy(targetGoal.current);
-    homePos.current = new THREE.Vector3(home.position.x, home.position.y, home.position.z);
+    homePos.current = new THREE.Vector3().copy(posGoal.current);
     wasSelected.current = false;
     lastFocusKey.current = null;
     beginFly();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [homeSignal]);
 
+  // --- Fly-mode handoff. Entering fly: stop orbit animation and reset the lens
+  // (FlyControls takes the camera). Exiting fly: OrbitControls has just remounted —
+  // re-pivot it onto whatever the camera is looking at so orbiting resumes around
+  // your current focus rather than snapping back to the old centre. ---
+  useEffect(() => {
+    if (flyMode) {
+      animating.current = false;
+      flyActive.current = false;
+      const cam = camera as THREE.PerspectiveCamera;
+      if (cam.fov !== FOV_FAR) {
+        cam.fov = FOV_FAR;
+        cam.updateProjectionMatrix();
+      }
+      wasFly.current = true;
+    } else if (wasFly.current) {
+      wasFly.current = false;
+      const c = controls.current;
+      const fwd = camera.getWorldDirection(dir).clone();
+      const pivotDist = THREE.MathUtils.clamp(
+        fitRef.current.radius > 0 ? fitRef.current.radius * 0.4 : 8,
+        MIN_DIST,
+        fitRef.current.maxDist,
+      );
+      const tgt = camera.position.clone().addScaledVector(fwd, pivotDist);
+      if (c) {
+        c.target.copy(tgt);
+        c.update();
+      }
+      targetGoal.current.copy(tgt);
+      posGoal.current.copy(camera.position);
+      animating.current = false;
+      flyActive.current = false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flyMode]);
+
   useFrame((_, dtRaw) => {
     const c = controls.current;
-    if (!c) return;
+    if (!c) return; // fly mode (OrbitControls unmounted) — FlyControls drives the camera.
     const dt = Math.min(dtRaw, 0.05);
 
     if (animating.current) {
       if (flyActive.current) {
-        // Timed expo ease-in-out over FLY_MS. Interpolate from the captured start
-        // pose to the goal pose so the motion lands precisely on a known frame.
         flyClock.current += dt * 1000;
         const t = Math.min(1, flyClock.current / FLY_MS);
         const e = easeInOutExpo(t);
@@ -240,12 +295,10 @@ export function CameraRig({
         c.object.position.copy(flyFromPos.current).lerp(posGoal.current, e);
         if (t >= 1) {
           flyActive.current = false;
-          // Snap exactly onto the goal, then let the settle check below stop us.
           c.target.copy(targetGoal.current);
           c.object.position.copy(posGoal.current);
         }
       } else {
-        // Damped exponential glide (orb-selection focus / residual settle).
         const k = 1 - Math.exp(-7 * dt);
         c.target.lerp(targetGoal.current, k);
         c.object.position.lerp(posGoal.current, k);
@@ -260,13 +313,9 @@ export function CameraRig({
       }
     }
 
-    // FOV taper — counteract close-zoom fisheye. Map the live camera→target
-    // distance onto [FOV_NEAR, FOV_FAR]: at/under MIN_DIST use the narrow lens,
-    // at/over FOV_TAPER_START use the natural lens, smoothstep between. Damp the
-    // actual fov toward that target and only reupload the projection matrix on
-    // frames where it meaningfully moved.
+    // FOV taper — counteract close-zoom fisheye.
     const camDist = c.object.position.distanceTo(c.target);
-    const taper = THREE.MathUtils.smoothstep(camDist, MIN_DIST, FOV_TAPER_START); // 0 near → 1 far
+    const taper = THREE.MathUtils.smoothstep(camDist, MIN_DIST, FOV_TAPER_START);
     const fovTarget = THREE.MathUtils.lerp(FOV_NEAR, FOV_FAR, taper);
     const fovK = 1 - Math.exp(-7 * dt);
     const nextFov = THREE.MathUtils.lerp(c.object.fov, fovTarget, fovK);
@@ -278,6 +327,13 @@ export function CameraRig({
     c.update();
   });
 
+  // Free-fly: a 6DOF camera (WASD move, Q/E roll, R/F up·down, drag to look). Speed
+  // scales to the forest so you can cross a big one in a few seconds.
+  if (flyMode) {
+    const speed = Math.max(6, fit.radius * 0.6);
+    return <FlyControls movementSpeed={speed} rollSpeed={0.25} dragToLook />;
+  }
+
   return (
     <OrbitControls
       ref={controls}
@@ -286,17 +342,17 @@ export function CameraRig({
       dampingFactor={0.15}
       rotateSpeed={0.95}
       zoomSpeed={1.0}
-      // Locked pivot: zoom dollies toward the orbit centre (NOT the cursor) and pan
-      // is OFF, so the constellation stays pinned in frame. Browsing is then always
-      // a clean turntable orbit around the cluster — you can't slide the pivot off
-      // into empty space and lose your bearings.
-      enablePan={false}
+      // UNCAGED: pan is on (right-drag slides the pivot across the forest), zoom
+      // dollies toward the cursor (fly toward the agent you're looking at), and the
+      // dolly range scales to the forest so you can always pull back to see it all.
+      enablePan
+      screenSpacePanning
+      zoomToCursor
       minDistance={MIN_DIST}
-      maxDistance={MAX_DIST}
-      // Keep the constellation upright-ish; allow looking from above/below but
-      // never fully over the poles (avoids the disorienting flip).
-      minPolarAngle={Math.PI * 0.16}
-      maxPolarAngle={Math.PI * 0.84}
+      maxDistance={fit.maxDist}
+      // Near-full vertical freedom (a hair off the poles to avoid the gimbal flip).
+      minPolarAngle={0.01}
+      maxPolarAngle={Math.PI - 0.01}
     />
   );
 }

@@ -20,6 +20,37 @@ export function frameDistance(
 }
 
 /**
+ * Enclosing sphere for an ENTIRE laid-out forest — every node, regardless of
+ * hierarchy. Centre is the midpoint of the axis-aligned extent; radius is the
+ * farthest node surface from that centre. Returns null for an empty set.
+ *
+ * The camera uses this to scale its zoom-out range and overview framing to
+ * however large the constellation actually is, instead of a fixed cage.
+ */
+export function enclosingBounds(
+  points: { pos: [number, number, number]; radius: number }[],
+): Bounds | null {
+  if (points.length === 0) return null;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const { pos, radius } of points) {
+    minX = Math.min(minX, pos[0] - radius);
+    minY = Math.min(minY, pos[1] - radius);
+    minZ = Math.min(minZ, pos[2] - radius);
+    maxX = Math.max(maxX, pos[0] + radius);
+    maxY = Math.max(maxY, pos[1] + radius);
+    maxZ = Math.max(maxZ, pos[2] + radius);
+  }
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+  let radius = 0;
+  for (const { pos, radius: r } of points) {
+    const d = Math.hypot(pos[0] - cx, pos[1] - cy, pos[2] - cz) + r;
+    if (d > radius) radius = d;
+  }
+  return { center: [cx, cy, cz], radius };
+}
+
+/**
  * Computes the enclosing sphere for `rootId` and all its transitive descendants.
  *
  * - Builds a children map from `agents[].parentId`.
