@@ -33,6 +33,7 @@ import { FilterBar } from './FilterBar';
 import { Sidebar } from './Sidebar';
 import { buildRadarRoster, buildHabitsRoster } from '@/viz/modules/radar/rosterTree';
 import { layoutRadarScene, isFlatAgent } from '@/viz/modules/radar/radarLayout';
+import { applyLayoutOverrides, NO_OVERRIDES, type PositionOverrides } from '@/viz/shared/scene/positionOverrides';
 import { radarHarness } from '@/viz/modules/radar/radarTheme';
 import { TransitionDriver, FoldGroup, makeTransition, beginTransition } from '@/viz/shared/scene/Transition';
 import type { RadarAgent, RadarSceneModel } from '@/viz/shared/types/radarTypes';
@@ -270,6 +271,8 @@ function SceneShell({
   homeSignal,
   sceneBounds,
   flyMode,
+  overrides,
+  onMoveNode,
   scaleRef,
   onHover,
   onLeave,
@@ -292,6 +295,10 @@ function SceneShell({
   sceneBounds: Bounds | null;
   /** When true, the shared CameraRig switches to free-fly (WASD) navigation. */
   flyMode: boolean;
+  /** Sticky user position overrides for dragged nodes. */
+  overrides: PositionOverrides;
+  /** Commit a dragged node's new position. */
+  onMoveNode: (id: string, pos: [number, number, number]) => void;
   scaleRef: { current: number };
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
@@ -350,6 +357,8 @@ function SceneShell({
           onLeave={onLeave}
           onSelect={onSelect}
           onClear={onClear}
+          overrides={overrides}
+          onMoveNode={onMoveNode}
         />
       ) : (
         <HabitsForest
@@ -403,6 +412,16 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // breadcrumb UI; here we only own the stack + expose pop/clear.
   const [focusStack, setFocusStack] = useState<string[]>([]);
   const [homeSignal, setHomeSignal] = useState(0);
+  // Sticky user-dragged node positions (re-applied after every layout so they
+  // survive live data updates). Cleared by the double-click home/reset gesture.
+  const [overrides, setOverrides] = useState<PositionOverrides>(NO_OVERRIDES);
+  const onMoveNode = useCallback((id: string, pos: [number, number, number]) => {
+    setOverrides((m) => {
+      const next = new Map(m);
+      next.set(id, pos);
+      return next;
+    });
+  }, []);
   const [fixPreview, setFixPreview] = useState<FixPreview | undefined>();
   const [loadingFix, setLoadingFix] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -457,14 +476,14 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   }, []);
 
   const model = useMemo(() => scene.orbScene ?? fallbackOrbScene(scene), [scene.orbScene, scene.candidates]);
-  const layout = useMemo(() => layoutOrbScene(model), [model]);
+  const layout = useMemo(() => applyLayoutOverrides(layoutOrbScene(model), overrides), [model, overrides]);
   // Radar forest (live agents) — empty until the backend emits `radar_state`.
   const radarModel = useMemo<RadarSceneModel>(() => scene.radarScene ?? { agents: [], generatedAt: '' }, [scene.radarScene]);
   const chromeModel = useMemo(() => chromeModelForTab(tab, model, radarModel), [tab, model, radarModel]);
   // Memoised radar layout — also the source of the `id → {pos, radius}` map that
   // `subtreeBounds` frames against. Computed from the same deterministic layout the
   // forest renders, so the camera frames exactly what's on screen.
-  const radarLayout = useMemo(() => layoutRadarScene(radarModel), [radarModel]);
+  const radarLayout = useMemo(() => applyLayoutOverrides(layoutRadarScene(radarModel), overrides), [radarModel, overrides]);
   const radarPositions = useMemo(() => {
     const m = new Map<string, { pos: [number, number, number]; radius: number }>();
     for (const n of radarLayout.nodes) {
@@ -577,6 +596,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       }
       event.preventDefault();
       setHoveredId(null);
+      setOverrides(NO_OVERRIDES); // reset any manual agent arrangement to the honest layout
       setHomeSignal((signal) => signal + 1);
     },
     [focusStack.length, selectedId],
@@ -863,6 +883,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           homeSignal={homeSignal}
           sceneBounds={sceneBounds}
           flyMode={flyMode}
+          overrides={overrides}
+          onMoveNode={onMoveNode}
           scaleRef={foldScale}
           onHover={onHover}
           onLeave={onLeave}

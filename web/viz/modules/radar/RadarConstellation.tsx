@@ -31,6 +31,8 @@ import { reconcileLifecycle, pruneGone, isVisible, type LifecycleEntry, type Lif
 import { RadarHoverCard } from './RadarHoverCard';
 import { radarCanvasCamera } from '@/viz/shared/scene/useOrbCamera';
 import { targetDim, matchesFilter, type EmphasisFilter } from '@/viz/shared/lib/emphasis';
+import { useNodeDrag, type DragApi } from '@/viz/shared/scene/useNodeDrag';
+import { applyLayoutOverrides, NO_OVERRIDES, type PositionOverrides } from '@/viz/shared/scene/positionOverrides';
 
 const BG = '#020403';
 const WHITE = new THREE.Color('#ffffff');
@@ -170,6 +172,7 @@ function RadarGlobe({
   onHover,
   onLeave,
   onSelect,
+  drag,
 }: {
   node: LayoutNode;
   selected: boolean;
@@ -187,6 +190,8 @@ function RadarGlobe({
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
+  /** Screen-plane drag API — lets this globe be moved in space. Dev harness omits it. */
+  drag?: DragApi;
 }) {
   const group = useRef<THREE.Group>(null!);
   const innerCage = useRef<THREE.Group>(null!);
@@ -301,10 +306,17 @@ function RadarGlobe({
     s.live = damp(s.live, targetLive, 3.5, dt);
     s.dim = damp(s.dim, targetDim, 6, dt);
     s.colorDim = damp(s.colorDim, targetColorDim, DIM_LAMBDA, dt);
-    // damp the node toward its layout position so re-layouts glide, not jump.
-    s.pos.x = damp(s.pos.x, node.position.x, 4, dt);
-    s.pos.y = damp(s.pos.y, node.position.y, 4, dt);
-    s.pos.z = damp(s.pos.z, node.position.z, 4, dt);
+    if (drag?.dragRef.current.id === node.id) {
+      // Being dragged: snap 1:1 to the live pointer position (no damp / yank-back).
+      s.pos.x = drag.dragRef.current.pos.x;
+      s.pos.y = drag.dragRef.current.pos.y;
+      s.pos.z = drag.dragRef.current.pos.z;
+    } else {
+      // damp the node toward its layout position so re-layouts glide, not jump.
+      s.pos.x = damp(s.pos.x, node.position.x, 4, dt);
+      s.pos.y = damp(s.pos.y, node.position.y, 4, dt);
+      s.pos.z = damp(s.pos.z, node.position.z, 4, dt);
+    }
 
     const liveK = s.live; // 0 idle .. 1 working — the brightness channel
     const pulse = liveK * pulseWave; // gated by liveness: 0 when idle, ±liveK when working
@@ -382,8 +394,13 @@ function RadarGlobe({
           document.body.style.cursor = '';
           onLeave(node);
         }}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          drag?.begin(node.id, node.position);
+        }}
         onClick={(e) => {
           e.stopPropagation();
+          if (drag?.movedRef.current) return; // a drag just ended — don't also select.
           onSelect(node);
         }}
       >
@@ -636,6 +653,10 @@ export type RadarConstellationProps = {
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
   onClear: () => void;
+  /** Sticky user position overrides for dragged nodes (re-applied after layout). */
+  overrides?: PositionOverrides;
+  /** Commit a node's new dragged position. */
+  onMoveNode?: (id: string, pos: [number, number, number]) => void;
 };
 
 export function radarModelWithoutGone(model: RadarSceneModel, goneIds: ReadonlySet<string>): RadarSceneModel {
@@ -755,7 +776,7 @@ function RadarClusterLabels({ clusters }: { clusters: RadarCluster[] }) {
 // the persistent scene shell (WarRoom's SceneShell), so a Habits↔Radar swap only ever
 // remounts this forest (already folded to nothing) and the void never flickers. The
 // standalone dev harness wraps this in `RadarSceneBody`, which adds its own shell.
-export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
+export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, onHover, onLeave, onSelect, onClear, overrides = NO_OVERRIDES, onMoveNode }: RadarConstellationProps) {
   // The dev harness mounts the radar without a fold; default to a stable scale-1 ref.
   const fallbackScale = useRef(1);
   const sref = scaleRef ?? fallbackScale;
@@ -776,7 +797,14 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
   const [renderTick, setRenderTick] = useState(0);
   const nodeCache = useRef<Map<string, LayoutNode>>(new Map());
   const layoutModel = useMemo(() => radarModelWithoutGone(model, goneIdsRef.current), [model, renderTick]);
-  const layout = useMemo(() => layoutRadarScene(layoutModel), [layoutModel]);
+  const layout = useMemo(
+    () => applyLayoutOverrides(layoutRadarScene(layoutModel), overrides),
+    [layoutModel, overrides],
+  );
+  // Screen-plane drag: commit a moved node's position into the override map (which
+  // re-runs the layout so links/labels/camera reconcile). OrbitControls is disabled
+  // for the duration of a drag by the hook.
+  const drag = useNodeDrag(onMoveNode ?? (() => {}));
   // Intentional mid-render write: append-only + idempotent. We record each live
   // node's latest layout so an imploding node keeps its last position after it
   // leaves `model.agents`. Writing the same id twice with the current layout is a
@@ -849,6 +877,7 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
               onHover={onHover}
               onLeave={onLeave}
               onSelect={onSelect}
+              drag={drag}
             />
           ))}
         </group>
