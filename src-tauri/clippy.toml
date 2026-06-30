@@ -1,0 +1,4 @@
+# Tests legitimately use `.unwrap()`/`.expect()` for brevity and to fail loudly;
+# the `unwrap_used` guardrail (Cargo.toml [lints.clippy]) targets non-test code only.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

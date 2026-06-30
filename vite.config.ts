@@ -1,10 +1,16 @@
 /// <reference types="vitest/config" />
+import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   clearScreen: false,
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./web', import.meta.url))
+    }
+  },
   server: {
     port: 1420,
     strictPort: true,
@@ -24,6 +30,6 @@ export default defineConfig({
     // jsdom` pragma (same pattern as mount.test.ts). The default env stays node;
     // broadening `include` to also match `.test.tsx` is all that is needed.
     environment: 'node',
-    include: ['src/**/*.test.ts', 'src/**/*.test.tsx']
+    include: ['web/**/*.test.ts', 'web/**/*.test.tsx']
   }
 });

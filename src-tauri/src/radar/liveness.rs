@@ -249,13 +249,12 @@ pub fn read_claude_registry(dir: &Path) -> Vec<(u32, serde_json::Value)> {
     out
 }
 
-/// True when `pid` is a live process. Uses `kill(pid, 0)` — sends no signal, just
-/// probes existence/permission. Thin syscall wrapper kept OUT of the unit-tested
-/// path (callers inject a predicate into [`partition_claude`] instead).
+/// True when `pid` is a live process. Delegates to the platform seam
+/// ([`crate::platform::process_alive`]) so the OS-specific syscall lives in one
+/// place. Thin wrapper kept OUT of the unit-tested path (callers inject a
+/// predicate into [`partition_claude`] instead).
 pub fn pid_alive(pid: u32) -> bool {
-    // SAFETY: kill with signal 0 performs only the error checking and never
-    // delivers a signal; it cannot corrupt memory.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    crate::platform::process_alive(pid)
 }
 
 #[cfg(test)]

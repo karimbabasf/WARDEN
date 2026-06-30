@@ -667,9 +667,9 @@ fn parse_slice(
             other => {
                 let obj = meta
                     .get_mut("ignored_record_types")
-                    .unwrap()
+                    .expect("meta is initialized with an ignored_record_types object at fn start")
                     .as_object_mut()
-                    .unwrap();
+                    .expect("ignored_record_types is initialized as a json object at fn start");
                 let n = obj.get(other).and_then(Value::as_u64).unwrap_or(0) + 1;
                 obj.insert(other.to_string(), json!(n));
             }

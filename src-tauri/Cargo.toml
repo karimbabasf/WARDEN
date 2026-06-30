@@ -49,6 +49,13 @@ walkdir = "2.5"
 [dev-dependencies]
 tempfile = "3.23"
 
+# Guardrail (REFACTOR.md D2.3): production-code `.unwrap()` is DENIED. All prior
+# sites were converted to `.expect("invariant")` (the sanctioned escape hatch for
+# true invariants). `cargo clippy` now hard-fails on any new non-test unwrap. Tests
+# are exempt (see clippy.toml). This denies only this one lint, not all warnings.
+[lints.clippy]
+unwrap_used = "deny"
+
 # `pnpm tauri dev` builds WARDEN in the debug profile. The CPU-hot dev-time paths
 # — walkdir over the Codex roots, serde_json transcript parsing, rusqlite/FTS5,
 # notify, tiktoken — all live in DEPENDENCIES. Compiling those with optimizations

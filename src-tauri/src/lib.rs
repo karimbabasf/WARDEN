@@ -8,6 +8,7 @@ pub mod habits;
 pub mod harness_theme;
 pub mod ingest;
 pub mod ir;
+pub mod platform;
 pub mod radar;
 pub mod redaction;
 pub mod scaffold;
@@ -49,8 +50,8 @@ struct HabitsHeartbeatGuard {
     tick: tauri::async_runtime::JoinHandle<()>,
 }
 use tauri::tray::TrayIconBuilder;
-use tauri::{ActivationPolicy, Emitter, Manager};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri::{Emitter, Manager};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 /// Reveal the persistent overlay window: show, focus, and signal the frontend to
 /// animate in. Native macOS chrome owns drag, zoom, and resize, so we show the
@@ -89,8 +90,7 @@ pub fn run() {
             //    window behaves like a regular macOS app. The overlay is still
             //    created hidden (tauri.conf.json visible:false) and summoned via
             //    the hotkey/tray; the daemon stays alive when the window is hidden.
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(ActivationPolicy::Regular);
+            platform::apply_activation_policy(app);
 
             let state = AppState::init().map_err(|e| format!("state init: {e}"))?;
 
@@ -278,10 +278,7 @@ pub fn run() {
             // 6) Global hotkey ⌘⌥⌃M, replacing the old ⌘⇧Space. Guard with
             //    is_registered so a hot-reload / re-setup does not double-register.
             let handle = app.handle().clone();
-            let shortcut = Shortcut::new(
-                Some(Modifiers::SUPER | Modifiers::ALT | Modifiers::CONTROL),
-                Code::KeyM,
-            );
+            let shortcut = platform::primary_hotkey();
             let gs = app.global_shortcut();
             if !gs.is_registered(shortcut) {
                 gs.on_shortcut(shortcut, move |_app, _shortcut, event| {
@@ -355,15 +352,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building WARDEN")
         .run(|app, event| {
-            // macOS: clicking the Dock icon while the overlay is hidden re-summons
-            // it — the standard "reopen" gesture for a window that closes-to-hide.
-            #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = event {
+            // Re-summon on the OS "reopen" gesture (macOS Dock-icon click on a
+            // hidden window). The platform seam decides whether this event is it.
+            if platform::is_reopen_event(&event) {
                 summon_overlay(app);
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = (&app, &event);
             }
         });
 }

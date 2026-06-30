@@ -187,7 +187,7 @@ impl Store {
             Some(m) => m,
             None => {
                 meta = serde_json::json!({});
-                meta.as_object_mut().unwrap()
+                meta.as_object_mut().expect("json object literal just assigned above")
             }
         };
         for (k, v) in patch_obj {
@@ -403,8 +403,8 @@ impl Store {
                 turn_id: turn.id.clone(),
                 session_id: turn.session_id.clone(),
                 ts: parse_dt(&r.get::<_, String>(9)?),
-                event: serde_json::from_str(&payload).unwrap(),
-                raw_ref: serde_json::from_str(&raw).unwrap(),
+                event: serde_json::from_str(&payload).expect("event payload was serialized by us; valid JSON"),
+                raw_ref: serde_json::from_str(&raw).expect("raw_ref was serialized by us; valid JSON"),
             };
             Ok((turn, ev))
         })?;
@@ -444,7 +444,7 @@ impl Store {
         let mut st = c.prepare("SELECT vector_json FROM features")?;
         let rows = st.query_map([], |r| {
             let s: String = r.get(0)?;
-            Ok(serde_json::from_str(&s).unwrap())
+            Ok(serde_json::from_str(&s).expect("feature vector was serialized by us; valid JSON"))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
@@ -637,7 +637,7 @@ impl Store {
         Ok(())
     }
     pub fn latest_diagnosis(&self) -> Result<Option<Diagnosis>> {
-        self.conn().query_row("SELECT id,created_at,ranked_findings_json,do_json,stop_json,narrative,detector_only FROM diagnoses ORDER BY created_at DESC LIMIT 1", [], |r| Ok(Diagnosis{id:r.get(0)?,created_at:parse_dt(&r.get::<_,String>(1)?),ranked_findings:serde_json::from_str(&r.get::<_,String>(2)?).unwrap(),do_items:serde_json::from_str(&r.get::<_,String>(3)?).unwrap(),stop_items:serde_json::from_str(&r.get::<_,String>(4)?).unwrap(),narrative:r.get(5)?,detector_only:r.get::<_,i64>(6)?!=0})).optional().map_err(Into::into)
+        self.conn().query_row("SELECT id,created_at,ranked_findings_json,do_json,stop_json,narrative,detector_only FROM diagnoses ORDER BY created_at DESC LIMIT 1", [], |r| Ok(Diagnosis{id:r.get(0)?,created_at:parse_dt(&r.get::<_,String>(1)?),ranked_findings:serde_json::from_str(&r.get::<_,String>(2)?).expect("ranked_findings serialized by us; valid JSON"),do_items:serde_json::from_str(&r.get::<_,String>(3)?).expect("do_items serialized by us; valid JSON"),stop_items:serde_json::from_str(&r.get::<_,String>(4)?).expect("stop_items serialized by us; valid JSON"),narrative:r.get(5)?,detector_only:r.get::<_,i64>(6)?!=0})).optional().map_err(Into::into)
     }
     pub fn save_fugu_run(
         &self,
