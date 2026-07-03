@@ -136,7 +136,9 @@ impl Brain {
                 }
             ],
             "stream": false,
-            "max_tokens": 400
+            // Reasoning bills against max_tokens on GLM-5.2; 400 starved the
+            // 120-word summary whenever the model thought first. 1200 leaves room.
+            "max_tokens": 1200
         });
 
         let resp = self.send_chat_completions(&body).send().await?;
@@ -149,11 +151,15 @@ impl Brain {
             ));
         }
         let response: Value = resp.json().await?;
-        let summary = extract_chat_message_content(&response);
-        if summary.trim().is_empty() {
+        // STRICT content only — never the reasoning fallback: a starved summary
+        // must fail loudly (build skips the session, retries next run) rather
+        // than silently caching chain-of-thought as the session's summary.
+        let summary = strip_think_blocks(&extract_strict_message_content(&response));
+        let summary = summary.trim();
+        if summary.is_empty() {
             return Err(anyhow!("brain summarize_session returned empty content"));
         }
-        Ok(summary)
+        Ok(summary.to_string())
     }
 
     /// DOSSIER Phase 5b — the profile-synthesis LLM stage (spec §5, §11, §16).
@@ -189,7 +195,9 @@ impl Brain {
                 }
             ],
             "stream": false,
-            "max_tokens": 1600
+            // The 7-dimension profile JSON is large, and GLM-5.2's reasoning bills
+            // against the same budget — 1600 truncated real syntheses mid-object.
+            "max_tokens": 4000
         });
 
         let resp = self.send_chat_completions(&body).send().await?;
@@ -206,14 +214,10 @@ impl Brain {
         if content.trim().is_empty() {
             return Err(anyhow!("brain synthesize_profile returned empty content"));
         }
-        // The model is asked for a bare JSON object; tolerate stray code fences.
-        let cleaned = content
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
-        let parsed: Value = serde_json::from_str(cleaned).with_context(|| {
+        // Same reasoning-hardened repair as the pipeline stages: tolerates think
+        // blocks, prose preambles, stray draft braces, and fenced payloads.
+        let cleaned = repair_json_text(&content);
+        let parsed: Value = serde_json::from_str(&cleaned).with_context(|| {
             format!(
                 "brain synthesize_profile content was not valid JSON: {}",
                 cleaned.chars().take(400).collect::<String>()
@@ -561,86 +565,61 @@ impl Brain {
             .unwrap_or(true);
 
         let started = Instant::now();
-        let (out, usage) = if self.app.is_none()
-            || std::env::var("WARDEN_BRAIN_TRANSPORT").as_deref() == Ok("curl")
-        {
-            self.call_json_with_curl(stage, model, schema, &prompt, structured_output)
-                .await?
-        } else if !stream_enabled {
-            match self
-                .call_json_blocking(stage, model, schema.clone(), &prompt, structured_output)
-                .await
-            {
-                Ok(ok) => ok,
-                Err(blocking_error) => {
+        // GLM-5.2 reasons before it answers, and the reasoning bills against
+        // max_tokens. A response that ends with finish_reason=length therefore
+        // usually means "the model thought so long it never got to the JSON" —
+        // the one failure a bigger budget genuinely fixes, so it earns exactly
+        // one automatic retry at 3× the stage budget.
+        let base_budget = brain_max_tokens(stage);
+        let mut budget = base_budget;
+        let mut attempt = 0u8;
+        let (val, usage) = loop {
+            attempt += 1;
+            let (out, usage, finish) = self
+                .transport_cascade(
+                    stage,
+                    model,
+                    schema.clone(),
+                    &prompt,
+                    structured_output,
+                    stream_enabled,
+                    budget,
+                )
+                .await?;
+
+            let starved = finish.as_deref() == Some("length");
+            if out.trim().is_empty() {
+                if starved && attempt == 1 {
                     tracing::warn!(
                         stage,
-                        error = %blocking_error,
-                        "blocking brain response failed; retrying with curl transport"
+                        budget,
+                        "brain reasoning consumed the whole token budget; retrying with 3x headroom"
                     );
-                    self.call_json_with_curl(stage, model, schema, &prompt, structured_output)
-                        .await?
+                    budget = base_budget * 3;
+                    continue;
                 }
+                return Err(anyhow!("brain {stage} returned empty output"));
             }
-        } else {
-            match self
-                .call_json_streaming(stage, model, schema.clone(), &prompt, structured_output)
-                .await
-            {
-                Ok(ok) => ok,
-                Err(stream_error) => {
+
+            let parsed_text = repair_json_text(&out);
+            match serde_json::from_str::<Value>(&parsed_text) {
+                Ok(v) => break (v, usage),
+                Err(e) if starved && attempt == 1 => {
                     tracing::warn!(
                         stage,
-                        error = %stream_error,
-                        "streaming brain response failed; retrying non-streaming"
+                        budget,
+                        error = %e,
+                        "brain answer truncated at the token ceiling; retrying with 3x headroom"
                     );
-                    match self
-                        .call_json_blocking(
-                            stage,
-                            model,
-                            schema.clone(),
-                            &prompt,
-                            structured_output,
-                        )
-                        .await
-                    {
-                        Ok(ok) => ok,
-                        Err(blocking_error) => {
-                            tracing::warn!(
-                                stage,
-                                error = %blocking_error,
-                                "reqwest non-streaming brain response failed; retrying with curl transport"
-                            );
-                            match self
-                                .call_json_with_curl(
-                                    stage,
-                                    model,
-                                    schema,
-                                    &prompt,
-                                    structured_output,
-                                )
-                                .await
-                            {
-                                Ok(ok) => ok,
-                                Err(curl_error) => {
-                                    return Err(anyhow!(
-                                        "streaming brain {stage} failed ({stream_error}); reqwest non-streaming retry failed ({blocking_error}); curl retry failed ({curl_error})"
-                                    ));
-                                }
-                            }
-                        }
-                    }
+                    budget = base_budget * 3;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e)
+                        .context(format!("parse brain {stage} JSON: {parsed_text}")));
                 }
             }
         };
-
-        if out.trim().is_empty() {
-            return Err(anyhow!("brain {stage} returned empty output"));
-        }
-
-        let parsed_text = repair_json_text(&out);
-        let val: Value = serde_json::from_str(&parsed_text)
-            .with_context(|| format!("parse brain {stage} JSON: {parsed_text}"))?;
         let u = usage_tokens(&usage);
         self.emit_usage(stage, &u);
         self.store.save_fugu_run(
@@ -657,6 +636,113 @@ impl Brain {
         Ok(serde_json::from_value(val)?)
     }
 
+    /// One attempt across the transport ladder (streaming → blocking → curl,
+    /// honoring headless/env overrides), at an explicit `max_tokens` budget.
+    /// Returns the raw assembled content, the usage object, and finish_reason.
+    async fn transport_cascade(
+        &self,
+        stage: &str,
+        model: &str,
+        schema: Value,
+        prompt: &str,
+        structured_output: BrainStructuredOutput,
+        stream_enabled: bool,
+        max_tokens: u64,
+    ) -> Result<(String, Value, Option<String>)> {
+        if self.app.is_none() || std::env::var("WARDEN_BRAIN_TRANSPORT").as_deref() == Ok("curl") {
+            return self
+                .call_json_with_curl(stage, model, schema, prompt, structured_output, max_tokens)
+                .await;
+        }
+        if !stream_enabled {
+            return match self
+                .call_json_blocking(
+                    stage,
+                    model,
+                    schema.clone(),
+                    prompt,
+                    structured_output,
+                    max_tokens,
+                )
+                .await
+            {
+                Ok(ok) => Ok(ok),
+                Err(blocking_error) => {
+                    tracing::warn!(
+                        stage,
+                        error = %blocking_error,
+                        "blocking brain response failed; retrying with curl transport"
+                    );
+                    self.call_json_with_curl(
+                        stage,
+                        model,
+                        schema,
+                        prompt,
+                        structured_output,
+                        max_tokens,
+                    )
+                    .await
+                }
+            };
+        }
+        match self
+            .call_json_streaming(
+                stage,
+                model,
+                schema.clone(),
+                prompt,
+                structured_output,
+                max_tokens,
+            )
+            .await
+        {
+            Ok(ok) => Ok(ok),
+            Err(stream_error) => {
+                tracing::warn!(
+                    stage,
+                    error = %stream_error,
+                    "streaming brain response failed; retrying non-streaming"
+                );
+                match self
+                    .call_json_blocking(
+                        stage,
+                        model,
+                        schema.clone(),
+                        prompt,
+                        structured_output,
+                        max_tokens,
+                    )
+                    .await
+                {
+                    Ok(ok) => Ok(ok),
+                    Err(blocking_error) => {
+                        tracing::warn!(
+                            stage,
+                            error = %blocking_error,
+                            "reqwest non-streaming brain response failed; retrying with curl transport"
+                        );
+                        match self
+                            .call_json_with_curl(
+                                stage,
+                                model,
+                                schema,
+                                prompt,
+                                structured_output,
+                                max_tokens,
+                            )
+                            .await
+                        {
+                            Ok(ok) => Ok(ok),
+                            Err(curl_error) => Err(anyhow!(
+                                "streaming brain {stage} failed ({stream_error}); reqwest non-streaming retry failed ({blocking_error}); curl retry failed ({curl_error})"
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn call_json_streaming(
         &self,
         stage: &str,
@@ -664,8 +750,10 @@ impl Brain {
         schema: Value,
         prompt: &str,
         structured_output: BrainStructuredOutput,
-    ) -> Result<(String, Value)> {
-        let body = chat_completions_body(stage, model, schema, prompt, true, structured_output);
+        max_tokens: u64,
+    ) -> Result<(String, Value, Option<String>)> {
+        let body =
+            chat_completions_body(stage, model, schema, prompt, true, structured_output, max_tokens);
         let resp = self.send_chat_completions(&body).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
@@ -680,6 +768,7 @@ impl Brain {
         let mut buf = String::new();
         let mut out = String::new();
         let mut usage = json!({});
+        let mut finish = None;
         let mut done = false;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -692,7 +781,7 @@ impl Brain {
                         continue;
                     };
                     let before = out.len();
-                    if apply_chat_completions_sse_data(data, &mut out, &mut usage) {
+                    if apply_chat_completions_sse_data(data, &mut out, &mut usage, &mut finish) {
                         done = true;
                     }
                     if out.len() > before {
@@ -705,11 +794,18 @@ impl Brain {
             }
         }
         if out.trim().is_empty() {
+            // Token-starved stream (finish=length): the whole budget went to
+            // reasoning deltas we deliberately don't render. Return it as a clean
+            // empty result so `call_json` retries once with 3× headroom instead of
+            // burning a redundant blocking hop into the same wall.
+            if finish.as_deref() == Some("length") {
+                return Ok((out, usage, finish));
+            }
             return Err(anyhow!(
                 "brain {stage} stream ended without choices[].delta.content"
             ));
         }
-        Ok((out, usage))
+        Ok((out, usage, finish))
     }
 
     async fn call_json_blocking(
@@ -719,8 +815,10 @@ impl Brain {
         schema: Value,
         prompt: &str,
         structured_output: BrainStructuredOutput,
-    ) -> Result<(String, Value)> {
-        let body = chat_completions_body(stage, model, schema, prompt, false, structured_output);
+        max_tokens: u64,
+    ) -> Result<(String, Value, Option<String>)> {
+        let body =
+            chat_completions_body(stage, model, schema, prompt, false, structured_output, max_tokens);
         let resp = self.send_chat_completions(&body).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
@@ -732,7 +830,8 @@ impl Brain {
         }
         let response: Value = resp.json().await?;
         let usage = response.get("usage").cloned().unwrap_or_else(|| json!({}));
-        Ok((extract_chat_message_content(&response), usage))
+        let finish = extract_finish_reason(&response);
+        Ok((extract_chat_message_content(&response), usage, finish))
     }
 
     async fn call_json_with_curl(
@@ -742,7 +841,8 @@ impl Brain {
         schema: Value,
         prompt: &str,
         structured_output: BrainStructuredOutput,
-    ) -> Result<(String, Value)> {
+        max_tokens: u64,
+    ) -> Result<(String, Value, Option<String>)> {
         let key = self
             .api_key
             .as_ref()
@@ -751,7 +851,8 @@ impl Brain {
             .api_url
             .as_ref()
             .context("WARDEN_BRAIN_BASE_URL missing")?;
-        let body = chat_completions_body(stage, model, schema, prompt, false, structured_output);
+        let body =
+            chat_completions_body(stage, model, schema, prompt, false, structured_output, max_tokens);
         let mut child = tokio::process::Command::new("curl")
             .arg("--silent")
             .arg("--show-error")
@@ -797,7 +898,8 @@ impl Brain {
         }
         let response: Value = serde_json::from_slice(&output.stdout)?;
         let usage = response.get("usage").cloned().unwrap_or_else(|| json!({}));
-        Ok((extract_chat_message_content(&response), usage))
+        let finish = extract_finish_reason(&response);
+        Ok((extract_chat_message_content(&response), usage, finish))
     }
 
     fn send_chat_completions(&self, body: &Value) -> reqwest::RequestBuilder {
@@ -857,6 +959,7 @@ fn chat_completions_body(
     prompt: &str,
     stream: bool,
     structured_output: BrainStructuredOutput,
+    max_tokens: u64,
 ) -> Value {
     let user_prompt = chat_stage_prompt(stage, &schema, prompt);
     let mut body = json!({
@@ -866,7 +969,7 @@ fn chat_completions_body(
             {"role":"user","content":user_prompt}
         ],
         "stream":stream,
-        "max_tokens":brain_max_tokens(stage)
+        "max_tokens":max_tokens
     });
     match structured_output {
         BrainStructuredOutput::JsonSchema => {
@@ -912,12 +1015,18 @@ fn brain_curl_timeout_secs() -> u64 {
         .unwrap_or_else(|| (75 * 3).clamp(60, 240))
 }
 
+/// Per-stage completion budgets. GLM-5.2 is a REASONING model and its chain-of-
+/// thought bills against `max_tokens` before any answer token is emitted — a live
+/// probe burned 902 reasoning tokens on a tiny verify prompt, so the old budgets
+/// (verifier 900!) starved the answer into empty content / truncated JSON. These
+/// floors leave the answer room even on a long think; `call_json` additionally
+/// retries once with 3× budget when a response still finishes with `length`.
 fn brain_max_tokens(stage: &str) -> u64 {
     match stage {
-        s if s.starts_with("diagnostician") => 3_000,
-        "coach" => 1_500,
-        "verifier" => 900,
-        _ => 2_000,
+        s if s.starts_with("diagnostician") => 8_000,
+        "coach" => 4_000,
+        "verifier" => 3_000,
+        _ => 4_000,
     }
 }
 
@@ -1053,6 +1162,10 @@ fn extract_chat_message_content(response: &Value) -> String {
     response
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
+        // Token-starved reasoning responses return content:"" — treat empty the
+        // same as missing so the reasoning_content fallback (which may carry the
+        // answer inline) gets its chance; `repair_json_text` digs the JSON out.
+        .filter(|s| !s.trim().is_empty())
         .or_else(|| {
             response
                 .pointer("/choices/0/message/reasoning_content")
@@ -1062,7 +1175,22 @@ fn extract_chat_message_content(response: &Value) -> String {
         .to_string()
 }
 
-fn apply_chat_completions_sse_data(data: &str, out: &mut String, usage: &mut Value) -> bool {
+/// `content` only — no reasoning fallback. For PROSE outputs (session
+/// summaries) where chain-of-thought must never masquerade as the answer.
+fn extract_strict_message_content(response: &Value) -> String {
+    response
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn apply_chat_completions_sse_data(
+    data: &str,
+    out: &mut String,
+    usage: &mut Value,
+    finish: &mut Option<String>,
+) -> bool {
     if data.trim() == "[DONE]" {
         return true;
     }
@@ -1077,6 +1205,9 @@ fn apply_chat_completions_sse_data(data: &str, out: &mut String, usage: &mut Val
 
     if let Some(choices) = v.get("choices").and_then(Value::as_array) {
         for choice in choices {
+            if let Some(f) = choice.get("finish_reason").and_then(Value::as_str) {
+                *finish = Some(f.to_string());
+            }
             if let Some(delta) = choice
                 .get("delta")
                 .and_then(|d| d.get("content"))
@@ -1090,25 +1221,137 @@ fn apply_chat_completions_sse_data(data: &str, out: &mut String, usage: &mut Val
     false
 }
 
+/// `finish_reason` of the first choice — `Some("length")` means the model ran out
+/// of `max_tokens` (on a reasoning engine: usually starved by its own reasoning),
+/// which is the one failure worth an automatic bigger-budget retry.
+fn extract_finish_reason(response: &Value) -> Option<String> {
+    response
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Recover the model's ANSWER JSON from a reasoning-wrapped response. GLM-5.2
+/// (reasoning engines generally) may surround the payload with chain-of-thought
+/// prose, `<think>…</think>` blocks, stray draft braces, or fenced code blocks.
+/// Order: strip closed think-blocks → accept the whole text if it parses →
+/// LAST fenced block that parses → LAST balanced `{…}`/`[…]` region that parses
+/// (the answer follows the reasoning) → the un-stripped input's last balanced
+/// region → the cleaned text, so the caller's error context shows what came back.
 fn repair_json_text(s: &str) -> String {
-    let mut t = s.trim();
-    if let Some(rest) = t.strip_prefix("```json") {
-        t = rest.trim_start_matches(['\n', '\r']).trim();
-    } else if let Some(rest) = t.strip_prefix("```") {
-        t = rest.trim_start_matches(['\n', '\r']).trim();
+    let cleaned = strip_think_blocks(s);
+    let t = cleaned.trim();
+    if (t.starts_with('{') || t.starts_with('[')) && serde_json::from_str::<Value>(t).is_ok() {
+        return t.to_string();
     }
-    if let Some(rest) = t.strip_suffix("```") {
-        t = rest.trim();
+    if let Some(inner) = last_fenced_json(t) {
+        return inner;
     }
-    if t.starts_with('{') || t.starts_with('[') {
-        t.to_string()
-    } else if let Some(i) = t.find('{') {
-        t[i..].to_string()
-    } else if let Some(i) = t.find('[') {
-        t[i..].to_string()
-    } else {
-        t.to_string()
+    if let Some(obj) = last_balanced_json(t) {
+        return obj;
     }
+    if let Some(obj) = last_balanced_json(s) {
+        return obj;
+    }
+    t.to_string()
+}
+
+/// Remove every CLOSED `<think>…</think>` block (a reasoning model's scratchpad).
+/// An unclosed opener is left alone — the balanced-JSON scan handles the rest.
+fn strip_think_blocks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("<think>") {
+        match rest[start..].find("</think>") {
+            Some(rel_end) => {
+                out.push_str(&rest[..start]);
+                rest = &rest[start + rel_end + "</think>".len()..];
+            }
+            None => break,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Body of the LAST ``` fence (optionally tagged `json`) that parses as JSON.
+fn last_fenced_json(t: &str) -> Option<String> {
+    let mut found = None;
+    let mut base = 0usize;
+    while let Some(open) = t[base..].find("```") {
+        let after = base + open + 3;
+        let Some(rel_close) = t.get(after..).and_then(|r| r.find("```")) else {
+            break;
+        };
+        let mut body = t[after..after + rel_close].trim();
+        if let Some(rest) = body.strip_prefix("json") {
+            body = rest.trim_start();
+        }
+        if serde_json::from_str::<Value>(body).is_ok() {
+            found = Some(body.to_string());
+        }
+        base = after + rel_close + 3;
+    }
+    found
+}
+
+/// The LAST balanced top-level `{…}`/`[…]` slice that parses as JSON. The scan
+/// is string-aware (quotes + escapes) so braces inside string values don't
+/// miscount; candidates that fail to parse are skipped, newest first.
+fn last_balanced_json(t: &str) -> Option<String> {
+    let bytes = t.as_bytes();
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'{' || b == b'[' {
+            if let Some(end) = scan_balanced(bytes, i) {
+                candidates.push((i, end));
+                i = end;
+            }
+        }
+        i += 1;
+    }
+    for (s, e) in candidates.into_iter().rev() {
+        let slice = &t[s..=e];
+        if serde_json::from_str::<Value>(slice).is_ok() {
+            return Some(slice.to_string());
+        }
+    }
+    None
+}
+
+/// Index of the byte that closes the bracket opened at `start`, honoring JSON
+/// string literals and escapes. `None` when the region never balances.
+fn scan_balanced(bytes: &[u8], start: usize) -> Option<usize> {
+    let open = bytes[start];
+    let close = if open == b'{' { b'}' } else { b']' };
+    let mut depth = 0i64;
+    let mut in_str = false;
+    let mut escape = false;
+    for (idx, &b) in bytes.iter().enumerate().skip(start) {
+        if in_str {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if b == b'"' {
+            in_str = true;
+        } else if b == open {
+            depth += 1;
+        } else if b == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+    }
+    None
 }
 
 /// Resolve the harness for a finding from the session its first evidence cites.
@@ -1212,11 +1455,12 @@ mod tests {
             "{\"task\":\"diagnose\"}",
             true,
             BrainStructuredOutput::JsonObject,
+            brain_max_tokens("diagnostician"),
         );
 
         assert_eq!(body["model"], "glm-4.6");
         assert_eq!(body["stream"], true);
-        assert_eq!(body["max_tokens"], 3_000);
+        assert_eq!(body["max_tokens"], 8_000);
         assert_eq!(body["stream_options"], json!({"include_usage":true}));
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(
@@ -1244,6 +1488,7 @@ mod tests {
             "{}",
             false,
             BrainStructuredOutput::JsonSchema,
+            brain_max_tokens("verifier"),
         );
         assert_eq!(
             strict["response_format"],
@@ -1265,6 +1510,7 @@ mod tests {
             "{}",
             false,
             BrainStructuredOutput::JsonObject,
+            brain_max_tokens("coach"),
         );
         assert_eq!(
             json_object["response_format"],
@@ -1278,6 +1524,7 @@ mod tests {
             "{}",
             false,
             BrainStructuredOutput::Prompt,
+            brain_max_tokens("coach"),
         );
         assert!(prompt.get("response_format").is_none());
         let prompt_content = prompt["messages"][1]["content"].as_str().unwrap();
@@ -1296,11 +1543,13 @@ mod tests {
             "data: [DONE]",
         ];
 
+        let mut finish = None;
         for frame in frames {
             apply_chat_completions_sse_data(
                 frame.strip_prefix("data: ").unwrap(),
                 &mut out,
                 &mut usage,
+                &mut finish,
             );
         }
 
@@ -1313,11 +1562,13 @@ mod tests {
     fn ignores_streaming_reasoning_content_so_empty_stream_can_fallback() {
         let mut out = String::new();
         let mut usage = json!({});
+        let mut finish = None;
 
         apply_chat_completions_sse_data(
             r#"{"choices":[{"delta":{"reasoning_content":"{\"ok\":true}"}}],"usage":null}"#,
             &mut out,
             &mut usage,
+            &mut finish,
         );
 
         assert_eq!(out, "");
@@ -1354,6 +1605,75 @@ mod tests {
             repair_json_text("```json\n{\"ok\":true}\n```"),
             "{\"ok\":true}"
         );
+    }
+
+    #[test]
+    fn repairs_reasoning_prose_with_stray_draft_brace_before_answer() {
+        // A reasoning model thinking out loud about JSON keys before answering:
+        // the FIRST '{' is a draft fragment, the LAST balanced object is the answer.
+        let raw = "Let me draft the shape {\"refuted\": ... no wait.\nFinal answer:\n{\"refuted\":true,\"confidence\":0.8,\"verdict\":\"stat unsupported\"}";
+        let repaired = repair_json_text(raw);
+        let v: Value = serde_json::from_str(&repaired).expect("must recover the final object");
+        assert_eq!(v["refuted"], true);
+    }
+
+    #[test]
+    fn repairs_think_block_wrapped_json() {
+        let raw = "<think>weighing the {evidence} carefully, brace test { }</think>\n{\"ok\":true}";
+        assert_eq!(repair_json_text(raw), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn repairs_fenced_json_with_trailing_prose() {
+        let raw = "Here is the verdict:\n```json\n{\"verdict\":\"confirmed\"}\n```\nHope that helps!";
+        assert_eq!(repair_json_text(raw), "{\"verdict\":\"confirmed\"}");
+    }
+
+    #[test]
+    fn repair_prefers_the_last_parseable_object() {
+        let raw = "{\"draft\":1} scratch that. {\"final\":2}";
+        let v: Value = serde_json::from_str(&repair_json_text(raw)).unwrap();
+        assert_eq!(v["final"], 2);
+    }
+
+    #[test]
+    fn empty_string_content_falls_back_to_reasoning_content() {
+        // Token-starved responses (finish_reason=length) return content:"" with the
+        // whole budget burned in reasoning_content — treat empty as missing.
+        let v = json!({"choices":[{"message":{"content":"","reasoning_content":"thinking… {\"ok\":true}"}}]});
+        assert_eq!(repair_json_text(&extract_chat_message_content(&v)), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn extracts_finish_reason_from_blocking_response() {
+        let v = json!({"choices":[{"message":{"content":""},"finish_reason":"length"}]});
+        assert_eq!(extract_finish_reason(&v).as_deref(), Some("length"));
+        assert_eq!(extract_finish_reason(&json!({})), None);
+    }
+
+    #[test]
+    fn streaming_captures_finish_reason() {
+        let mut out = String::new();
+        let mut usage = json!({});
+        let mut finish = None;
+        apply_chat_completions_sse_data(
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+            &mut out,
+            &mut usage,
+            &mut finish,
+        );
+        assert_eq!(finish.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn reasoning_model_budgets_are_not_starved() {
+        // GLM-5.2's reasoning counts against max_tokens: a live probe burned 902
+        // reasoning tokens on a TINY verify prompt, so the old 900-token verifier
+        // budget returned empty content (finish=length) every time. Floors below
+        // keep reasoning from starving the answer.
+        assert!(brain_max_tokens("verifier") >= 3_000);
+        assert!(brain_max_tokens("coach") >= 4_000);
+        assert!(brain_max_tokens("diagnostician") >= 8_000);
     }
 
     #[test]
