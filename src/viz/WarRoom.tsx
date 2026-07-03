@@ -16,7 +16,7 @@ import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import { Environment, Lightformer, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { invoke } from '@tauri-apps/api/core';
-import type { Bridge, SceneState } from './bridge';
+import type { Bridge, HabitsWindow, SceneState } from './bridge';
 import { harnessTheme } from './harnessTheme';
 import { layoutOrbScene } from './orbLayout';
 import type { LayoutNode, OrbIssue, OrbLayout, OrbSceneModel } from './orbTypes';
@@ -79,6 +79,24 @@ export function isDiscoveryHomeDoubleClickAllowed({
   return eventTarget.closest('button, input, select, textarea, a, [contenteditable="true"], [role="button"]') === null;
 }
 
+// Raw Rust error strings (HTTP bodies, 3-transport failure chains) are for logs,
+// not the ask bar. Map the common failures to one plain sentence; anything else
+// gets a firmly truncated tail so the console never floods.
+export function humanizeBrainError(raw: string): string {
+  const s = raw.toLowerCase();
+  if (s.includes('401') || s.includes('403') || s.includes('unauthorized') || s.includes('api key')) {
+    return 'The brain rejected the request — check your API key (WARDEN_BRAIN_API_KEY).';
+  }
+  if (s.includes('timed out') || s.includes('timeout')) {
+    return 'The brain took too long to answer — try again (slow model or network).';
+  }
+  if (s.includes('connection') || s.includes('dns') || s.includes('sending request')) {
+    return "Can't reach the brain — check your network or WARDEN_BRAIN_BASE_URL.";
+  }
+  const flat = raw.replace(/\s+/g, ' ').trim();
+  return flat.length > 220 ? `${flat.slice(0, 200)}… (see logs)` : flat;
+}
+
 function humanisePattern(patternId: string): string {
   return (
     patternId
@@ -133,6 +151,11 @@ function fallbackOrbScene(scene: SceneState): OrbSceneModel {
     confidence: 0,
     sessionIds: [c.sessionId],
     evidence: [],
+    // Living-Habits streak fields: a live candidate has no streak history yet.
+    credits: 0,
+    streakK: 0,
+    fixed: false,
+    lastCreditAt: null,
   }));
   return {
     agents,
@@ -693,7 +716,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         bridge.ingest('diagnosis_loaded', d);
         bridge.ingest('diagnosis_run', { running: false });
       } catch (e) {
-        setRunError(String(e));
+        setRunError(humanizeBrainError(String(e)));
         bridge.ingest('diagnosis_run_failed', {});
       }
     },
@@ -794,6 +817,28 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const onDismiss = useCallback(() => {
     invoke('hide_overlay').catch(() => {});
   }, []);
+
+  // ── Living Habits: pick a time-window → re-scan it ──────────────────────────
+  // Tell the backend which window to scan; it answers with a `habits_refreshed`
+  // event (routed in main.ts) that swaps the constellation's issue set. The dial's
+  // own optimistic highlight makes the click feel instant; the real highlight then
+  // reconciles from `scene.activeWindow` when the event lands. `invoke` rejects in
+  // the browser-QA harness (no Tauri) → swallowed, never disturbs the scene.
+  const onPickWindow = useCallback((w: HabitsWindow) => {
+    invoke('set_habits_window', { window: w }).catch(() => {});
+  }, []);
+
+  // Populate the habits constellation the first time the Habits tab is actually on
+  // screen: ask the backend to scan the default window (`today`) once. Keyed off
+  // `displayTab` (the constellation actually shown, post-fold) so we don't scan
+  // until the user lands on Habits, and only once per app session. `activeWindow`
+  // being set means a scan already happened (push or prior pick) — don't re-scan.
+  const habitsScanRequested = useRef(false);
+  useEffect(() => {
+    if (displayTab !== 'habits' || habitsScanRequested.current) return;
+    habitsScanRequested.current = true;
+    if (!scene.activeWindow) onPickWindow('today');
+  }, [displayTab, scene.activeWindow, onPickWindow]);
 
   const findings = useMemo(() => deriveFindings(scene), [scene.verdicts]);
   const diagnosisId = scene.diagnosisId ?? 'diagnosis';
@@ -906,6 +951,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         onDismiss={onDismiss}
         onPopFocus={onPopFocus}
         onClearFocus={onClearFocus}
+        onPickWindow={onPickWindow}
       />
 
       {/* Radar detail panel — its own right-dock (the Chrome inspector is Habits-
@@ -936,7 +982,13 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       {showIntro && <IntroVideo onEnded={() => setShowIntro(false)} />}
       {scene.phase === 'reveal' && (
         <Suspense fallback={null}>
-          <PlayerHost kind="reveal" findings={findings} diagnosisId={diagnosisId} />
+          <PlayerHost
+            kind="reveal"
+            findings={findings}
+            diagnosisId={diagnosisId}
+            detectorOnly={Boolean((scene.diagnosis as { detector_only?: boolean } | undefined)?.detector_only)}
+            onEnded={() => bridge.ingest('diagnosis_reveal_done', {})}
+          />
         </Suspense>
       )}
     </div>

@@ -10,7 +10,7 @@
 // (ask, request fix, clear, dismiss). No Tauri, no Three — trivially reasoned about.
 
 import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { SceneState } from './bridge';
+import type { HabitsWindow, SceneState } from './bridge';
 import { harnessTheme, severityColor } from './harnessTheme';
 import type { LayoutNode, OrbIssue, OrbSceneModel } from './orbTypes';
 import type { ConstellationTab } from './NavBar';
@@ -90,6 +90,131 @@ function compact(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0';
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
   return String(Math.round(n));
+}
+
+// Living Habits — legibility (no "K/S" jargon): turn the raw streak fields into
+// ONE plain-language line. `null` means "no active streak yet" (streakK is 0 —
+// the habit hasn't been seen clean even once) so the caller renders nothing
+// rather than a confusing "0/0". Once `fixed`, the tally is kept (so the operator
+// still sees what was proven) with "resolved" appended, matching the calm
+// fade/shrink the same state drives on the 3D orb (Orb.tsx) — text and shape
+// agree, never contradict.
+export function streakLineText(issue: Pick<OrbIssue, 'credits' | 'streakK' | 'fixed'>): string | null {
+  if (issue.streakK <= 0) return null;
+  const tally = `${issue.credits}/${issue.streakK} clean sessions`;
+  return issue.fixed ? `${tally} · resolved` : tally;
+}
+
+// ── Living Habits: the time-window dial + a live "last scanned" readout ──────
+// The dial is a segmented control over the five window wire strings; clicking one
+// asks the backend to re-scan that window (`set_habits_window`) and optimistically
+// lights the chosen segment so the UI feels instant (the real highlight then
+// reconciles from `scene.activeWindow` when `habits_refreshed` echoes back). The
+// readout derives a relative age from `scene.lastScannedAt`, re-rendered on a 1s
+// tick so "last scanned Ns ago" actually counts up. Rendered ONLY on the habits tab
+// (its caller gates it). Phosphor chrome: active = --acid, text --ink-soft, the
+// rest from the shared tokens so it matches the FilterBar dock it sits above.
+export const HABITS_WINDOW_OPTIONS: ReadonlyArray<{ value: HabitsWindow; label: string }> = [
+  { value: 'today', label: 'Today' },
+  { value: '7d', label: '7d' },
+  { value: '30d', label: '30d' },
+  { value: '6mo', label: '6mo' },
+  { value: 'all', label: 'All-time' },
+];
+
+// Pure: format an age in seconds as a compact relative string. Exported for the
+// unit test (no DOM/clock dependence — the tick that re-runs it lives in the view).
+export function relativeScanAge(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'just now';
+  if (seconds < 1) return 'just now';
+  if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+// How long the "diagnosed" blip stays lit after `habits_diagnosed` lands. Purely
+// a display duration — not a claim about backend timing.
+const DIAGNOSED_BLIP_MS = 8000;
+
+function HabitsDial({
+  activeWindow,
+  lastScannedAt,
+  habitsDiagnosedAt,
+  onPickWindow,
+}: {
+  activeWindow: HabitsWindow | undefined;
+  lastScannedAt: string | undefined;
+  habitsDiagnosedAt: number | undefined;
+  onPickWindow: (w: HabitsWindow) => void;
+}) {
+  // Optimistic highlight: lit on click immediately, reconciled to the backend's
+  // echoed window whenever `activeWindow` changes (the honest source of truth).
+  const [optimistic, setOptimistic] = useState<HabitsWindow | undefined>(activeWindow);
+  useEffect(() => {
+    if (activeWindow) setOptimistic(activeWindow);
+  }, [activeWindow]);
+  const lit = optimistic ?? activeWindow ?? 'today';
+
+  // 1s tick so the relative "last scanned" age counts up live, and so the
+  // "diagnosed" blip (below) expires on its own without a separate timer. The
+  // interval is the ONLY clock here; `relativeScanAge` stays pure.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const scannedMs = lastScannedAt ? Date.parse(lastScannedAt) : NaN;
+  const age = Number.isFinite(scannedMs) ? relativeScanAge((Date.now() - scannedMs) / 1000) : null;
+
+  // Living Habits (4e): a real `habits_diagnosed` event landed — the background
+  // GLM re-diagnosis pass for the active window finished. We only render the
+  // COMPLETION, never a fabricated "re-diagnosing…" pre-state: the backend's
+  // heartbeat worker (scheduler.rs `run_habits_expensive`) emits no "started"
+  // signal to key that on, and honest-viz (see CLAUDE.md) means no signal the
+  // backend didn't actually emit. The blip self-expires after DIAGNOSED_BLIP_MS
+  // via the same 1s tick that drives the live-scanned age, so no extra timer.
+  const showDiagnosed =
+    typeof habitsDiagnosedAt === 'number' && now - habitsDiagnosedAt < DIAGNOSED_BLIP_MS;
+
+  return (
+    <div className="wd-habits-dial" data-habits-dial role="group" aria-label="Habits time window">
+      <div className="wd-dial-seg" role="radiogroup" aria-label="Time window">
+        {HABITS_WINDOW_OPTIONS.map((o) => {
+          const active = lit === o.value;
+          return (
+            <button
+              type="button"
+              key={o.value}
+              className={`wd-dial-opt${active ? ' is-active' : ''}`}
+              data-window={o.value}
+              role="radio"
+              aria-checked={active}
+              title={`Show habits over: ${o.label}`}
+              onClick={() => {
+                setOptimistic(o.value); // optimistic — reconciles from scene.activeWindow
+                onPickWindow(o.value);
+              }}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+      {showDiagnosed && (
+        <span className="wd-dial-diagnosed" data-habits-diagnosed-blip>
+          diagnosed
+        </span>
+      )}
+      <div className="wd-dial-live" data-habits-live aria-live="polite">
+        <span className="wd-dial-live-dot" aria-hidden="true" />
+        <span className="wd-dial-live-text">
+          live{age ? ` · last scanned ${age}` : ''}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 // ── top HUD: identity + live memory profile ────────────────────────────────
@@ -221,6 +346,59 @@ function PipelineRail({ scene, running }: { scene: SceneState; running: boolean 
         </div>
       )}
     </div>
+  );
+}
+
+// ── fresh-diagnosis brief: the coach's output, never trapped in the DB ───────
+// `scene.diagnosis` is the full object `run_diagnosis` returned; until now its
+// narrative / do_items / stop_items never reached a DOM node. Pure model fn so
+// the mapping is unit-testable without a render; unknown shapes yield null and
+// render nothing (schema drift never crashes the chrome).
+export function diagnosisBriefModel(diagnosis: unknown): {
+  narrative: string;
+  doItem?: string;
+  stopItem?: string;
+  detectorOnly: boolean;
+} | null {
+  if (!diagnosis || typeof diagnosis !== 'object') return null;
+  const d = diagnosis as Record<string, unknown>;
+  const narrative = typeof d.narrative === 'string' ? d.narrative.trim() : '';
+  if (!narrative) return null;
+  const first = (v: unknown) => (Array.isArray(v) && typeof v[0] === 'string' ? (v[0] as string) : undefined);
+  return {
+    narrative,
+    doItem: first(d.do_items ?? d.doItems),
+    stopItem: first(d.stop_items ?? d.stopItems),
+    detectorOnly: Boolean(d.detector_only ?? d.detectorOnly),
+  };
+}
+
+function DiagnosisBrief({ diagnosis, running }: { diagnosis: unknown; running: boolean }) {
+  const m = diagnosisBriefModel(diagnosis);
+  if (!m || running) return null;
+  return (
+    <section className="wd-diag-brief" data-diag-brief aria-label="Latest diagnosis">
+      <div className="wd-card-kicker">
+        {m.detectorOnly ? 'detector-only diagnosis' : 'verified diagnosis'} · coach
+      </div>
+      <p className="wd-diag-narrative">{m.narrative}</p>
+      {(m.doItem || m.stopItem) && (
+        <div className="wd-guidance">
+          {m.doItem && (
+            <div className="wd-guide-do">
+              <span>DO</span>
+              {m.doItem}
+            </div>
+          )}
+          {m.stopItem && (
+            <div className="wd-guide-stop">
+              <span>STOP</span>
+              {m.stopItem}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -549,6 +727,11 @@ function DetailPanel({
           <span key={i} className={i < issue.severity ? 'on' : ''} />
         ))}
       </div>
+      {streakLineText(issue) && (
+        <div className={`wd-streak-line${issue.fixed ? ' is-resolved' : ''}`} data-streak-line>
+          {streakLineText(issue)}
+        </div>
+      )}
       <p>{issue.rationale}</p>
       <div className="wd-detail-ledger">
         <span>×{fmtCount(issue.count)} occurrences</span>
@@ -651,6 +834,7 @@ export function Chrome({
   onDismiss,
   onPopFocus,
   onClearFocus,
+  onPickWindow,
 }: {
   scene: SceneState;
   model: OrbSceneModel;
@@ -678,6 +862,8 @@ export function Chrome({
   onDismiss: () => void;
   onPopFocus: (index: number) => void;
   onClearFocus: () => void;
+  /** Living Habits: the dial picked a time-window → re-scan it (`set_habits_window`). */
+  onPickWindow: (w: HabitsWindow) => void;
 }) {
   const ledgerCount = artifacts.filter(isHistoric).length;
   // Chrome now carries only the radar focus trail (Breadcrumb, top of the chrome
@@ -694,6 +880,32 @@ export function Chrome({
           onPopFocus={onPopFocus}
           onClearFocus={onClearFocus}
         />
+      )}
+
+      {/* Living Habits time-window dial + live "last scanned" readout — habits tab
+          only (severity/streaks are a habits-only signal). Picking a window asks the
+          backend to re-scan it; the constellation then refreshes via habits_refreshed. */}
+      {tab === 'habits' && (
+        <HabitsDial
+          activeWindow={scene.activeWindow}
+          lastScannedAt={scene.lastScannedAt}
+          habitsDiagnosedAt={scene.habitsDiagnosedAt}
+          onPickWindow={onPickWindow}
+        />
+      )}
+
+      {/* The ask console — the diagnosis flow's front door — lives on the habits
+          tab (the constellation it feeds). Radar keeps its FilterBar dock clear.
+          The fresh coach brief rides directly above it so a completed run's
+          narrative + DO/STOP land in front of the operator, not just the DB. */}
+      {tab === 'habits' && model.issues.length === 0 && (
+        <EmptyState running={running || Boolean(scene.running)} />
+      )}
+      {tab === 'habits' && (
+        <div className="wd-console-dock">
+          <DiagnosisBrief diagnosis={scene.diagnosis} running={running || Boolean(scene.running)} />
+          <Console scene={scene} running={running || Boolean(scene.running)} error={error} onAsk={onAsk} />
+        </div>
       )}
 
       <div className={`wd-inspector ${selectedNode || hoveredNode ? 'is-open' : ''}`}>

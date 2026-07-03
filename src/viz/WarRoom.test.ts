@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from 'vitest';
-import { chromeModelForTab, isDiscoveryHomeDoubleClickAllowed, mergeArtifact } from './WarRoom';
+import { chromeModelForTab, humanizeBrainError, isDiscoveryHomeDoubleClickAllowed, mergeArtifact } from './WarRoom';
 import type { OrbSceneModel } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 import type { Artifact } from './chrome';
@@ -36,6 +36,10 @@ function habitsModel(): OrbSceneModel {
         confidence: 0.8,
         sessionIds: ['s1'],
         evidence: [],
+        credits: 0,
+        streakK: 0,
+        fixed: false,
+        lastCreditAt: null,
       },
     ],
     links: [],
@@ -168,5 +172,29 @@ describe('mergeArtifact', () => {
     const next = mergeArtifact(prev, art({ id: 'a', status: 'reverted' }));
     expect(next.map((a) => a.id)).toEqual(['a', 'b']);
     expect(next.find((a) => a.id === 'a')?.status).toBe('reverted');
+  });
+});
+
+// Raw Rust error strings (HTTP bodies, transport chains) must never hit the ask
+// bar verbatim — the operator gets a plain sentence, with the raw tail kept short.
+describe('humanizeBrainError', () => {
+  it('maps auth failures to a key hint', () => {
+    expect(humanizeBrainError('brain diagnostician HTTP 401 Unauthorized: {"error":"bad key"}')).toMatch(
+      /api key/i,
+    );
+  });
+
+  it('maps timeouts to a plain retry hint', () => {
+    expect(humanizeBrainError('operation timed out after 75s')).toMatch(/took too long/i);
+  });
+
+  it('maps connection failures to a reachability hint', () => {
+    expect(humanizeBrainError('error sending request: connection refused')).toMatch(/reach/i);
+  });
+
+  it('truncates unknown errors instead of dumping the full body', () => {
+    const raw = 'X'.repeat(900);
+    const out = humanizeBrainError(raw);
+    expect(out.length).toBeLessThan(260);
   });
 });

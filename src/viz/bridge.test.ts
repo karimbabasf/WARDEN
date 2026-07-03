@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createBridge, type SceneState } from './bridge';
+import { createBridge, isHabitsWindow, type SceneState } from './bridge';
 import { harnessTheme } from './harnessTheme';
 
 // `createBridge` takes the Tauri `listen` so the bridge can self-wire in the
@@ -287,6 +287,118 @@ describe('bridge reducer', () => {
     expect(s.summoned).toBe(true);
     expect(s.minimized).toBe(false);
   });
+
+  // ── Living Habits: windowed scan + diagnosis tick ──────────────────────────
+  it('replaces the habits issue set from habits_refreshed and records window + scan time', () => {
+    const bridge = createBridge(noopListen);
+    // A full scene lands first so the windowed event has an agent hub to tether to.
+    bridge.ingest('orb_scene_ready', {
+      agents: [{ id: 'claude_code', harness: 'claude_code', label: 'Claude', glyph: '◆', color: '#ff8636', sessions: 3, event_count: 40, total_load: 9 }],
+      issues: [
+        { id: 'claude_code:OLD', agent_id: 'claude_code', harness: 'claude_code', pattern_id: 'OLD', title: 'Old habit', count: 5, severity: 3, session_ids: ['x'], evidence: [] },
+      ],
+      links: [{ source: 'claude_code', target: 'claude_code:OLD', kind: 'agent_issue' }],
+      guidance: { do_items: ['Keep delegating.'], stop_items: [] },
+    });
+
+    bridge.ingest('habits_refreshed', {
+      window: '7d',
+      last_scanned_at: '2026-06-25T12:00:00Z',
+      issues: [
+        {
+          id: 'claude_code:NO_DELEGATION',
+          agent_id: 'claude_code',
+          harness: 'claude_code',
+          pattern_id: 'NO_DELEGATION',
+          title: 'No delegation',
+          count: 4,
+          severity: 4,
+          session_ids: ['s1'],
+          evidence: [],
+          credits: 2,
+          streak_k: 5,
+          fixed: false,
+          last_credit_at: '2026-06-25T11:59:00Z',
+        },
+      ],
+    });
+
+    const s = snapshot(bridge);
+    // window + scan stamp captured for the dial + liveness readout
+    expect(s.activeWindow).toBe('7d');
+    expect(s.lastScannedAt).toBe('2026-06-25T12:00:00Z');
+    // the windowed issues REPLACE the prior issue set (old habit gone, new one in)
+    expect(s.orbScene?.issues).toHaveLength(1);
+    expect(s.orbScene?.issues[0]).toMatchObject({
+      id: 'claude_code:NO_DELEGATION',
+      patternId: 'NO_DELEGATION',
+      // streak fields normalized, including snake_case streak_k → streakK + last_credit_at → lastCreditAt
+      credits: 2,
+      streakK: 5,
+      fixed: false,
+      lastCreditAt: '2026-06-25T11:59:00Z',
+    });
+    // the agent roster (hubs) is preserved so the issues still have something to orbit
+    expect(s.orbScene?.agents[0].id).toBe('claude_code');
+    // links are rebuilt to connect the windowed issue to its hub (drives layoutOrbScene)
+    expect(s.orbScene?.links).toEqual([{ source: 'claude_code', target: 'claude_code:NO_DELEGATION', kind: 'agent_issue' }]);
+  });
+
+  it('defaults missing streak fields and marks fixed habits from habits_refreshed', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('habits_refreshed', {
+      window: 'all',
+      last_scanned_at: '2026-06-25T09:00:00Z',
+      issues: [
+        // No agent in scene → no link, but the issue still normalizes safely.
+        { id: 'codex:RABBIT_HOLE', agent_id: 'codex', harness: 'codex', pattern_id: 'RABBIT_HOLE', title: 'Rabbit hole', count: 1, severity: 2, session_ids: [], evidence: [], fixed: true, streak_k: 3, credits: 3 },
+        // A bare issue with NONE of the streak fields → all default (0/0/false/null).
+        { id: 'codex:BARE', agent_id: 'codex', harness: 'codex', pattern_id: 'BARE', title: 'Bare', count: 1, severity: 1, session_ids: [], evidence: [] },
+      ],
+    });
+    const s = snapshot(bridge);
+    expect(s.activeWindow).toBe('all');
+    expect(s.orbScene?.issues[0]).toMatchObject({ fixed: true, streakK: 3, credits: 3, lastCreditAt: null });
+    expect(s.orbScene?.issues[1]).toMatchObject({ credits: 0, streakK: 0, fixed: false, lastCreditAt: null });
+  });
+
+  it('ignores an unknown window string (schema drift never corrupts activeWindow)', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('habits_refreshed', { window: 'today', last_scanned_at: '2026-06-25T08:00:00Z', issues: [] });
+    bridge.ingest('habits_refreshed', { window: 'last_century', last_scanned_at: '2026-06-25T08:05:00Z', issues: [] });
+    const s = snapshot(bridge);
+    // the bogus window is dropped; the last valid window stays put
+    expect(s.activeWindow).toBe('today');
+    // but the valid scan stamp still advances
+    expect(s.lastScannedAt).toBe('2026-06-25T08:05:00Z');
+  });
+
+  it('bumps a diagnosed tick on habits_diagnosed without disturbing the issue set', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('orb_scene_ready', {
+      agents: [{ id: 'claude_code', harness: 'claude_code', label: 'Claude', glyph: '◆', color: '#ff8636' }],
+      issues: [{ id: 'claude_code:H', agent_id: 'claude_code', harness: 'claude_code', pattern_id: 'H', title: 'H', count: 1, severity: 2, session_ids: [], evidence: [] }],
+      links: [],
+      guidance: {},
+    });
+    expect(snapshot(bridge).habitsDiagnosedAt).toBeUndefined();
+    bridge.ingest('habits_diagnosed', { window: 'today', id: 'claude_code:H', finding_count: 2 });
+    const s = snapshot(bridge);
+    expect(typeof s.habitsDiagnosedAt).toBe('number');
+    // the orb set is untouched (the data lands on the next habits_refreshed)
+    expect(s.orbScene?.issues).toHaveLength(1);
+  });
+
+  it('preserves the active habits window + last scan across reset (persistent live state)', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('habits_refreshed', { window: '30d', last_scanned_at: '2026-06-25T07:00:00Z', issues: [] });
+    bridge.ingest('candidates_nominated', { candidates: [candidate('p1')] });
+    bridge.reset();
+    const s = snapshot(bridge);
+    expect(s.candidates).toHaveLength(0);
+    expect(s.activeWindow).toBe('30d');
+    expect(s.lastScannedAt).toBe('2026-06-25T07:00:00Z');
+  });
 });
 
 describe('harnessTheme', () => {
@@ -302,5 +414,17 @@ describe('harnessTheme', () => {
   it('falls back to a neutral theme for unknown harnesses', () => {
     expect(harnessTheme('gemini').label).toBe('Unknown');
     expect(harnessTheme('gemini').color).toBe('#8fa0b8');
+  });
+});
+
+describe('diagnosis_reveal_done', () => {
+  it('returns the scene to the war phase when the reveal clip finishes', () => {
+    const bridge = createBridge(noopListen);
+    bridge.ingest('diagnosis_ready', { id: 'd1', finding_count: 2 });
+    expect(snapshot(bridge).phase).toBe('reveal');
+    bridge.ingest('diagnosis_reveal_done', {});
+    const s = snapshot(bridge);
+    expect(s.phase).toBe('war');
+    expect(s.diagnosisId).toBe('d1');
   });
 });

@@ -33,7 +33,14 @@ export type RevealFinding = {
 export type RevealProps = {
   findings: RevealFinding[];
   diagnosisId: string;
+  /** Run degraded to detectors only (no brain) — headline must not claim verification. */
+  detectorOnly?: boolean;
 };
+
+/** The headline is a CLAIM — it must match what the pipeline actually did. */
+export function revealHeading(detectorOnly?: boolean): string {
+  return detectorOnly ? 'DETECTOR-ONLY DIAGNOSIS' : 'VERIFIED DIAGNOSIS';
+}
 
 // One ranked hole row — slams in from the left on a spring, severity bar wipes
 // to its real weight, harness badge fades up. `local` is the frame WITHIN this
@@ -149,7 +156,7 @@ function Scanlines({ frame }: { frame: number }) {
  * <Player> plays exactly long enough for every real hole to land plus the intro
  * runway. Honest: renders ONLY the findings passed in (no count is invented).
  */
-export function Reveal({ findings, diagnosisId }: RevealProps) {
+export function Reveal({ findings, diagnosisId, detectorOnly }: RevealProps) {
   const frame = useCurrentFrame();
   const list = Array.isArray(findings) ? findings : [];
 
@@ -177,7 +184,7 @@ export function Reveal({ findings, diagnosisId }: RevealProps) {
             WARDEN
           </span>
           <span style={{ color: AMBER, fontSize: 26, letterSpacing: '0.22em', textShadow: `0 0 ${verdictGlow}px ${AMBER}` }}>
-            VERIFIED DIAGNOSIS
+            {revealHeading(detectorOnly)}
           </span>
         </div>
         <div style={{ height: 3, marginTop: 10, width: `${underline}%`, background: AMBER, boxShadow: `0 0 14px ${AMBER}` }} />

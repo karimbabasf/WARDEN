@@ -26,6 +26,9 @@ export type PlayerHostProps = {
   kind: PlayerKind;
   findings: RevealFinding[];
   diagnosisId: string;
+  /** True when the run degraded to detectors only (no brain) — the reveal's
+   *  headline must say so instead of claiming verification. */
+  detectorOnly?: boolean;
   /** Fired when the clip's own play-through completes (Player 'ended' event). */
   onEnded?: () => void;
 };
@@ -45,7 +48,7 @@ const playerStyle: React.CSSProperties = {
   background: 'transparent',
 };
 
-export default function PlayerHost({ kind, findings, diagnosisId, onEnded }: PlayerHostProps) {
+export default function PlayerHost({ kind, findings, diagnosisId, detectorOnly, onEnded }: PlayerHostProps) {
   const ref = useRef<PlayerRef>(null);
 
   const durationInFrames = useMemo(
@@ -55,8 +58,8 @@ export default function PlayerHost({ kind, findings, diagnosisId, onEnded }: Pla
 
   // Memoise inputProps so <Player> doesn't see a new object every render.
   const inputProps = useMemo(
-    () => ({ findings, diagnosisId }),
-    [findings, diagnosisId],
+    () => ({ findings, diagnosisId, detectorOnly: Boolean(detectorOnly) }),
+    [findings, diagnosisId, detectorOnly],
   );
 
   // Remotion exposes completion via the 'ended' event on the PlayerRef, not a

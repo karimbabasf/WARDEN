@@ -14,8 +14,11 @@
 // Event contract is LOCKED by Task 6 — these shapes match the Rust emitters
 // exactly. `harness` is always snake_case ("claude_code" | "codex" | "unknown").
 
-import type { OrbSceneModel } from './orbTypes';
+import type { OrbIssue, OrbSceneModel } from './orbTypes';
 import { normalizeRadarState, type RadarSceneModel } from './radarTypes';
+
+/** The Living-Habits time-window wire strings — the contract with `set_habits_window`. */
+export type HabitsWindow = 'today' | '7d' | '30d' | '6mo' | 'all';
 
 export type ScenePhase = 'idle' | 'war' | 'reveal';
 
@@ -98,6 +101,16 @@ export type SceneState = {
   running?: boolean;
   /** Last/cached diagnosis object (opaque to the bridge; rendered by the chrome). */
   diagnosis?: unknown;
+  /** Living Habits: the time-window the habits constellation is currently showing.
+   *  Set by `habits_refreshed` (the backend echoes the window it scanned); drives the
+   *  dial's active highlight. Undefined until the first windowed refresh lands. */
+  activeWindow?: HabitsWindow;
+  /** Living Habits: ISO-8601 of the most recent windowed scan, from `habits_refreshed`.
+   *  The liveness readout ("last scanned Ns ago") derives its age from this. */
+  lastScannedAt?: string;
+  /** Living Habits: monotonic tick bumped on each `habits_diagnosed` so the UI can
+   *  react to a fresh diagnosis pass even when the orb set is otherwise unchanged. */
+  habitsDiagnosedAt?: number;
 };
 
 /** Hard ceiling on rendered candidate nodes; overflow becomes `clustered`. */
@@ -121,6 +134,45 @@ function arr(v: unknown): any[] {
   return Array.isArray(v) ? v : [];
 }
 
+const HABITS_WINDOWS: readonly HabitsWindow[] = ['today', '7d', '30d', '6mo', 'all'];
+/** True iff `v` is one of the five Living-Habits wire strings (drops schema drift). */
+export function isHabitsWindow(v: unknown): v is HabitsWindow {
+  return typeof v === 'string' && (HABITS_WINDOWS as readonly string[]).includes(v);
+}
+
+// Normalize ONE raw Rust OrbIssue → the web (camelCase) shape. Shared by the
+// persistent `orb_scene_ready` path and the windowed `habits_refreshed` path so
+// the Living-Habits streak fields (credits / streak_k → streakK / fixed /
+// last_credit_at → lastCreditAt) map in exactly ONE place. Missing fields default
+// (credits 0, streakK 0, fixed false, lastCreditAt null) so the non-windowed
+// `get_orb_scene` payload — which predates these fields — stays safe.
+function normalizeOrbIssue(i: any): OrbIssue {
+  const lastCreditAt = i?.last_credit_at ?? i?.lastCreditAt;
+  return {
+    id: str(i?.id),
+    agentId: str(i?.agent_id ?? i?.agentId),
+    harness: str(i?.harness),
+    patternId: str(i?.pattern_id ?? i?.patternId),
+    title: str(i?.title, 'Untitled issue'),
+    count: num(i?.count),
+    severity: num(i?.severity),
+    rationale: str(i?.rationale, ''),
+    estCostTokens: num(i?.est_cost_tokens ?? i?.estCostTokens),
+    estCostMinutes: num(i?.est_cost_minutes ?? i?.estCostMinutes),
+    frequency: num(i?.frequency),
+    confidence: num(i?.confidence),
+    sessionIds: arr(i?.session_ids ?? i?.sessionIds).map((s: any) => str(s, '')).filter(Boolean),
+    evidence: arr(i?.evidence),
+    findingId: typeof (i?.finding_id ?? i?.findingId) === 'string' ? (i.finding_id ?? i.findingId) : undefined,
+    verifierVerdict: typeof (i?.verifier_verdict ?? i?.verifierVerdict) === 'string' ? (i.verifier_verdict ?? i.verifierVerdict) : undefined,
+    status: typeof i?.status === 'string' ? i.status : undefined,
+    credits: num(i?.credits),
+    streakK: num(i?.streak_k ?? i?.streakK),
+    fixed: i?.fixed === true,
+    lastCreditAt: typeof lastCreditAt === 'string' ? lastCreditAt : null,
+  };
+}
+
 function normalizeOrbScene(payload: any): OrbSceneModel {
   return {
     agents: arr(payload?.agents).map((a: any) => ({
@@ -133,25 +185,7 @@ function normalizeOrbScene(payload: any): OrbSceneModel {
       eventCount: num(a?.event_count ?? a?.eventCount),
       totalLoad: num(a?.total_load ?? a?.totalLoad),
     })),
-    issues: arr(payload?.issues).map((i: any) => ({
-      id: str(i?.id),
-      agentId: str(i?.agent_id ?? i?.agentId),
-      harness: str(i?.harness),
-      patternId: str(i?.pattern_id ?? i?.patternId),
-      title: str(i?.title, 'Untitled issue'),
-      count: num(i?.count),
-      severity: num(i?.severity),
-      rationale: str(i?.rationale, ''),
-      estCostTokens: num(i?.est_cost_tokens ?? i?.estCostTokens),
-      estCostMinutes: num(i?.est_cost_minutes ?? i?.estCostMinutes),
-      frequency: num(i?.frequency),
-      confidence: num(i?.confidence),
-      sessionIds: arr(i?.session_ids ?? i?.sessionIds).map((s: any) => str(s, '')).filter(Boolean),
-      evidence: arr(i?.evidence),
-      findingId: typeof (i?.finding_id ?? i?.findingId) === 'string' ? (i.finding_id ?? i.findingId) : undefined,
-      verifierVerdict: typeof (i?.verifier_verdict ?? i?.verifierVerdict) === 'string' ? (i.verifier_verdict ?? i.verifierVerdict) : undefined,
-      status: typeof i?.status === 'string' ? i.status : undefined,
-    })),
+    issues: arr(payload?.issues).map(normalizeOrbIssue),
     links: arr(payload?.links).flatMap((l: any) => {
       const source = str(l?.source, '');
       const target = str(l?.target, '');
@@ -203,6 +237,39 @@ export function reduce(state: SceneState, name: string, payload: any): SceneStat
       // The live agent forest (backend `radar_state`). Normalized through the one
       // honest seam so schema drift can never throw or invent a globe.
       return { ...state, radarScene: normalizeRadarState(payload) };
+
+    case 'habits_refreshed': {
+      // Living Habits: a windowed scan. The event carries the issues for the chosen
+      // time-window plus the window itself + when it was scanned. We route the issues
+      // through the SAME OrbSceneModel the constellation renders from (so
+      // `layoutOrbScene` lays them out unchanged) by swapping ONLY the issue set into
+      // the persistent orb scene, then rebuilding the hub→issue links and dropping any
+      // hub that no longer has a windowed issue (the window genuinely has fewer habits).
+      const issues = arr(payload?.issues).map(normalizeOrbIssue);
+      const window = isHabitsWindow(payload?.window) ? payload.window : state.activeWindow;
+      const lastScannedAt =
+        typeof payload?.last_scanned_at === 'string'
+          ? payload.last_scanned_at
+          : typeof payload?.lastScannedAt === 'string'
+            ? payload.lastScannedAt
+            : state.lastScannedAt;
+      // Keep the agent roster from the last full scene so the issues still have hubs to
+      // tether to (the windowed event ships issues only). Agents with no windowed issue
+      // simply render as a clean hub — never invented, never a fabricated issue.
+      const base = state.orbScene ?? { agents: [], issues: [], links: [], guidance: { doItems: [], stopItems: [] } };
+      const agentIds = new Set(base.agents.map((a) => a.id));
+      const links = issues
+        .filter((i) => agentIds.has(i.agentId))
+        .map((i) => ({ source: i.agentId, target: i.id, kind: 'agent_issue' as const }));
+      const orbScene: OrbSceneModel = { ...base, issues, links };
+      return { ...state, orbScene, activeWindow: window, lastScannedAt };
+    }
+
+    case 'habits_diagnosed':
+      // Living Habits: one habit finished its diagnosis pass (`{ window, id,
+      // finding_count }`). The orb data itself arrives via the next `habits_refreshed`;
+      // here we only bump a monotonic tick so any "diagnosing…" affordance can settle.
+      return { ...state, habitsDiagnosedAt: Date.now() };
 
     case 'candidates_nominated': {
       const raw = Array.isArray(payload?.candidates) ? payload.candidates : [];
@@ -278,6 +345,11 @@ export function reduce(state: SceneState, name: string, payload: any): SceneStat
       const id = typeof payload?.id === 'string' && payload.id.length > 0 ? payload.id : state.diagnosisId;
       return { ...state, phase: 'reveal', diagnosisId: id, status: 'diagnosis ready', running: false };
     }
+
+    case 'diagnosis_reveal_done':
+      // The reveal clip played through (PlayerHost 'ended') — return to the live
+      // war-room view. The diagnosis itself stays in state for the chrome brief.
+      return { ...state, phase: 'war', status: 'diagnosis ready' };
 
     case 'profile_ready':
       // Memory totals + per-harness rollup from `query_profile` / ingest completion.
@@ -390,10 +462,10 @@ export function createBridge(
     },
     reset() {
       // Live run signals clear; the persistent memory (orb scene, radar forest,
-      // profile) and the window state (summon, minimize) survive — none is part of
-      // a single run.
-      const { orbScene, radarScene, summoned, minimized, profile } = state;
-      state = { ...emptyState(), orbScene, radarScene, summoned, minimized, profile };
+      // profile, the active habits window + last scan) and the window state (summon,
+      // minimize) survive — none is part of a single run.
+      const { orbScene, radarScene, summoned, minimized, profile, activeWindow, lastScannedAt } = state;
+      state = { ...emptyState(), orbScene, radarScene, summoned, minimized, profile, activeWindow, lastScannedAt };
       emit();
     },
   };

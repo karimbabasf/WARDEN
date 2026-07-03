@@ -42,6 +42,10 @@ function scene(): OrbSceneModel {
         confidence: 0.8,
         sessionIds: ['c1', 'c2', 'c3'],
         evidence: [],
+        credits: 0,
+        streakK: 0,
+        fixed: false,
+        lastCreditAt: null,
       },
       {
         id: 'claude_code:NO_DELEGATION',
@@ -58,6 +62,10 @@ function scene(): OrbSceneModel {
         confidence: 0.7,
         sessionIds: ['c2'],
         evidence: [],
+        credits: 0,
+        streakK: 0,
+        fixed: false,
+        lastCreditAt: null,
       },
       {
         id: 'codex:CONTEXT_BLOAT',
@@ -74,6 +82,10 @@ function scene(): OrbSceneModel {
         confidence: 0.9,
         sessionIds: ['x1'],
         evidence: [],
+        credits: 0,
+        streakK: 0,
+        fixed: false,
+        lastCreditAt: null,
       },
     ],
     links: [
@@ -124,6 +136,10 @@ function multiHarnessScene(agentsPerHarness = 6, maxIssues = 8): OrbSceneModel {
           confidence: 0.5,
           sessionIds: ['s'],
           evidence: [],
+          credits: 0,
+          streakK: 0,
+          fixed: false,
+          lastCreditAt: null,
         });
         links.push({ source: id, target: issueId, kind: 'agent_issue' as const });
       }
@@ -151,6 +167,10 @@ function richScene(): OrbSceneModel {
     confidence: 0.5,
     sessionIds: ['s'],
     evidence: [],
+    credits: 0,
+    streakK: 0,
+    fixed: false,
+    lastCreditAt: null,
   }));
   return {
     agents: [
@@ -398,6 +418,10 @@ describe('layoutOrbScene', () => {
           confidence: 0.5,
           sessionIds: ['s'],
           evidence: [],
+          credits: 0,
+          streakK: 0,
+          fixed: false,
+          lastCreditAt: null,
         });
         links.push({ source: id, target: issueId, kind: 'agent_issue' as const });
       }
@@ -450,6 +474,10 @@ describe('layoutOrbScene', () => {
           confidence: 0.5,
           sessionIds: ['s'],
           evidence: [],
+          credits: 0,
+          streakK: 0,
+          fixed: false,
+          lastCreditAt: null,
         });
         links.push({ source: id, target: issueId, kind: 'agent_issue' as const });
       }
