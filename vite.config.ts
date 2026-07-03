@@ -6,13 +6,17 @@ export default defineConfig({
   clearScreen: false,
   plugins: [react()],
   server: {
-    // Default to 1420, but never hard-pin to it. Plain `pnpm dev` is
-    // non-strict, so if 1420 is taken Vite falls forward to the next free
-    // port instead of crashing. The full-app launcher (scripts/warden-dev.mjs)
-    // pre-picks a free port and exports WARDEN_DEV_PORT; in that case we bind
-    // it strictly so Vite and Tauri's (overridden) devUrl can never disagree.
-    port: Number(process.env.WARDEN_DEV_PORT) || 1420,
-    strictPort: Boolean(process.env.WARDEN_DEV_PORT),
+    // HARD-PINNED to 1421. Tauri's webview devUrl (tauri.conf.json) points here,
+    // so the two MUST agree. 1420 is deliberately left to the other Tauri apps on
+    // this machine (e.g. the Trading app) that squat the Tauri-default 1420.
+    // strictPort: true means if 1421 is taken, Vite CRASHES loudly instead of
+    // sliding to the next free port — because a silent slide would strand the
+    // webview on whatever else is on 1421. That silent slide is the exact bug
+    // this pin fixes (WARDEN's window was loading the Trading app off 1420).
+    // The full-app launcher (scripts/warden-dev.mjs) still overrides BOTH sides
+    // in lockstep via WARDEN_DEV_PORT when you need a different free port.
+    port: Number(process.env.WARDEN_DEV_PORT) || 1421,
+    strictPort: true,
     host: '127.0.0.1'
   },
   envPrefix: ['VITE_', 'TAURI_'],
