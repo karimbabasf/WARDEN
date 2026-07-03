@@ -14,7 +14,7 @@
 import type { CSSProperties } from 'react';
 import { useState } from 'react';
 import type { RadarAgent, RadarContextRow } from './radarTypes';
-import { radarSubtitle } from './radarTypes';
+import { radarSubtitle, radarOriginBadge } from './radarTypes';
 import { radarHarness } from './radarTheme';
 
 // ── small pure formatters ──────────────────────────────────────────────────────
@@ -278,6 +278,12 @@ function IdentitySection({ agent }: { agent: RadarAgent }) {
             <span aria-hidden>{theme.glyph}</span> {theme.label}
           </dd>
         </div>
+        {radarOriginBadge(agent) ? (
+          <div>
+            <dt>Host</dt>
+            <dd>{radarOriginBadge(agent)}</dd>
+          </div>
+        ) : null}
         {agent.role ? (
           <div>
             <dt>Role</dt>

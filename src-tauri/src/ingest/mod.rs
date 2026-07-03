@@ -1,4 +1,5 @@
 pub mod claude_code;
+pub mod claude_desktop;
 pub mod codex;
 
 use crate::ir::*;
@@ -39,6 +40,7 @@ impl AdapterRegistry {
     pub fn new(store: crate::store::Store) -> Self {
         let adapters: Vec<Box<dyn Adapter>> = vec![
             Box::new(claude_code::ClaudeCodeAdapter::new(store.clone())),
+            Box::new(claude_desktop::ClaudeDesktopAdapter::new(store.clone())),
             Box::new(codex::CodexAdapter::new(store)),
         ];
         Self { adapters }
@@ -96,6 +98,9 @@ impl AdapterRegistry {
         // read-only and cached.
         if let Err(e) = claude_code::link_claude_subagents_in_store(store) {
             errors.push(format!("claude linkage: {e:#}"));
+        }
+        if let Err(e) = claude_desktop::link_desktop_subagents_in_store(store) {
+            errors.push(format!("claude desktop linkage: {e:#}"));
         }
         if let Err(e) = codex::link_codex_subagents_in_store(store) {
             errors.push(format!("codex linkage: {e:#}"));

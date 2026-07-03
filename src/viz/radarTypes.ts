@@ -109,6 +109,21 @@ export function radarSubtitle(agent: Pick<RadarAgent, 'label' | 'cwd' | 'model'>
   return m ? `${folder} · ${m}` : folder;
 }
 
+/**
+ * Short host badge for a desktop-app session — the sub-label that distinguishes a
+ * Claude/Codex *Desktop* workflow from the CLI while keeping the SAME harness colour
+ * + glyph. The harness identity (e.g. "Claude") already carries the colour; this is
+ * the suffix (e.g. "Claude · **Desktop**"). Returns `"Desktop"` for any `origin`
+ * ending in "Desktop" ("Claude Desktop" / "Codex Desktop"), else `null` — so the VS
+ * Code Codex card (`origin === 'codex_vscode'`) is unchanged and no badge is ever
+ * fabricated for an origin-less session.
+ */
+export function radarOriginBadge(agent: Pick<RadarAgent, 'origin'>): string | null {
+  const o = agent.origin?.trim();
+  if (o && /desktop$/i.test(o)) return 'Desktop';
+  return null;
+}
+
 // ── coercion helpers (shared shape with bridge.ts; kept local so radarTypes has
 // no import cycle and can be unit-tested in isolation) ─────────────────────────
 function num(v: unknown): number {

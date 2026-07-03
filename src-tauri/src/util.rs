@@ -64,6 +64,21 @@ pub fn default_codex_sessions() -> PathBuf {
         .map(|s| expand_tilde(&s))
         .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".codex/sessions"))
 }
+/// Root of the Claude **desktop app**'s "local agent mode" sessions —
+/// `~/Library/Application Support/Claude/local-agent-mode-sessions`. Each in-app
+/// workflow run lands at `<workspace>/<context>/local_<uuid>/audit.jsonl` (the
+/// ingestible Agent-SDK stream-json log). `WARDEN_CLAUDE_DESKTOP_SESSIONS`
+/// overrides (tests point it at a temp dir). Distinct from `~/.claude/projects`
+/// (the CLI): the desktop app never writes workflow data there.
+pub fn default_claude_desktop_sessions() -> PathBuf {
+    std::env::var("WARDEN_CLAUDE_DESKTOP_SESSIONS")
+        .map(|s| expand_tilde(&s))
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap()
+                .join("Library/Application Support/Claude/local-agent-mode-sessions")
+        })
+}
 /// RADAR: the Claude Code liveness registry directory `~/.claude/sessions`. Each
 /// `<pid>.json` records a currently-open session `{pid, sessionId, cwd, …}`.
 /// `WARDEN_CLAUDE_SESSIONS` overrides (tests point it at a temp dir). The dir is

@@ -13,7 +13,7 @@
 
 import type { CSSProperties } from 'react';
 import type { RadarAgent } from './radarTypes';
-import { radarSubtitle } from './radarTypes';
+import { radarSubtitle, radarOriginBadge } from './radarTypes';
 import { radarHarness } from './radarTheme';
 
 /** Human status words (the `working|idle|closed|terminated` enum is terse; spell it for glance). */
@@ -38,6 +38,7 @@ export function RadarHoverCard({ agent }: { agent: RadarAgent }) {
   const theme = radarHarness(agent.harness);
   const label = agent.label || agent.nickname || agent.id;
   const subtitle = radarSubtitle(agent);
+  const originBadge = radarOriginBadge(agent);
   const children = childLine(agent.childCount);
 
   return (
@@ -51,6 +52,7 @@ export function RadarHoverCard({ agent }: { agent: RadarAgent }) {
           {theme.glyph}
         </span>
         {theme.label}
+        {originBadge ? <span className="wd-radar-card-role"> · {originBadge}</span> : null}
         {agent.role ? <span className="wd-radar-card-role"> · {agent.role}</span> : null}
       </div>
 

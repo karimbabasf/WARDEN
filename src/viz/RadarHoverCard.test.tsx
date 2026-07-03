@@ -84,6 +84,25 @@ describe('RadarHoverCard — quick-glance fields', () => {
     expect(text).toContain('Claude');
   });
 
+  it('badges a Claude Desktop workflow "Desktop" while keeping the emerald Claude identity', () => {
+    const el = render(
+      <RadarHoverCard
+        agent={agentFixture({ harness: 'claude_code', origin: 'Claude Desktop', role: null })}
+      />,
+    );
+    const text = el.textContent ?? '';
+    expect(text).toContain('Claude'); // same harness identity (emerald glyph + label)
+    expect(text).toContain('◆'); // claude glyph, NOT a new colour/glyph
+    expect(text).toContain('Desktop'); // the sub-label that distinguishes it from the CLI
+  });
+
+  it('does not badge a VS Code Codex session (origin codex_vscode) — unchanged', () => {
+    const el = render(<RadarHoverCard agent={agentFixture({ origin: 'codex_vscode', role: null })} />);
+    const text = el.textContent ?? '';
+    expect(text).not.toContain('Desktop');
+    expect(text).not.toContain('codex_vscode');
+  });
+
   it('renders a graceful dash for an unknown model and 0% fill', () => {
     const el = render(<RadarHoverCard agent={agentFixture({ model: null, fillPct: 0, childCount: 0 })} />);
     const text = el.textContent ?? '';

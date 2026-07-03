@@ -108,6 +108,45 @@ pub fn link_codex_subagents(sessions: &[Session]) -> Vec<(String, String)> {
     pairs
 }
 
+/// Link Claude **Desktop** subagents to their parents (dir-owner heuristic).
+///
+/// One desktop `audit.jsonl` interleaves an orchestrator plus every subagent it
+/// spawned, each under its own `session_id` (= `external_id`). The SDK records no
+/// explicit parent pointer in these logs (`parent_tool_use_id` is present in the
+/// schema but null in practice), so the structural cue is the path: the session
+/// whose `external_id` equals the `local_<uuid>` directory name is the
+/// orchestrator/root; every OTHER session sharing that `audit.jsonl` `source_path`
+/// is one of its subagents.
+///
+/// Returns `(child_session_id, parent_session_id)` pairs (real store ids — the
+/// caller persists them directly). A file group with no session matching its
+/// directory uuid is left flat (no fabricated parent). Order follows the input.
+pub fn link_desktop_subagents(sessions: &[&Session]) -> Vec<(String, String)> {
+    use std::path::PathBuf;
+    // Group desktop sessions by their audit-log source_path.
+    let mut by_file: HashMap<PathBuf, Vec<&Session>> = HashMap::new();
+    for s in sessions {
+        by_file.entry(s.source_path.clone()).or_default().push(s);
+    }
+    let mut pairs = Vec::new();
+    for (path, group) in &by_file {
+        let Some(root_external) =
+            crate::ingest::claude_desktop::desktop_root_session_id(path)
+        else {
+            continue;
+        };
+        let Some(root) = group.iter().find(|s| s.external_id == root_external) else {
+            continue; // dir-owner session not (yet) ingested → leave the group flat
+        };
+        for child in group {
+            if child.id != root.id {
+                pairs.push((child.id.clone(), root.id.clone()));
+            }
+        }
+    }
+    pairs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +306,56 @@ mod tests {
             serde_json::json!({ "thread_source": "subagent", "parent_thread_id": "missing" }),
         );
         assert!(link_codex_subagents(&[orphan]).is_empty());
+    }
+
+    /// Build a Claude Desktop session: id `sid-<external>`, the given external id,
+    /// and the shared `audit.jsonl` source path under `local_<dir_uuid>`.
+    fn desktop_session(external_id: &str, dir_uuid: &str) -> Session {
+        let now = Utc::now();
+        Session {
+            id: format!("sid-{external_id}"),
+            harness: Harness::ClaudeCode,
+            external_id: external_id.into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: PathBuf::from(format!(
+                "/lams/ws/ctx/local_{dir_uuid}/audit.jsonl"
+            )),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({ "desktop": true }),
+        }
+    }
+
+    /// Desktop dir-owner heuristic: in one `audit.jsonl` the session whose id equals
+    /// the `local_<uuid>` dir name is the root; the co-resident sessions are its
+    /// subagents — each linked to the root's STORE id.
+    #[test]
+    fn desktop_subagents_nest_under_dir_owner() {
+        let root = desktop_session("root-uuid", "root-uuid");
+        let sub1 = desktop_session("sub-1", "root-uuid");
+        let sub2 = desktop_session("sub-2", "root-uuid");
+        let refs = [&root, &sub1, &sub2];
+        let mut pairs = link_desktop_subagents(&refs);
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("sid-sub-1".to_string(), "sid-root-uuid".to_string()),
+                ("sid-sub-2".to_string(), "sid-root-uuid".to_string()),
+            ]
+        );
+    }
+
+    /// A desktop file group whose dir-owner session is not ingested stays flat — no
+    /// fabricated parent (the children render as roots until the owner appears).
+    #[test]
+    fn desktop_group_without_dir_owner_stays_flat() {
+        // dir is `local_root-uuid`, but only a non-owner session is present.
+        let orphan = desktop_session("sub-only", "root-uuid");
+        let refs = [&orphan];
+        assert!(link_desktop_subagents(&refs).is_empty());
     }
 }

@@ -186,7 +186,20 @@ pub fn assemble(
     // A subagent is open iff the ROOT of its parent-chain is directly open — close
     // the root and the whole tree implodes; this also guarantees no kept subagent
     // ever dangles (its parent shares the same open root, so it is kept too).
+    // Claude Desktop "local agent mode" sessions have NO pid registry and no archive
+    // move, so — like Codex — openness is freshness-based: the workflow is live while
+    // its `audit.jsonl` was written within the stale window (reusing the Codex no-pid
+    // cutoff; `0` disables it). Checked BEFORE the harness match because desktop
+    // sessions report `Harness::ClaudeCode` (same emerald identity) yet must NOT be
+    // looked up in the pid registry, where they would never appear.
+    let desktop_stale_secs = crate::util::radar_codex_stale_secs();
     let directly_open = |s: &Session| -> bool {
+        if crate::ingest::claude_desktop::is_desktop_session(s) {
+            return match mtime_secs_ago(&s.external_id) {
+                Some(secs) => desktop_stale_secs == 0 || secs < desktop_stale_secs,
+                None => false,
+            };
+        }
         match s.harness {
             Harness::Codex => is_codex_open(s),
             _ => claude_status.contains_key(&s.external_id),
@@ -1631,7 +1644,75 @@ pub fn refresh_live_context(store: &Store, sessions_dir: &Path) -> usize {
     let codex_sessions_dir = crate::util::default_codex_sessions();
     let codex_archived_dir = crate::util::default_codex_archived_sessions();
     let codex_events = refresh_live_codex_rollouts(store, &codex_sessions_dir, &codex_archived_dir);
-    claude_events + codex_events
+    let desktop_root = crate::util::default_claude_desktop_sessions();
+    let desktop_events = refresh_live_desktop_sessions(store, &desktop_root);
+    claude_events + codex_events + desktop_events
+}
+
+/// Pull current live Claude **Desktop** audit-log tails into the store before RADAR
+/// assembles the forest — the desktop analogue of [`refresh_live_codex_rollouts`].
+/// A workflow already running before WARDEN started has its `audit.jsonl` on disk
+/// but may fire no watcher event after startup; this closes that gap. Reuses the
+/// scheduler's byte-watermark ingester so unchanged logs are cheap, then re-links
+/// the dir-owner hierarchy over the freshly-ingested sessions.
+fn refresh_live_desktop_sessions(store: &Store, root: &Path) -> usize {
+    let paths = live_desktop_audit_paths(root);
+    if paths.is_empty() {
+        return 0;
+    }
+    let registry = crate::ingest::AdapterRegistry::from_adapters(vec![Box::new(
+        crate::ingest::claude_desktop::ClaudeDesktopAdapter::with_root(
+            root.to_path_buf(),
+            store.clone(),
+        ),
+    )]);
+    let mut events = 0usize;
+    for path in paths {
+        match crate::scheduler::ingest_file_once(&registry, store, &path) {
+            Ok(n) => events += n,
+            Err(e) => tracing::warn!(
+                path=%path.display(),
+                error=%format!("{e:#}"),
+                "live Claude Desktop radar refresh failed"
+            ),
+        }
+    }
+    if events > 0 {
+        let _ = crate::ingest::claude_desktop::link_desktop_subagents_in_store(store);
+    }
+    events
+}
+
+/// Scan the Claude Desktop root for currently-open `audit.jsonl` logs: any audit
+/// file written within the no-pid stale window (reusing the Codex cutoff; a desktop
+/// workflow has no PID/termination signal, so mtime age is the only "still active"
+/// cue). A missing root contributes nothing.
+fn live_desktop_audit_paths(root: &Path) -> Vec<std::path::PathBuf> {
+    let stale_secs = crate::util::radar_codex_stale_secs();
+    let now = std::time::SystemTime::now();
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !(entry.file_type().is_file()
+            && crate::ingest::claude_desktop::is_audit_file(entry.path()))
+        {
+            continue;
+        }
+        let fresh = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|mt| now.duration_since(mt).ok())
+            .map(|d| d.as_secs())
+            .map(|secs| stale_secs == 0 || secs < stale_secs)
+            .unwrap_or(false);
+        if fresh {
+            out.push(entry.into_path());
+        }
+    }
+    out
 }
 
 /// Recompute the forest and return it. The scheduler's watcher calls this on each
@@ -4262,5 +4343,70 @@ mod tests {
 
         // The root itself is never terminated — it remains in the forest.
         assert!(s2.agents.iter().any(|a| a.id == "root"), "root persists");
+    }
+
+    /// End-to-end "we see desktop subagents running": ingest a real Claude Desktop
+    /// `audit.jsonl` (orchestrator + interleaved subagent), link the dir-owner
+    /// hierarchy, then assemble. The freshly-written file is fresh, so BOTH the root
+    /// and its subagent appear in the live forest — emerald (claude_code) with a
+    /// "Claude Desktop" origin sub-label — and the subagent nests under the root.
+    #[test]
+    fn desktop_workflow_subagents_appear_live_and_nested() {
+        use crate::ingest::claude_desktop::ClaudeDesktopAdapter;
+        use crate::ingest::Adapter;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("ws").join("ctx").join("local_root-uuid");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let audit = session_dir.join("audit.jsonl");
+        let body = [
+            r#"{"_audit_timestamp":"2026-06-26T09:24:01.000Z","type":"user","session_id":"root-uuid","message":{"role":"user","content":"build it"}}"#,
+            r#"{"_audit_timestamp":"2026-06-26T09:24:02.000Z","type":"assistant","session_id":"root-uuid","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"toolu_sub","name":"Task","input":{}}],"usage":{"input_tokens":100,"output_tokens":20}}}"#,
+            r#"{"_audit_timestamp":"2026-06-26T09:24:05.000Z","type":"assistant","session_id":"sub-uuid","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":200,"output_tokens":10}}}"#,
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(&audit, body).unwrap();
+
+        let store = Store::memory().unwrap();
+        let adapter = ClaudeDesktopAdapter::with_root(dir.path().to_path_buf(), store.clone());
+        for b in adapter.backfill().unwrap() {
+            store
+                .upsert_session_batch(&b.session, &b.turns, &b.events, b.offset)
+                .unwrap();
+        }
+        crate::ingest::claude_desktop::link_desktop_subagents_in_store(&store).unwrap();
+
+        // Empty registry dir + no live codex; the desktop freshness branch decides.
+        let reg = tempfile::tempdir().unwrap();
+        let state = assemble(&store, reg.path(), &|_| false, &|_| false, Utc::now());
+
+        assert_eq!(
+            state.agents.len(),
+            2,
+            "both the orchestrator and its subagent are on the radar"
+        );
+        let root = state
+            .agents
+            .iter()
+            .find(|a| a.parent_id.is_none())
+            .expect("root present");
+        let sub = state
+            .agents
+            .iter()
+            .find(|a| a.parent_id.is_some())
+            .expect("subagent present");
+        assert_eq!(root.harness, "claude_code", "desktop keeps emerald identity");
+        assert_eq!(
+            root.origin.as_deref(),
+            Some("Claude Desktop"),
+            "distinguished only by the origin sub-label"
+        );
+        assert_eq!(
+            sub.parent_id.as_deref(),
+            Some(root.id.as_str()),
+            "the subagent nests under the orchestrator"
+        );
+        assert_eq!(root.child_count, 1, "root shows one live subagent");
     }
 }
