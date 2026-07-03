@@ -270,8 +270,7 @@ export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
   };
 
   const CLUSTER_MARGIN = 0.8; // breathing room around each root's reach
-  const CLUSTER_GAP = 1.8; // empty lateral space between adjacent constellations
-  const CLUSTER_ARC_DEPTH = 1.4; // shallow camera-facing bow so clusters don't recede flat
+  const CLUSTER_GAP = 1.8; // empty space between adjacent constellations
 
   // Group roots into folders (deterministic order).
   const folderMap = new Map<string, RadarAgent[]>();
@@ -307,22 +306,35 @@ export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
     return { key, label: folderLabelOf(members[0]), harness, members, ringR, extent: ringR + maxFoot };
   });
 
-  // Lay the constellations left→right, centred on the origin, each pulled back along
-  // a shallow camera-facing arc (mirrors the Habits zone arc) so a row of folders
-  // reads side-by-side rather than marching into the distance.
-  const totalWidth =
-    plans.reduce((s, p) => s + p.extent * 2, 0) + CLUSTER_GAP * Math.max(0, plans.length - 1);
-  const halfSpan = totalWidth / 2;
-  const lastIdx = Math.max(1, plans.length - 1);
-  const rawZ = plans.map((_, i) => -CLUSTER_ARC_DEPTH * (1 - Math.cos((i / lastIdx) * (Math.PI / 2))));
-  const meanZ = rawZ.reduce((a, b) => a + b, 0) / Math.max(1, rawZ.length);
+  // ── galaxy packing ───────────────────────────────────────────────────────────
+  // Constellations spread around the origin as a tilted DISC, never a row: each
+  // folder claims a stable ray (its angle hashed from the folder key) and slides
+  // outward from the centre only as far as needed to clear everything already
+  // placed, plus a breathing gap. Properties, all by construction:
+  //   • overlap-free for arbitrarily mixed constellation sizes;
+  //   • deterministic (key-ordered placement, hashed angles, zero RNG);
+  //   • a NEW folder lands on its own ray and — placed in key order — at most
+  //     nudges later-keyed neighbours outward; it never re-rows the whole field
+  //     (the render additionally damps toward layout, so any shift glides);
+  //   • future harnesses need nothing here: identity stays colour+glyph, and the
+  //     disc simply grows outward as the fleet does.
+  const GALAXY_STEP = 0.4; // radial probe step when a ray is congested
+  const origin: Vec3 = { x: 0, y: 0, z: 0 };
+  const dist3 = (a: Vec3, b: Vec3): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+  const placedClusters: { center: Vec3; extent: number }[] = [];
 
   const clusters: RadarCluster[] = [];
-  let cursor = -halfSpan;
-  plans.forEach((plan, i) => {
-    const cx = cursor + plan.extent; // cluster centre on the lateral axis
-    cursor += plan.extent * 2 + CLUSTER_GAP;
-    const center: Vec3 = { x: cx, y: 0, z: rawZ[i] - meanZ };
+  plans.forEach((plan) => {
+    const theta = angleSeed(`galaxy:${plan.key}`);
+    let ray = 0;
+    let center = origin;
+    const collides = (c: Vec3): boolean =>
+      placedClusters.some((p) => dist3(c, p.center) < p.extent + plan.extent + CLUSTER_GAP);
+    while (collides(center)) {
+      ray += GALAXY_STEP;
+      center = ringPosition(origin, theta, ray);
+    }
+    placedClusters.push({ center, extent: plan.extent });
 
     const place = (root: RadarAgent, pos: Vec3) => {
       const node = makeNode(root, pos);

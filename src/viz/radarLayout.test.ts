@@ -393,3 +393,80 @@ describe('layoutRadarScene — frozen output contract (every node carries id + p
     expect(map.size).toBe(layout.nodes.length);
   });
 });
+
+// ── galaxy packing: many constellations must read as a FIELD, never a queue ──
+describe('layoutRadarScene — galaxy packing', () => {
+  // N distinct single-root folders — the exact fleet shape that used to march
+  // left→right in one long strip.
+  function manyFolders(n: number): RadarSceneModel {
+    return {
+      generatedAt: 'T0',
+      agents: Array.from({ length: n }, (_, i) =>
+        agent({ id: `r${i}`, cwd: `proj-${i}`, contextTokens: 20000 + i * 1000 }),
+      ),
+    };
+  }
+
+  it('spreads many constellations as a 2D field, not a single row', () => {
+    const layout = layoutRadarScene(manyFolders(9));
+    const mean = { x: 0, y: 0, z: 0 };
+    for (const c of layout.clusters) {
+      mean.x += c.center.x / layout.clusters.length;
+      mean.y += c.center.y / layout.clusters.length;
+      mean.z += c.center.z / layout.clusters.length;
+    }
+    let vx = 0;
+    let vy = 0;
+    let vz = 0;
+    for (const c of layout.clusters) {
+      vx += (c.center.x - mean.x) ** 2;
+      vy += (c.center.y - mean.y) ** 2;
+      vz += (c.center.z - mean.z) ** 2;
+    }
+    const dominant = Math.max(vx, vy, vz) / Math.max(1e-9, vx + vy + vz);
+    // a row concentrates ~all variance on one axis (ratio → 1); a tilted disc
+    // spreads it (x plus the tilt-scaled y/z components keep the ratio < 0.8).
+    expect(dominant).toBeLessThan(0.8);
+  });
+
+  it('never overlaps two constellations, even with wildly different sizes', () => {
+    const busy = [
+      agent({ id: 'big', cwd: 'mega', contextTokens: 180000, childCount: 14 }),
+      ...Array.from({ length: 14 }, (_, i) =>
+        agent({ id: `big-k${i}`, depth: 1, parentId: 'big', contextTokens: 6000 }),
+      ),
+    ];
+    const solos = Array.from({ length: 7 }, (_, i) => agent({ id: `s${i}`, cwd: `solo-${i}`, contextTokens: 9000 }));
+    const layout = layoutRadarScene({ generatedAt: 'T0', agents: [...busy, ...solos] });
+    expect(layout.clusters.length).toBe(8);
+    for (let i = 0; i < layout.clusters.length; i++) {
+      for (let j = i + 1; j < layout.clusters.length; j++) {
+        const a = layout.clusters[i];
+        const b = layout.clusters[j];
+        expect(distance(a.center, b.center)).toBeGreaterThanOrEqual(a.radius + b.radius - 1e-6);
+      }
+    }
+  });
+
+  it('keeps a small fleet huddled near the origin (a galaxy heart, not a sparse fling)', () => {
+    const layout = layoutRadarScene(manyFolders(3));
+    const maxExtent = Math.max(...layout.clusters.map((c) => c.radius));
+    for (const c of layout.clusters) {
+      const r = Math.hypot(c.center.x, c.center.y, c.center.z);
+      expect(r).toBeLessThanOrEqual(maxExtent * 4 + 4);
+    }
+  });
+
+  it('does not reshuffle existing constellations when a new folder appears', () => {
+    const before = layoutRadarScene(manyFolders(6));
+    const after = layoutRadarScene({
+      generatedAt: 'T0',
+      agents: [...manyFolders(6).agents, agent({ id: 'newb', cwd: 'zz-new', contextTokens: 500 })],
+    });
+    for (const c of before.clusters) {
+      const still = after.clusters.find((x) => x.key === c.key);
+      expect(still).toBeTruthy();
+      expect(distance(still!.center, c.center)).toBeLessThan(1e-6);
+    }
+  });
+});
