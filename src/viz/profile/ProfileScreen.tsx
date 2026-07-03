@@ -120,22 +120,45 @@ function WindowToggle({
 }
 
 // ── efficiency ────────────────────────────────────────────────────────────────
-function EfficiencyPanel({ eff }: { eff: EfficiencyScore }) {
+// GAP 2 fix: efficiency has two possible sources — the standalone
+// `get_efficiency_score` fetch (`eff`, fresher / lower-latency) and the copy
+// embedded in the built Profile (`profileEff`). Previously only `eff` was
+// rendered, so a failed/slow standalone call showed an empty panel even
+// though `profileEff` had the same numbers sitting in state. Prefer `eff`,
+// fall back to `profileEff`; if both exist and their rubric_version differs,
+// surface a visible-but-calm warning line (the two scores may not be
+// comparable in that case).
+export function EfficiencyPanel({ eff, profileEff }: { eff: EfficiencyScore | null; profileEff: EfficiencyScore | null }) {
+  const resolved = eff ?? profileEff;
+  if (!resolved) {
+    return (
+      <section style={SECTION}>
+        <h2 style={H2}>Efficiency</h2>
+        <div style={SUBTLE}>No efficiency score yet.</div>
+      </section>
+    );
+  }
+  const drift = eff && profileEff && eff.rubric_version !== profileEff.rubric_version;
   // Show the headline on a 0–100 scale alongside the raw 0.00–1.00, NEVER alone:
   // the per-family bars sit right beneath it so the composite is always in context.
-  const families = [...eff.families].sort((a, b) => b.weight - a.weight);
+  const families = [...resolved.families].sort((a, b) => b.weight - a.weight);
   return (
     <section style={SECTION}>
       <h2 style={H2}>Efficiency</h2>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 8 }}>
         <div style={{ fontSize: 44, lineHeight: 1, color: 'var(--green)' }}>
-          {Math.round(eff.headline * 100)}
+          {Math.round(resolved.headline * 100)}
           <span style={{ fontSize: 18, color: 'var(--ink-faint)' }}> / 100</span>
         </div>
         <div style={SUBTLE}>
-          {eff.headline.toFixed(2)} · rubric {eff.rubric_version} · {eff.session_count} sessions
+          {resolved.headline.toFixed(2)} · rubric {resolved.rubric_version} · {resolved.session_count} sessions
         </div>
       </div>
+      {drift ? (
+        <div style={{ fontSize: 11, color: 'var(--warn)', marginBottom: 8 }}>
+          rubric drift: profile v{profileEff!.rubric_version} / score v{eff!.rubric_version}
+        </div>
+      ) : null}
       <div style={{ display: 'grid', gap: 8, maxWidth: 720 }}>
         {families.map((f) => (
           <div key={f.key} style={{ display: 'grid', gridTemplateColumns: '180px 1fr 96px', gap: 10, alignItems: 'center' }}>
@@ -283,29 +306,134 @@ function StatusChip({ status }: { status: Claim['status'] }) {
   );
 }
 
-function ClaimRow({ claim }: { claim: Claim }) {
+export function ClaimRow({ claim }: { claim: Claim }) {
   return (
     <li style={{ marginBottom: 8, listStyle: 'none' }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
         <StatusChip status={claim.status} />
         <span style={{ fontSize: 13, color: 'var(--ink)', lineHeight: 1.4 }}>{claim.text}</span>
       </div>
-      <div style={{ ...SUBTLE, marginLeft: 4 }}>
-        confidence {pct(claim.confidence)} · {claim.evidence.length} evidence
-        {claim.evidence.length > 0 ? ` · ${evidenceLabel(claim.evidence[0])}` : ''}
+      <div style={{ ...SUBTLE, marginLeft: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span>confidence {pct(claim.confidence)}</span>
+        <EvidenceToggle evidence={claim.evidence} idPrefix="claim" />
       </div>
     </li>
   );
 }
 
-function evidenceLabel(ev: EvidenceRef): string {
-  const where = ev.source_path ?? ev.session_id;
-  const tail = where ? where.split('/').pop() ?? where : 'session';
-  return ev.quote ? `“${truncate(ev.quote, 60)}”` : tail;
+// ── evidence — the toggle every claim/leak reuses (GAP 1 fix) ─────────────────
+// Collapsed by default: shows only a count. Expanding reveals EVERY evidence
+// ref (not just the first) — quote (truncated ~140 chars), a source tail (last
+// 2 path segments of source_path, falling back to session_id), and the turn id
+// when present. All EvidenceRef fields may be null; every access is guarded.
+let evidenceIdSeq = 0;
+
+function sourceTail(ev: EvidenceRef): string {
+  const where = ev.source_path ?? ev.session_id ?? null;
+  if (!where) return 'session';
+  const segs = where.split('/').filter(Boolean);
+  return segs.length > 0 ? segs.slice(-2).join('/') : where;
+}
+
+function evidenceQuote(ev: EvidenceRef): string {
+  return ev.quote ? `“${truncate(ev.quote, 140)}”` : '(no quote)';
 }
 
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+export function EvidenceToggle({ evidence, idPrefix }: { evidence: EvidenceRef[]; idPrefix: string }) {
+  const [open, setOpen] = useState(false);
+  const domId = useMemo(() => `${idPrefix}-evidence-${++evidenceIdSeq}`, [idPrefix]);
+
+  if (evidence.length === 0) {
+    return <span>0 evidence</span>;
+  }
+
+  return (
+    <span>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={domId}
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          cursor: 'pointer',
+          fontFamily: 'var(--mono)',
+          fontSize: 11,
+          padding: '0 4px',
+          borderRadius: 3,
+          border: '1px solid var(--hair)',
+          background: open ? 'rgba(118,255,157,0.10)' : 'transparent',
+          color: 'var(--ink-faint)',
+        }}
+      >
+        {evidence.length} evidence {open ? '▾' : '▸'}
+      </button>
+      {open ? (
+        <ul id={domId} style={{ margin: '4px 0 0', padding: 0, display: 'grid', gap: 4 }}>
+          {evidence.map((ev, i) => (
+            <li
+              key={i}
+              style={{
+                listStyle: 'none',
+                fontSize: 11,
+                color: 'var(--ink-soft)',
+                padding: '4px 8px',
+                border: '1px solid var(--hair)',
+                borderRadius: 4,
+                background: 'var(--panel)',
+              }}
+            >
+              <div>{evidenceQuote(ev)}</div>
+              <div style={{ color: 'var(--ink-faint)', marginTop: 2 }}>
+                {sourceTail(ev)}
+                {ev.turn_id ? ` · turn ${ev.turn_id}` : ''}
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </span>
+  );
+}
+
+// ── hash badge (GAP 3 fix) ──────────────────────────────────────────────────
+// The 8-char display truncation is deliberate (space), but the full hash was
+// previously unreachable — no title, no copy. `title` exposes it on hover;
+// clicking copies the full hash and flips the label to "copied" briefly.
+// navigator.clipboard is absent in some test/embed environments, so the write
+// is best-effort and guarded rather than assumed.
+export function HashBadge({ hash }: { hash: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const onCopy = useCallback(() => {
+    const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+    if (!clipboard?.writeText) return;
+    clipboard
+      .writeText(hash)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {});
+  }, [hash]);
+
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      title={hash}
+      onClick={onCopy}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') onCopy();
+      }}
+      style={{ cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: 3 }}
+    >
+      {copied ? 'copied' : hash.slice(0, 8)}
+    </span>
+  );
 }
 
 function DimensionPanel({ dim }: { dim: ProfileDimension }) {
@@ -334,7 +462,7 @@ function DimensionPanel({ dim }: { dim: ProfileDimension }) {
 }
 
 // ── leaks ─────────────────────────────────────────────────────────────────────
-function LeaksPanel({ leaks }: { leaks: Leak[] }) {
+export function LeaksPanel({ leaks }: { leaks: Leak[] }) {
   return (
     <section style={SECTION}>
       <h2 style={H2}>Ranked leaks</h2>
@@ -347,12 +475,13 @@ function LeaksPanel({ leaks }: { leaks: Leak[] }) {
             .map((l) => (
               <div
                 key={`${l.rank}-${l.title}`}
-                style={{ display: 'flex', gap: 12, alignItems: 'baseline', padding: '8px 10px', border: '1px solid var(--hair)', borderRadius: 6, background: 'var(--panel)' }}
+                style={{ display: 'flex', gap: 12, alignItems: 'flex-start', padding: '8px 10px', border: '1px solid var(--hair)', borderRadius: 6, background: 'var(--panel)' }}
               >
                 <span style={{ color: 'var(--amber)', fontSize: 16, minWidth: 28 }}>#{l.rank}</span>
                 <span style={{ flex: 1, fontSize: 13, color: 'var(--ink)' }}>{l.title}</span>
-                <span style={SUBTLE}>
-                  ~{l.est_cost_tokens.toLocaleString()} tok · ~{Math.round(l.est_cost_minutes)} min · {l.evidence.length} ev
+                <span style={{ ...SUBTLE, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  ~{l.est_cost_tokens.toLocaleString()} tok · ~{Math.round(l.est_cost_minutes)} min ·{' '}
+                  <EvidenceToggle evidence={l.evidence} idPrefix="leak" />
                 </span>
               </div>
             ))}
@@ -557,8 +686,10 @@ export function ProfileScreen({ onClose }: { onClose: () => void }) {
         <div style={{ ...SECTION, color: 'var(--ink-faint)' }}>Loading {WINDOW_LABELS[win]}…</div>
       ) : null}
 
-      {/* Efficiency — always paired headline + family bars. */}
-      {eff ? <EfficiencyPanel eff={eff} /> : null}
+      {/* Efficiency — always paired headline + family bars. Prefers the fresher
+          standalone `eff` fetch, falls back to the profile's embedded copy so
+          a failed/lagging standalone call doesn't blank the panel (GAP 2). */}
+      <EfficiencyPanel eff={eff} profileEff={profile?.efficiency ?? null} />
 
       {/* Activity heatmap. */}
       <HeatmapPanel cells={cells} />
@@ -575,7 +706,8 @@ export function ProfileScreen({ onClose }: { onClose: () => void }) {
                 </span>
               ) : null}
               <span style={SUBTLE}>
-                generated {profile.generated_at} · {profile.session_count} sessions · hash {profile.data_hash.slice(0, 8)}
+                generated {profile.generated_at} · {profile.session_count} sessions · hash{' '}
+                <HashBadge hash={profile.data_hash} />
               </span>
             </div>
             <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', marginTop: 12 }}>
