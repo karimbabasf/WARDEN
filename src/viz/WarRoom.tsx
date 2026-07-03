@@ -929,7 +929,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         <div className="wd-radar-empty" aria-live="polite">
           <span className="wd-radar-empty-pulse" aria-hidden />
           <span className="wd-radar-empty-title">Watching for live agents</span>
-          <span className="wd-radar-empty-sub">Open Claude Code or Codex and your sessions appear here.</span>
+          <span className="wd-radar-empty-sub">Open Claude Code, Claude Desktop, or Codex and your sessions appear here.</span>
         </div>
       ) : null}
 
