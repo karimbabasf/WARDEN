@@ -77,6 +77,15 @@ describe('normalizeRadarState', () => {
     expect(without.agents[0].cwd).toBeNull();
   });
 
+  it('carries cwdPath (disambiguating path) through and defaults it to null when missing', () => {
+    const withPath = normalizeRadarState({ agents: [{ ...fullAgent(), cwdPath: '~/alpha/api' }] });
+    expect(withPath.agents[0].cwdPath).toBe('~/alpha/api');
+    const snake = normalizeRadarState({ agents: [{ ...fullAgent(), cwd_path: '~/beta/api' }] });
+    expect(snake.agents[0].cwdPath).toBe('~/beta/api');
+    const without = normalizeRadarState({ agents: [{ id: 'a', harness: 'codex', status: 'idle' }] });
+    expect(without.agents[0].cwdPath).toBeNull();
+  });
+
   it('defaults missing optionals (nickname/role/origin → null, estimated → null, estCostUsd → null)', () => {
     const model = normalizeRadarState({
       agents: [
@@ -161,17 +170,32 @@ describe('normalizeRadarState', () => {
     expect(normalizeRadarState({}).generatedAt).toBe('');
   });
 
-  it('builds a "folder · model" subtitle only when the folder adds info beyond the label', () => {
-    // Claude root: label is the task, so the folder + short model is useful context.
-    expect(radarSubtitle({ label: 'Polish the M3 radar fixes', cwd: 'WARDEN', model: 'claude-opus-4-8' })).toBe(
-      'WARDEN · opus',
+  it('builds a "location · model" subtitle from the disambiguating path', () => {
+    // Claude root: label is the task; legacy payload (no cwdPath) keeps the old folder behavior.
+    expect(
+      radarSubtitle({ label: 'Polish the M3 radar fixes', cwd: 'WARDEN', cwdPath: null, model: 'claude-opus-4-8' }),
+    ).toBe('WARDEN · opus');
+    // THE collision case: two roots both named `api` under different parents now read differently.
+    expect(radarSubtitle({ label: 'api', cwd: 'api', cwdPath: '~/alpha/api', model: 'gpt-5' })).toBe(
+      'alpha/api · gpt-5',
     );
-    // Codex: label already IS the folder → no redundant subtitle.
-    expect(radarSubtitle({ label: 'github project', cwd: 'github project', model: 'openai' })).toBeNull();
-    // No folder → no subtitle.
-    expect(radarSubtitle({ label: 'x', cwd: null, model: 'claude-haiku-4-5-20251001' })).toBeNull();
-    // Folder present but model unknown → folder alone.
-    expect(radarSubtitle({ label: 'do a thing', cwd: 'MOBIUS', model: null })).toBe('MOBIUS');
+    expect(radarSubtitle({ label: 'api', cwd: 'api', cwdPath: '~/beta/api', model: 'gpt-5' })).toBe(
+      'beta/api · gpt-5',
+    );
+    // A root labeled by its folder still gains the parent dir as context.
+    expect(
+      radarSubtitle({ label: 'WARDEN', cwd: 'WARDEN', cwdPath: '~/Developer/WARDEN', model: 'claude-opus-4-8' }),
+    ).toBe('Developer/WARDEN · opus');
+    // Folder present but model unknown → folder alone (legacy payload).
+    expect(radarSubtitle({ label: 'do a thing', cwd: 'MOBIUS', cwdPath: null, model: null })).toBe('MOBIUS');
+    // Nothing beyond the label and no model → no subtitle at all.
+    expect(radarSubtitle({ label: 'github project', cwd: 'github project', cwdPath: null, model: null })).toBeNull();
+    expect(radarSubtitle({ label: 'x', cwd: 'x', cwdPath: '~/x', model: null })).toBeNull();
+    // The model must never be lost to a name collision: it renders alone if needed.
+    expect(radarSubtitle({ label: 'github project', cwd: 'github project', cwdPath: null, model: 'gpt-5' })).toBe(
+      'gpt-5',
+    );
+    expect(radarSubtitle({ label: 'x', cwd: null, cwdPath: null, model: 'claude-haiku-4-5-20251001' })).toBe('haiku');
   });
 
   it('drops only the estimated lens when malformed but keeps exact', () => {

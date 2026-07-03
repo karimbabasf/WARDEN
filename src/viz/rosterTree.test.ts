@@ -20,6 +20,7 @@ function agent(over: Partial<RadarAgent> = {}): RadarAgent {
     label: 'task',
     nickname: null,
     cwd: null,
+    cwdPath: null,
     role: null,
     model: null,
     status: 'idle',

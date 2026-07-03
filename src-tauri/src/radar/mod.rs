@@ -45,6 +45,10 @@ pub struct RadarAgent {
     /// separately from `label` so the FACE can render a "folder · model" subtitle
     /// even when `label` is the agent's task. `None` when there is no project cwd.
     pub cwd: Option<String>,
+    /// Home-abbreviated project path (root only), e.g. `~/Developer/WARDEN` — the
+    /// disambiguating counterpart to the basename `cwd`: two `api` folders under
+    /// different parents render differently here. `None` when there is no cwd.
+    pub cwd_path: Option<String>,
     pub role: Option<String>,
     pub model: Option<String>,
     pub status: String,
@@ -384,6 +388,13 @@ pub fn assemble(
             root_dup_ordinal.get(&s.id).copied(),
             &agent.label,
         );
+        // A user-given nickname is the strongest identity an agent can carry — for
+        // roots it beats the folder name (the folder remains in the subtitle).
+        if depth == 0 {
+            if let Some(nick) = agent.nickname.clone().filter(|n| !n.trim().is_empty()) {
+                agent.label = nick;
+            }
+        }
         agents.push(agent);
     }
 
@@ -764,6 +775,7 @@ fn build_agent(
         .as_ref()
         .and_then(|p| p.cwd.file_name())
         .map(|n| n.to_string_lossy().to_string());
+    let cwd_path = s.project.as_ref().map(|p| abbreviate_home(&p.cwd));
 
     RadarAgent {
         id: s.id.clone(),
@@ -774,6 +786,7 @@ fn build_agent(
         label,
         nickname,
         cwd,
+        cwd_path,
         role,
         model,
         status: status.as_str().to_string(),
@@ -1358,6 +1371,21 @@ fn clean_task_label(raw: &str) -> String {
         _ => collapsed.as_str(),
     };
     crate::util::truncate_chars(cleaned, 60)
+}
+
+/// `/Users/you/x/y` → `~/x/y`; paths outside the home dir pass through unchanged.
+fn abbreviate_home(p: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = p.strip_prefix(&home) {
+            let r = rest.to_string_lossy();
+            return if r.is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{r}")
+            };
+        }
+    }
+    p.to_string_lossy().to_string()
 }
 
 /// The radar display label. Roots are named by their project folder; subagents by a
@@ -3240,6 +3268,132 @@ mod tests {
             Some("WARDEN"),
             "the folder basename is exposed as `cwd` for the subtitle"
         );
+    }
+
+    /// Naming: a Codex ROOT with a user-given nickname is labeled by that nickname —
+    /// a nickname is the strongest identity signal the operator can give an agent,
+    /// so it must not lose to the folder basename (the folder stays in the subtitle).
+    #[test]
+    fn codex_root_with_nickname_is_labeled_by_nickname() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let session = Session {
+            id: "cx-nick".into(),
+            harness: Harness::Codex,
+            external_id: "thread-nick".into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/Users/k/work/api"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: PathBuf::from("/tmp/cx-nick.jsonl"),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({ "agent_nickname": "hermes" }),
+        };
+        store.upsert_session_batch(&session, &[], &[], 0).unwrap();
+        let is_codex_open = |s: &Session| s.external_id == "thread-nick";
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &is_codex_open,
+            now,
+        );
+        let a = state
+            .agents
+            .iter()
+            .find(|a| a.id == "cx-nick")
+            .expect("root present");
+        assert_eq!(
+            a.label, "hermes",
+            "a nicknamed Codex root is labeled by its nickname, not the folder"
+        );
+        assert_eq!(a.cwd.as_deref(), Some("api"), "folder still exposed for the subtitle");
+    }
+
+    /// Naming: two roots in DIFFERENT parents that share a folder basename
+    /// (`…/alpha/api` vs `…/beta/api`) must expose a disambiguating `cwd_path` —
+    /// the bare basename `cwd` renders identically for both, which is exactly the
+    /// collision the subtitle needs to break.
+    #[test]
+    fn same_basename_roots_expose_disambiguating_cwd_path() {
+        let store = Store::memory().unwrap();
+        seed(
+            &store,
+            "ra",
+            "ra-ext",
+            Harness::Codex,
+            Some("/Users/k/alpha/api"),
+            None,
+        );
+        seed(
+            &store,
+            "rb",
+            "rb-ext",
+            Harness::Codex,
+            Some("/Users/k/beta/api"),
+            None,
+        );
+        let is_codex_open =
+            |s: &Session| matches!(s.external_id.as_str(), "ra-ext" | "rb-ext");
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &is_codex_open,
+            Utc::now(),
+        );
+        let pa = state
+            .agents
+            .iter()
+            .find(|a| a.id == "ra")
+            .unwrap()
+            .cwd_path
+            .clone()
+            .expect("cwd_path present");
+        let pb = state
+            .agents
+            .iter()
+            .find(|a| a.id == "rb")
+            .unwrap()
+            .cwd_path
+            .clone()
+            .expect("cwd_path present");
+        assert_ne!(pa, pb, "same-basename roots must expose different paths");
+        assert!(pa.ends_with("alpha/api"), "parent dir retained: {pa}");
+        assert!(pb.ends_with("beta/api"), "parent dir retained: {pb}");
+    }
+
+    /// `cwd_path` is home-abbreviated (`/Users/x/…` → `~/…`) so the FACE never
+    /// renders a noisy absolute prefix.
+    #[test]
+    fn cwd_path_is_home_abbreviated() {
+        let home = dirs::home_dir().expect("home dir");
+        let store = Store::memory().unwrap();
+        let cwd = home.join("proj/thing");
+        seed(
+            &store,
+            "rh",
+            "rh-ext",
+            Harness::ClaudeCode,
+            Some(cwd.to_str().unwrap()),
+            None,
+        );
+        let reg = claude_registry(&[(100, "rh-ext")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let p = state
+            .agents
+            .iter()
+            .find(|a| a.id == "rh")
+            .unwrap()
+            .cwd_path
+            .clone()
+            .expect("cwd_path present");
+        assert_eq!(p, "~/proj/thing");
     }
 
     /// Finding 1: a linked Claude subagent surfaces its sidecar `description` as the

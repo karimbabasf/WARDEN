@@ -65,6 +65,7 @@ export type RadarAgent = {
   label: string;
   nickname: string | null;
   cwd: string | null; // project-folder basename (root only), for the "folder · model" subtitle
+  cwdPath: string | null; // home-abbreviated project path (`~/alpha/api`) — breaks basename collisions
   role: string | null;
   model: string | null;
   status: RadarStatus;
@@ -97,16 +98,31 @@ export function shortModel(m: string | null): string | null {
 }
 
 /**
- * The secondary "folder · model" identity line shown under an agent's name. Only
- * meaningful when the folder ADDS information beyond the label — i.e. the label is
- * the agent's task (Claude roots), not the folder itself (Codex). Returns null when
- * there's nothing useful to add, so the UI renders no empty subtitle.
+ * The secondary "location · model" identity line shown under an agent's name. The
+ * location is the parent-aware short path (last two segments of `cwdPath`) when it
+ * adds information beyond the label — this is what breaks the collision of two
+ * roots whose folders share a basename (`…/alpha/api` vs `…/beta/api`). Legacy
+ * payloads without `cwdPath` keep the old bare-folder behavior. The model renders
+ * even when the location collapses — a name collision must never hide WHICH model
+ * an agent runs. Returns null only when there is truly nothing to add.
  */
-export function radarSubtitle(agent: Pick<RadarAgent, 'label' | 'cwd' | 'model'>): string | null {
-  const folder = agent.cwd && agent.cwd !== (agent.label || '') ? agent.cwd : null;
-  if (!folder) return null;
+export function radarSubtitle(agent: Pick<RadarAgent, 'label' | 'cwd' | 'cwdPath' | 'model'>): string | null {
+  const label = agent.label || '';
+  const short = shortPath(agent.cwdPath);
+  const legacy = agent.cwd && agent.cwd !== label ? agent.cwd : null;
+  const loc = short && short !== label ? short : legacy;
   const m = shortModel(agent.model);
-  return m ? `${folder} · ${m}` : folder;
+  if (loc && m) return `${loc} · ${m}`;
+  if (loc) return loc;
+  return m;
+}
+
+/** Last two segments of a home-abbreviated path (`~/alpha/api` → `alpha/api`). */
+function shortPath(p: string | null | undefined): string | null {
+  if (!p) return null;
+  const segs = p.split('/').filter((s) => s && s !== '~');
+  if (!segs.length) return null;
+  return segs.slice(-2).join('/');
 }
 
 /**
@@ -218,6 +234,7 @@ function normalizeAgent(a: any): RadarAgent {
     label: str(a?.label),
     nickname: strOrNull(a?.nickname),
     cwd: strOrNull(a?.cwd),
+    cwdPath: strOrNull(a?.cwdPath ?? a?.cwd_path),
     role: strOrNull(a?.role),
     model: strOrNull(a?.model),
     status: status(a?.status),

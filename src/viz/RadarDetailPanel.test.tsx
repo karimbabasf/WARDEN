@@ -31,6 +31,7 @@ function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
     label: 'warden',
     nickname: null,
     cwd: 'WARDEN',
+    cwdPath: '~/Developer/WARDEN',
     role: null,
     model: 'claude-opus-4-8',
     status: 'working',
@@ -275,5 +276,21 @@ describe('RadarDetailPanel — children roster + identity/cost', () => {
     const costCell = id2?.querySelector('[data-id="cost"]');
     expect((costCell?.textContent ?? '')).toContain('—');
     expect((costCell?.textContent ?? '')).not.toContain('$');
+  });
+
+  it('shows the disambiguating path in identity, and omits the row when absent', () => {
+    const withPath = render(<RadarDetailPanel agent={agentFixture()} />);
+    const id1 = withPath.querySelector('[data-section="identity"]');
+    expect((id1?.textContent ?? '')).toContain('Path');
+    expect((id1?.textContent ?? '')).toContain('~/Developer/WARDEN');
+
+    act(() => root?.unmount());
+    container?.remove();
+    root = null;
+    container = null;
+
+    const noPath = render(<RadarDetailPanel agent={agentFixture({ cwdPath: null })} />);
+    const id2 = noPath.querySelector('[data-section="identity"]');
+    expect((id2?.textContent ?? '')).not.toContain('Path');
   });
 });

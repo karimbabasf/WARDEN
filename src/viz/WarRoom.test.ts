@@ -50,6 +50,7 @@ function radarAgent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id' | 'harn
     depth: 0,
     nickname: null,
     cwd: null,
+    cwdPath: null,
     role: null,
     model: null,
     status: 'idle',

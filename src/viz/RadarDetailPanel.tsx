@@ -290,6 +290,12 @@ function IdentitySection({ agent }: { agent: RadarAgent }) {
             <dd>{agent.role}</dd>
           </div>
         ) : null}
+        {agent.cwdPath ? (
+          <div>
+            <dt>Path</dt>
+            <dd title={agent.cwdPath}>{agent.cwdPath}</dd>
+          </div>
+        ) : null}
         <div>
           <dt>Model</dt>
           <dd>{agent.model ?? '—'}</dd>
