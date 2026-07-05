@@ -28,3 +28,8 @@ status.sh
 /warp-flight.png
 /warp-streaks.png
 /radar-real.html
+/dossier-profile-fullpage.jpeg
+
+# local scratch (design exploration, throwaway artifacts)
+/.scratch/
+/.warden-run/

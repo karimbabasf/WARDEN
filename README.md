@@ -1,142 +1,160 @@
 # WARDEN
 
-WARDEN is the agent that watches your agents: a macOS Apple Silicon-first Tauri v2 daemon that ingests local AI-coding transcripts, normalizes them into a canonical Rust IR, diagnoses recurring agentic workflow leaks through Sakana Fugu, and renders a cinematic green/black overlay with evidence-cited findings.
+**The agent that watches your agents.**
 
-The current repo state is a verified M3-ready slate. M0 Spine, M1 Brain, and M2 Face are complete; M3 RADAR is next and has not been implemented yet.
+You run Claude Code, Codex, and a growing pile of terminal agents every day. You don't see how they actually behave — where they loop, where they burn tokens re-reading the same files, where they teleport blind, where they quietly stall. WARDEN does.
 
-## Product thesis
+WARDEN is a macOS desktop daemon that sits over your local AI-coding agents, reads their transcripts as they're written, and tells you — with evidence — where your agentic workflow is leaking. Summon it with a global hotkey and a cinematic war-room overlay shows the live state of your fleet, the recurring holes in how you drive it, and a ranked diagnosis you can act on.
 
-The value is not a UI wrapped around an LLM. WARDEN’s value is the chain:
+It reads. It never writes to your projects.
 
-1. EYES — local transcript adapters watch Claude Code and Codex.
-2. MEMORY — normalized sessions/events/findings live in SQLite + FTS5.
-3. SPINE — every harness maps into one canonical IR.
-4. BRAIN — deterministic detectors nominate candidate holes; Fugu diagnoses/coaches/verifies them.
-5. FACE — the overlay makes the diagnosis legible through a war-room visualization, ranked evidence, and read-only fix previews.
-6. RADAR — next milestone: locate and navigate the live agent fleet visibly, without blind teleportation.
+---
 
-## Current milestone state
+## What it does
 
-- M0 Spine: complete.
-- M1 Brain: complete.
-- M2 Face: complete and verified.
-- M3 RADAR: next, not started.
-- M4 Forge apply, M5 Live, M6 Voice, M7 Adapters: future and stubbed through `scaffold::not_in_slice()`.
-- DOSSIER ("Profile by Proof"): captured idea, no spec yet — a longitudinal, evidence-backed profile of how the operator drives their agents (orchestration style, patterns, holes, strengths, where they lose, project archetypes, trajectory) with an all-time/6mo/3mo/30d/2wk window toggle, powered by GLM-5.2 over BRAIN + RADAR. Milestone number TBD (Karim called it "M4" — collides with Forge). See `docs/ideas/2026-06-24-dossier-profile-by-proof.md`.
+WARDEN turns raw agent transcripts into a diagnosis in five stages:
 
-## What is in M2
+1. **Watch** — File adapters tail the transcript logs your agents already produce: Claude Code (`~/.claude/projects/**/*.jsonl`) and Codex (`~/.codex/sessions/**/rollout-*.jsonl`). Startup backfills history; `FSEvents` streams new writes live using byte-offset watermarks, so nothing is double-counted and no session is dropped on schema drift.
+2. **Normalize** — Every harness, whatever its log format, maps into one canonical Rust intermediate representation. Sessions, events, and token usage land in a local SQLite + FTS5 store. Adding a new agent is one adapter file with zero downstream changes.
+3. **Detect** — Deterministic detectors scan the normalized history and nominate candidate problems: the patterns that keep costing you time and tokens.
+4. **Diagnose** — A Diagnostician → Coach → Verifier reasoning pipeline (GLM-5.2 via NEAR AI, OpenAI-compatible) takes each candidate, confirms or rejects it, and produces a coached, evidence-cited finding with a do/stop recommendation. No API key, or a failed call, degrades gracefully to detector-only output rather than faking it.
+5. **Show** — A global hotkey (**⌘⌥⌃M**) summons a transparent, pre-warmed overlay: a live R3F war-room, a RADAR view of your active agent forest, and a forensic diagnosis panel — ranked holes, a severity meter, a frequency/confidence/cost ledger, evidence you can drill into, and a read-only fix preview. Press again, blur, or `Esc` to dismiss; the daemon stays alive and click-through in the background.
 
-- Tauri v2 macOS accessory app with tray menu.
-- Hidden pre-warmed transparent overlay window.
-- ⌘⇧Space global hotkey to summon; Esc/blur dismisses.
-- Click-through idle state so the desktop is not blocked while WARDEN is hidden.
-- Startup backfill and live FSEvents tailing for:
-  - Claude: `~/.claude/projects/**/*.jsonl`
-  - Codex: `~/.codex/sessions/**/rollout-*.jsonl` plus archived sessions
-- SQLite/FTS5 store, byte-offset watermarks, source raw hashes, findings, diagnoses, artifacts.
-- Env-swappable Brain defaults to Fugu; missing key or failed API can degrade to detector-only diagnosis.
-- Honest R3F war-room island driven by real Tauri events:
-  - `candidates_nominated`
-  - `finding_verdict`
-  - `fugu_delta`
-  - `fugu_usage`
-  - `diagnosis_ready`
-- Lazy Remotion intro/reveal overlays through `@remotion/player`.
-- Diagnosis UI with ranked holes, severity meter, frequency/confidence/cost ledger, do/stop guidance, evidence drill-down, and read-only fix preview.
-- Harness identity everywhere a finding/session is shown: Claude emerald ◆, Codex violet ▲, unknown neutral; color is always paired with glyph + label.
+Every session and finding is tagged with the harness that produced it — Claude in emerald, Codex in violet — and color is always paired with a glyph and a label, so the identity survives on a color-blind display or a screenshot.
 
-## Repository map
+---
 
-```text
-SPEC.md                                      master product spec
-CLAUDE.md                                    current repo guide for agents
-PROGRESS.md                                  milestone ledger and verification log
-package.json                                 pnpm scripts + web dependencies
-vite.config.ts                               Vite/Vitest config
-index.html                                   overlay DOM shell
-src/main.ts                                  web-side Tauri event router + terminal UI
-src/diagnosis.ts                             pure DOM diagnosis renderer
-src/style.css                                FACE design system tokens/styles
-src/viz/WarRoom.tsx                          R3F war-room island
-src/viz/bridge.ts                            pure event reducer: Tauri events -> scene state
-src/viz/PlayerHost.tsx                       lazy Remotion player boundary
-src/viz/compositions/                        Remotion intro/reveal/recap compositions
-src/viz/dev.tsx + dev-viz.html               standalone visual QA loop
-src-tauri/src/ir.rs                          canonical IR
-src-tauri/src/ingest/                        Claude/Codex adapters + registry
-src-tauri/src/store.rs                       SQLite/FTS5 persistence
-src-tauri/src/featurizer.rs                  feature vector / profile computation
-src-tauri/src/detectors.rs                   deterministic finding nomination
-src-tauri/src/brain.rs                       Fugu-compatible diagnosis pipeline
-src-tauri/src/commands.rs                    Tauri IPC commands
-src-tauri/src/lib.rs                         daemon/tray/hotkey/window setup
-src-tauri/src/scaffold.rs                    future-milestone stub helper
+## How it's built
+
+WARDEN is a single Tauri v2 application: a Rust core and a web overlay, talking over Tauri IPC.
+
+- **Rust core** (`src-tauri/`) — one crate, layered `ingest → store → (featurizer · detectors · brain · forge · habits · radar) → commands · scheduler · lib`. Tauri itself is confined to `lib.rs` and `commands.rs`; everything below is plain, testable Rust. OS-specific code lives behind a `platform/` seam (macOS today), so a future port is one adapter file. Production `unwrap()` is denied by Clippy.
+- **Web overlay** (`web/`) — a feature-sliced island in TypeScript. Imports point one direction only (`app → views → modules → shared`), enforced in CI by `pnpm check:arch`. React Three Fiber (three.js) drives the war-room; Remotion renders the intro and reveal cinematics; a vanilla-TS router wires real Tauri events into the scene.
+- **Honest visualization** — every node, pulse, and flare in the war-room maps to a *real* signal: candidate counts, token deltas, verifier verdicts. When the engine doesn't emit a signal, the view degrades to something plain and true. It never invents motion to look busy.
+
+Data flows one way: web calls Rust through `invoke`; Rust emits events to the web through `app.emit`.
+
+```
+Claude / Codex transcripts
+        │  file adapters (backfill + live FSEvents)
+        ▼
+   canonical IR  ──►  SQLite + FTS5
+        │
+        ├─► detectors ──► candidate findings
+        │                      │
+        │                      ▼
+        │            Diagnostician → Coach → Verifier  (GLM-5.2 / NEAR AI)
+        │                      │
+        ▼                      ▼
+     RADAR  ◄───────────  evidence-cited diagnosis
+        │
+        ▼
+  Tauri overlay: war-room · RADAR · diagnosis panel   (⌘⌥⌃M)
 ```
 
-## Commands
+---
 
-Install dependencies:
+## Getting started
+
+Requires macOS (Apple Silicon), a recent Rust toolchain (stable ≥ 1.85, pinned in `src-tauri/rust-toolchain.toml`), Node, and `pnpm`.
 
 ```bash
-pnpm install
+pnpm install          # install web dependencies
+pnpm tauri dev        # run the full app
 ```
 
-Verify the slate (each cargo step runs in a subshell so the shell stays at repo
-root and `pnpm tauri build` runs from the correct directory):
+Copy `.env.example` to `.env` and add your engine key to get live diagnosis (see [Configuration](#configuration)). Without one, WARDEN still ingests, detects, and renders — it just skips the LLM diagnosis step.
 
-```bash
-pnpm build
-pnpm test
-(cd src-tauri && cargo check)
-(cd src-tauri && cargo build)
-(cd src-tauri && cargo test)
-pnpm tauri build
-```
+### Dev previews without Tauri
 
-Run the app in development:
-
-```bash
-pnpm tauri dev
-```
-
-Run the standalone war-room visual QA loop without Tauri:
+The war-room and its pieces run standalone in the browser for fast visual iteration:
 
 ```bash
 pnpm dev
-# open http://127.0.0.1:1420/dev-viz.html
+# then open one of:
+#   http://127.0.0.1:1420/dev-viz.html      full war-room QA loop
+#   http://127.0.0.1:1420/dev-warroom.html  war-room in isolation
+#   http://127.0.0.1:1420/radar-lab.html    RADAR sandbox
+#   http://127.0.0.1:1420/orbs.html         habit-orb lab
 ```
 
-## Environment
+### Build & verify
 
-- `WARDEN_DB_PATH` — override SQLite database path.
-- `SAKANA_API_KEY` — Fugu/OpenAI-compatible API key.
-- `WARDEN_BRAIN_BASE_URL` — override Brain endpoint.
-- `WARDEN_BRAIN_API_KEY` — override Brain API key.
-- `WARDEN_BRAIN_DIAGNOSE_MODEL` — override diagnose/coach model.
-- `WARDEN_BRAIN_VERIFY_MODEL` — override verifier model.
-- `WARDEN_BRAIN_EFFORT` — reasoning effort where supported.
+```bash
+pnpm build                      # tsc + vite build (frontend typecheck + bundle)
+pnpm test                       # vitest
+pnpm check:arch                 # frontend import-boundary check
+(cd src-tauri && cargo check)   # fast Rust typecheck
+(cd src-tauri && cargo clippy)  # lint (denies production unwrap)
+(cd src-tauri && cargo test)    # Rust unit + golden tests
+pnpm tauri build                # full macOS app bundle (the real e2e gate)
+```
 
-Do not commit real secrets. Use placeholder values only.
+`pnpm tauri build` produces `src-tauri/target/release/bundle/macos/WARDEN.app`.
 
-## Verification evidence
+---
 
-The M3-ready slate was freshly verified on 2026-06-23 from `/Users/karimbaba/WARDEN`:
+## Configuration
 
-- `pnpm build` passed.
-- `pnpm test` passed: 6 files, 38 tests.
-- `(cd src-tauri && cargo check)` passed.
-- `(cd src-tauri && cargo build)` passed.
-- `(cd src-tauri && cargo test)` passed: 71 Rust tests.
-- `pnpm tauri build` passed and produced `src-tauri/target/release/bundle/macos/WARDEN.app`.
-- Browser smoke of `dev-viz.html` mounted the R3F canvas and Remotion player and reached the reveal phase.
+Engine and storage are configured through the environment (see `.env.example`). Never commit real secrets.
 
-## M3 handoff
+| Variable | Purpose |
+|---|---|
+| `WARDEN_DB_PATH` | Override the SQLite database path. |
+| `WARDEN_BRAIN_BASE_URL` | Diagnosis engine endpoint (OpenAI-compatible). |
+| `WARDEN_BRAIN_API_KEY` | Engine API key (`OPENAI_*` used as fallback). |
+| `WARDEN_BRAIN_DIAGNOSE_MODEL` | Diagnostician/coach model (default `z-ai/glm-5.2`). |
+| `WARDEN_BRAIN_VERIFY_MODEL` | Verifier model. |
+| `WARDEN_BRAIN_EFFORT` | Reasoning effort, where the engine supports it. |
 
-Start M3 from `SPEC.md` §9A, not by guessing. RADAR’s governing principle is: never teleport blind; locate visibly, then navigate, and degrade honestly when precision is unavailable.
+---
 
-Before implementing M3:
+## Project layout
 
-1. Write/approve a focused M3 RADAR spec.
-2. Write an implementation plan.
-3. Preserve M2’s safety boundary: no Forge apply, no voice, no screen Q&A, no extra adapters unless the M3 spec explicitly requires them.
-4. Keep every RADAR confidence/position signal honest and inspectable.
+```text
+src-tauri/            Rust core (single crate)
+  src/ir.rs           canonical intermediate representation
+  src/ingest/         Adapter trait + registry + claude_code.rs / codex.rs
+  src/store.rs        rusqlite + FTS5 persistence (byte-offset watermarks)
+  src/featurizer.rs   feature vectors / operator profile
+  src/detectors.rs    deterministic finding nomination
+  src/brain.rs        GLM-5.2 diagnose → coach → verify pipeline
+  src/radar.rs        live agent-forest model
+  src/forge.rs        fix preview (apply is future work)
+  src/habits.rs       living-habits streaks
+  src/scheduler.rs    watch / radar / habits task drivers
+  src/platform/       OS seam (macOS adapter)
+  src/commands.rs     Tauri IPC commands
+  src/lib.rs          daemon, tray, hotkey, window setup
+web/                  TypeScript overlay (feature-sliced)
+  index.html          overlay DOM shell
+  main.ts             Tauri event router
+  viz/                war-room, RADAR, diagnosis, cinematics, shared theme/state
+docs/                 specs, plans, architecture notes, idea captures
+scripts/              build / arch-check tooling
+```
+
+Deeper references live in [`ARCHITECTURE.md`](ARCHITECTURE.md) (full codemap + import rules), [`SPEC.md`](SPEC.md) (product spec), and [`CLAUDE.md`](CLAUDE.md) (working guide).
+
+---
+
+## Status
+
+WARDEN is under active development. The spine, brain, overlay, and live RADAR are built and verified; the fleet is watched, diagnosed, and rendered end to end.
+
+| Stage | State |
+|---|---|
+| Ingest + canonical IR + store | Done |
+| Detectors + GLM-5.2 diagnosis pipeline | Done |
+| Overlay: war-room, diagnosis, evidence, fix preview | Done |
+| RADAR: live agent-forest view | Done |
+| Forge (write fixes back to your project) | Next |
+| Live view, voice, more adapters | Planned |
+
+One rule holds across every stage: **WARDEN is read-only.** It previews fixes as diffs; it never writes to your projects. Writing is a future, explicitly-gated milestone — not a thing that can happen by accident today.
+
+---
+
+## License
+
+Private. © Karim. All rights reserved.
