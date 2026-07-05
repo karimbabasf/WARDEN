@@ -128,3 +128,40 @@ export interface DossierProgress {
   status: string;
   [k: string]: unknown;
 }
+
+// ── Habits fold-in (§2 "What you're breaking") ────────────────────────────────
+// The Dossier is its own React root; it subscribes to `habits_refreshed`
+// directly rather than reading the war-room bridge. The event payload's `issues`
+// arrive in snake_case straight off serde (the war-room `bridge.ts` camelCases
+// them for its own scene, but that copy isn't in this root). We keep a lean,
+// dossier-local shape with only the streak fields §2 renders — normalized from
+// snake_case (with camelCase fallbacks) in `BreakingSection`.
+
+/** The Living-Habits window wire strings — the contract with `set_habits_window`. */
+export type HabitsWindow = 'today' | '7d' | '30d' | '6mo' | 'all';
+
+/**
+ * One active anti-pattern in remediation, as the Dossier renders it. A projection
+ * of the backend `OrbIssue` down to the streak-loop fields §2 needs. `credits`
+ * counts clean sessions accrued toward the streak length `streakK`; `fixed` marks
+ * the habit erased (the erase-reward state).
+ */
+export interface BreakingHabit {
+  id: string;
+  patternId: string;
+  title: string;
+  estCostTokens: number;
+  estCostMinutes: number;
+  severity: number;
+  credits: number;
+  streakK: number;
+  fixed: boolean;
+  evidence: EvidenceRef[];
+}
+
+/** The `habits_refreshed` event payload (as it lands on the wire). */
+export interface HabitsRefreshed {
+  issues: unknown[];
+  window: string;
+  last_scanned_at: string | null;
+}
