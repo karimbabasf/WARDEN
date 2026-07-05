@@ -32,9 +32,16 @@
 
   --mono: WardenMono, "SF Mono", Menlo, Consolas, monospace;
 
-  /* ── layout tokens ── */
-  --top-safe: 64px;           /* nav bar height + clearance margin */
-  --side-margin: 16px;
+  /* ── layout tokens ──
+     One coherent safe-area frame. Every screen-space floater docks through a
+     `.wd-anchor-*` zone (below) that reads these insets, so the chrome never
+     collides and the edges honour the OS safe-area (notch / rounded corners). */
+  --inset-t: max(16px, env(safe-area-inset-top, 0px));      /* top edge (nav band) */
+  --inset-b: max(16px, env(safe-area-inset-bottom, 0px));   /* bottom edge (docks) */
+  --inset-x: max(16px, env(safe-area-inset-left, 0px));     /* side gutters */
+  --nav-h: 44px;              /* nav-bar height */
+  --top-safe: calc(var(--inset-t) + var(--nav-h) + 8px);   /* clearance below the nav */
+  --side-margin: var(--inset-x);
   --panel-w: clamp(300px, 32vw, 380px);
 
   /* ── z-index scale ── */
@@ -45,6 +52,40 @@
   --z-nav: 40;
   --z-controls: 50;
 }
+
+/* ── safe-area anchor zones ───────────────────────────────────────────────────
+   Fixed, pointer-transparent frames pinned to a corner/edge inside the safe area.
+   A floater becomes `class="wd-anchor-XX <its own class>"` and drops its own
+   position/top/left/right — one system owns placement, so nothing overlaps. The
+   zone itself never captures the pointer (orbit-drag falls through); the child
+   re-enables its own via the existing glass rules. */
+.wd-anchor-tl,
+.wd-anchor-tc,
+.wd-anchor-tr,
+.wd-anchor-bl,
+.wd-anchor-bc,
+.wd-anchor-br {
+  position: fixed;
+  z-index: var(--z-controls);
+  display: flex;
+  pointer-events: none;
+  gap: 10px;
+}
+.wd-anchor-tl > *,
+.wd-anchor-tc > *,
+.wd-anchor-tr > *,
+.wd-anchor-bl > *,
+.wd-anchor-bc > *,
+.wd-anchor-br > * { pointer-events: auto; }
+
+/* top row — sits on the top inset, clears the notch */
+.wd-anchor-tl { top: var(--inset-t); left: var(--inset-x); align-items: flex-start; }
+.wd-anchor-tc { top: var(--inset-t); left: 50%; transform: translateX(-50%); align-items: flex-start; }
+.wd-anchor-tr { top: var(--inset-t); right: var(--inset-x); align-items: flex-start; justify-content: flex-end; }
+/* bottom row — stacks its children upward so multiple docks never overlap */
+.wd-anchor-bl { bottom: var(--inset-b); left: var(--inset-x); flex-direction: column; align-items: flex-start; }
+.wd-anchor-bc { bottom: var(--inset-b); left: 50%; transform: translateX(-50%); flex-direction: column-reverse; align-items: center; }
+.wd-anchor-br { bottom: var(--inset-b); right: var(--inset-x); flex-direction: column; align-items: flex-end; }
 
 * { box-sizing: border-box; }
 
@@ -119,12 +160,12 @@ html, body {
   -webkit-backdrop-filter: blur(11px);
 }
 
-/* ── top HUD ───────────────────────────────────────────────────────────────*/
+/* ── top HUD (top band, inside the safe-area frame) ─────────────────────────*/
 .wd-hud {
   position: absolute;
-  top: 16px;
-  left: 16px;
-  right: 16px;
+  top: var(--inset-t);
+  left: var(--inset-x);
+  right: var(--inset-x);
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -198,58 +239,55 @@ html, body {
 }
 .wd-dismiss:hover { background: rgba(255, 90, 55, 0.12); color: var(--amber); border-color: rgba(255, 90, 55, 0.5); }
 
-/* ── bottom console (ask + pipeline) ───────────────────────────────────────*/
+/* ── diagnosis dock (button + pipeline) — bottom-centre, stacked ABOVE the
+     FilterBar so the two bottom-centre docks never overlap. Placement is owned by
+     `.wd-console-dock` (below); `.wd-console` is just the inner column. ─────────*/
 .wd-console {
-  position: absolute;
-  left: 50%;
-  bottom: 24px;
-  transform: translateX(-50%);
-  width: min(820px, calc(100vw - 48px));
   display: flex;
   flex-direction: column;
   gap: 10px;
+  width: 100%;
 }
 
-.wd-ask {
-  display: flex;
+/* The "Diagnose my workflow" button — one calm phosphor CTA (no terminal). Acid
+   outline; on hover the amber verdict wash reads as "this runs the brain". */
+.wd-diagnose {
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  background: linear-gradient(180deg, rgba(4, 24, 13, 0.82), rgba(2, 9, 6, 0.62));
-  box-shadow: 0 0 30px rgba(118, 255, 157, 0.10), inset 0 0 30px rgba(118, 255, 157, 0.03);
-  animation: wd-fade-up 600ms ease both;
-}
-
-.wd-ask-chevron { color: var(--acid); text-shadow: var(--glow); font-size: 13px; }
-
-.wd-ask-input {
-  flex: 1;
-  min-width: 0;
-  background: transparent;
-  border: 0;
-  outline: none;
-  color: var(--ink);
-  font: inherit;
-  font-size: 14px;
-  letter-spacing: 0.01em;
-  text-shadow: 0 0 10px rgba(118, 255, 157, 0.18);
-}
-.wd-ask-input::placeholder { color: var(--ink-faint); }
-.wd-ask-input:disabled { color: var(--ink-faint); }
-
-.wd-ask-run {
+  justify-content: center;
+  gap: 10px;
+  align-self: center;
+  padding: 11px 22px;
   border: 1px solid var(--acid);
-  background: rgba(184, 255, 107, 0.10);
+  border-radius: 11px;
+  background: linear-gradient(180deg, rgba(184, 255, 107, 0.12), rgba(2, 9, 6, 0.5));
   color: var(--acid);
-  font: inherit;
+  font-family: var(--mono);
   font-size: 12px;
-  letter-spacing: 0.16em;
-  padding: 9px 18px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
   cursor: pointer;
-  transition: background 160ms ease, box-shadow 160ms ease;
+  box-shadow: 0 0 22px rgba(184, 255, 107, 0.12), inset 0 0 22px rgba(184, 255, 107, 0.04);
+  transition: background 180ms ease, box-shadow 180ms ease, color 180ms ease, border-color 180ms ease;
 }
-.wd-ask-run:hover:not(:disabled) { background: rgba(184, 255, 107, 0.2); box-shadow: 0 0 18px rgba(184, 255, 107, 0.3); }
-.wd-ask-run:disabled { color: var(--ink-faint); border-color: var(--hair); cursor: progress; opacity: 0.8; }
+.wd-diagnose:hover:not(:disabled) {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 72%, transparent);
+  background: linear-gradient(180deg, rgba(255, 90, 55, 0.14), rgba(2, 9, 6, 0.55));
+  box-shadow: 0 0 26px rgba(255, 90, 55, 0.24), inset 0 0 26px rgba(255, 90, 55, 0.05);
+}
+.wd-diagnose:focus-visible { outline: 2px solid var(--hair-bright); outline-offset: 3px; }
+.wd-diagnose:disabled { color: var(--ink-soft); border-color: var(--hair-bright); cursor: progress; }
+.wd-diagnose-glyph { font-size: 14px; filter: drop-shadow(0 0 7px currentColor); }
+.wd-diagnose-label { line-height: 1; }
+.wd-diagnose-spin {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--ink-soft) 40%, transparent);
+  border-top-color: var(--ink-soft);
+  animation: wd-spin 0.8s linear infinite;
+}
+@keyframes wd-spin { to { transform: rotate(360deg); } }
 
 .wd-ask-error {
   align-self: center;
@@ -258,46 +296,88 @@ html, body {
   letter-spacing: 0.04em;
 }
 
-/* ── live pipeline rail ────────────────────────────────────────────────────*/
+/* ── live pipeline rail — a 3-stage progress reveal (not a scrolling terminal).
+     A connecting rail fills left→right as stages complete; each node lights from
+     pending → active (pulsing) → done, and the reasoning stream sits below it. ──*/
 .wd-pipeline {
-  padding: 11px 14px;
+  padding: 13px 16px 11px;
   background: linear-gradient(180deg, rgba(4, 22, 12, 0.8), rgba(2, 9, 6, 0.6));
+  border-radius: 11px;
   animation: wd-fade-up 280ms ease both;
 }
 
-.wd-pipeline-stages { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* the track lays the rail behind the evenly-spaced stage nodes */
+.wd-pipeline-track { position: relative; padding-top: 4px; }
+.wd-pipeline-rail,
+.wd-pipeline-rail-fill {
+  position: absolute;
+  top: 9px;                 /* centre of the 8px node row */
+  left: 8%;
+  right: 8%;                /* inset so the rail spans node centres, not edges */
+  height: 2px;
+  border-radius: 2px;
+}
+.wd-pipeline-rail { background: var(--hair); }
+.wd-pipeline-rail-fill {
+  right: auto;
+  width: calc((100% - 16%) * (var(--wd-fill) / 100%));
+  background: linear-gradient(90deg, var(--green), var(--acid));
+  box-shadow: 0 0 12px rgba(184, 255, 107, 0.5);
+  transition: width 520ms cubic-bezier(0.22, 1, 0.36, 1);   /* eases as each stage lands */
+}
+
+.wd-pipeline-stages {
+  position: relative;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+}
 
 .wd-stage {
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 4px 12px 4px 8px;
-  border: 1px solid var(--hair);
-  font-size: 11px;
+  gap: 6px;
+  text-align: center;
+  font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--ink-faint);
+  /* staged entrance: each node fades + rises on a stagger down the track */
+  animation: wd-stage-in 420ms ease both;
+  animation-delay: calc(var(--wd-stage-i, 0) * 90ms);
 }
 
+.wd-stage-node {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: rgba(2, 9, 6, 0.9);
+  border: 1px solid var(--hair);
+}
 .wd-stage-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
   background: var(--ink-faint);
-  box-shadow: none;
+  transition: background 220ms ease, box-shadow 220ms ease;
 }
 .wd-stage-name { color: inherit; }
-.wd-stage-tokens { color: var(--ink-soft); letter-spacing: 0.04em; font-size: 10px; }
+.wd-stage-tokens { color: var(--ink-soft); letter-spacing: 0.04em; font-size: 9px; min-height: 11px; }
 
-.wd-stage.is-done { color: var(--ink-soft); border-color: var(--hair-bright); }
+.wd-stage.is-done { color: var(--ink-soft); }
+.wd-stage.is-done .wd-stage-node { border-color: var(--hair-bright); }
 .wd-stage.is-done .wd-stage-dot { background: var(--green); box-shadow: 0 0 8px rgba(118, 255, 157, 0.6); }
 
-.wd-stage.is-active { color: var(--acid); border-color: var(--acid); }
+.wd-stage.is-active { color: var(--acid); }
+.wd-stage.is-active .wd-stage-node { border-color: var(--acid); box-shadow: 0 0 12px rgba(184, 255, 107, 0.35); }
 .wd-stage.is-active .wd-stage-dot { background: var(--acid); box-shadow: 0 0 12px var(--acid); animation: wd-pulse 1.1s ease-in-out infinite; }
 
 .wd-stream {
   display: flex;
   gap: 10px;
-  margin-top: 9px;
+  margin-top: 11px;
   padding-top: 9px;
   border-top: 1px solid var(--hair);
   font-size: 11px;
@@ -312,11 +392,16 @@ html, body {
   -webkit-box-orient: vertical;
 }
 
-/* ── filter bar (bottom-centre — replaces the removed StatusDeck) ───────────*/
+@keyframes wd-stage-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── filter bar (bottom-centre edge — the diagnosis dock stacks above it) ────*/
 .wd-filterbar {
   position: absolute;
   left: 50%;
-  bottom: 18px;
+  bottom: var(--inset-b);
   transform: translateX(-50%);
   z-index: var(--z-deck);
   display: flex;
@@ -756,7 +841,7 @@ html, body {
 .wd-ledger-toggle {
   position: absolute;
   right: var(--side-margin);
-  bottom: 18px;
+  bottom: var(--inset-b);
   z-index: var(--z-deck);
   pointer-events: auto;
   display: inline-flex;
@@ -794,7 +879,7 @@ html, body {
 .wd-ledger-dock {
   position: absolute;
   right: var(--side-margin);
-  bottom: 58px;
+  bottom: calc(var(--inset-b) + 40px);
   z-index: var(--z-panel);
   width: clamp(280px, 30vw, 360px);
   pointer-events: none;
@@ -1220,20 +1305,20 @@ html, body {
     width: auto;
     max-height: 46vh;
   }
-  /* filter bar stays centred; wrap tighter and shrink on small widths */
+  /* filter bar stays centred on the bottom inset; wrap tighter on small widths */
   .wd-filterbar {
-    bottom: 14px;
     flex-wrap: wrap;
     gap: 4px 8px;
-    max-width: calc(100vw - 24px);
+    max-width: calc(100vw - 2 * var(--inset-x));
   }
   .wd-legend-group { gap: 4px 8px; }
   /* chips go smaller */
   .wd-chip { font-size: 9px; padding: 2px 6px 2px 4px; }
-  .wd-console { width: calc(100vw - 24px); bottom: 12px; }
-  /* ledger toggle steps above the filter bar; the dock goes full-width */
-  .wd-ledger-toggle { bottom: 52px; padding: 6px 10px; }
-  .wd-ledger-dock { left: var(--side-margin); right: var(--side-margin); width: auto; bottom: 90px; }
+  /* diagnosis dock goes full-width, still stacked above the filter strip */
+  .wd-console-dock { width: calc(100vw - 2 * var(--inset-x)); }
+  /* ledger toggle + dock keep clearing the filter strip via the shared frame */
+  .wd-ledger-toggle { padding: 6px 10px; }
+  .wd-ledger-dock { left: var(--side-margin); right: var(--side-margin); width: auto; bottom: calc(var(--inset-b) + 44px); }
   /* breadcrumb compresses */
   .wd-breadcrumb { font-size: 9px; }
   /* window controls remain fixed size — no change needed */
@@ -1250,7 +1335,7 @@ html, body {
    acid-green with a scanning radar-sweep underline + a live count chip. */
 .wd-nav {
   position: fixed;
-  top: 16px;
+  top: var(--inset-t);
   left: 50%;
   transform: translateX(-50%);
   z-index: var(--z-nav);
@@ -1529,123 +1614,6 @@ html, body {
 }
 .wd-crumb.is-current:hover { background: transparent; }
 
-/* ── Living Habits: the time-window dial + live "last scanned" readout ─────────
-   A phosphor segmented control under the nav bar (top-centre), shown only on the
-   Habits tab. The lit segment is acid-green; the rest are quiet --ink-soft. A small
-   live readout sits beside it, its dot pulsing so the constellation reads as alive. */
-.wd-habits-dial {
-  position: fixed;
-  top: var(--top-safe);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: var(--z-controls);
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  padding: 5px 8px;
-  border-radius: 12px;
-  background: var(--panel);
-  border: 1px solid var(--hair);
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(118, 255, 157, 0.05);
-  backdrop-filter: blur(11px) saturate(1.1);
-  -webkit-backdrop-filter: blur(11px) saturate(1.1);
-  pointer-events: auto;
-  animation: wd-fade-up 600ms ease both;
-}
-.wd-dial-seg {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 9px;
-  background: rgba(2, 4, 3, 0.5);
-}
-.wd-dial-opt {
-  appearance: none;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--ink-soft);
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.10em;
-  text-transform: uppercase;
-  padding: 4px 9px;
-  border-radius: 7px;
-  cursor: pointer;
-  opacity: 0.72;
-  transition: background 150ms ease, color 150ms ease, opacity 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
-}
-.wd-dial-opt:hover {
-  opacity: 1;
-  color: var(--ink);
-  background: rgba(184, 255, 107, 0.07);
-}
-.wd-dial-opt:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--hair-bright);
-}
-.wd-dial-opt.is-active {
-  opacity: 1;
-  color: var(--bg);
-  background: var(--acid);
-  border-color: color-mix(in srgb, var(--acid) 70%, transparent);
-  box-shadow: 0 0 12px color-mix(in srgb, var(--acid) 35%, transparent);
-  font-weight: 600;
-}
-/* "diagnosed" blip — a real `habits_diagnosed` event landed (the background GLM
-   re-diagnosis pass for the active window finished). Quiet by design: a small
-   acid-green chip that fades in, sits for a few seconds, then the component
-   stops rendering it (see DIAGNOSED_BLIP_MS in chrome.tsx) — never a modal,
-   never a toast stack. */
-.wd-dial-diagnosed {
-  display: inline-flex;
-  align-items: center;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--bg);
-  background: var(--acid);
-  border-radius: 6px;
-  padding: 3px 7px;
-  box-shadow: 0 0 10px color-mix(in srgb, var(--acid) 40%, transparent);
-  animation: wd-fade-up 300ms ease both;
-}
-.wd-dial-live {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-  white-space: nowrap;
-  padding-right: 4px;
-}
-.wd-dial-live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 8px var(--green);
-  animation: wd-live-pulse 1.8s ease-in-out infinite;
-}
-@keyframes wd-live-pulse {
-  0%, 100% { opacity: 0.45; transform: scale(0.85); }
-  50% { opacity: 1; transform: scale(1.1); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .wd-dial-live-dot { animation: none; opacity: 0.9; }
-  .wd-habits-dial { animation: none; }
-  .wd-dial-diagnosed { animation: none; }
-}
-@media (max-width: 720px) {
-  .wd-habits-dial { gap: 7px; padding: 4px 6px; }
-  .wd-dial-opt { font-size: 9px; padding: 3px 6px; }
-  .wd-dial-live { display: none; }
-}
-
 /* ── roster sidebar (left dock) — toggle list of every globe ──────────────────
    Closed by default; the ≡ toggle (top-left) opens it and the panel ✕ closes it.
    Mirrors the right inspector's slide so the two docks feel symmetric. Radar lists
@@ -1681,7 +1649,7 @@ html, body {
   position: absolute;
   top: var(--top-safe);
   left: var(--side-margin);
-  bottom: 70px; /* clear the centred filter bar */
+  bottom: calc(var(--inset-b) + 54px); /* clear the centred filter bar strip */
   width: clamp(220px, 24vw, 280px);
   z-index: var(--z-panel);
   display: flex;
@@ -1809,26 +1777,20 @@ html, body {
 }
 #profile-root:empty { display: none; }
 
-/* ── ask-console dock: fresh coach brief + the ask bar, bottom-center on the
-     habits tab. The dock takes over .wd-console's old absolute placement so
-     the brief can stack directly above the ask form as one unit. ─────────── */
+/* ── diagnosis dock: fresh coach brief + the "Diagnose my workflow" button +
+     pipeline, bottom-centre. It stacks ABOVE the FilterBar strip (offset by the
+     bar's height + a gap) so the two bottom-centre docks share the frame and never
+     overlap. One place owns the placement; the inner .wd-console is a plain column. */
 .wd-console-dock {
   position: absolute;
   left: 50%;
-  bottom: 24px;
+  bottom: calc(var(--inset-b) + 52px);
   transform: translateX(-50%);
-  width: min(820px, calc(100vw - 48px));
+  width: min(680px, calc(100vw - 2 * var(--inset-x)));
   display: flex;
   flex-direction: column;
   gap: 10px;
-  z-index: 4;
-}
-.wd-console-dock .wd-console {
-  position: static;
-  left: auto;
-  bottom: auto;
-  transform: none;
-  width: 100%;
+  z-index: var(--z-deck);
 }
 
 .wd-diag-brief {
