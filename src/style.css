@@ -139,7 +139,6 @@ html, body {
 .wd-chrome > * { pointer-events: none; }
 .wd-hud,
 .wd-filterbar,
-.wd-ask,
 .wd-pipeline,
 .wd-detail,
 .wd-preview,
@@ -149,10 +148,8 @@ html, body {
 /* ── glass panel base (shared look) ───────────────────────────────────────── */
 .wd-hud,
 .wd-pipeline,
-.wd-ask,
 .wd-detail,
 .wd-preview,
-.wd-empty-card,
 .wd-filterbar {
   background: var(--panel);
   border: 1px solid var(--hair);
@@ -288,6 +285,15 @@ html, body {
   animation: wd-spin 0.8s linear infinite;
 }
 @keyframes wd-spin { to { transform: rotate(360deg); } }
+
+/* Compact variant — the same CTA docked full-width in the radar detail panel
+   footer, so clicking an orb also leads straight to the diagnosis. */
+.wd-diagnose-compact {
+  width: 100%;
+  padding: 9px 14px;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+}
 
 .wd-ask-error {
   align-self: center;
@@ -556,25 +562,6 @@ html, body {
   box-shadow: 0 0 12px color-mix(in srgb, var(--severity, var(--green)) 55%, transparent);
 }
 
-/* Living Habits — plain-language streak line (no "K/S" jargon): one short line
-   reading "N/K clean sessions", mirroring the billboard progress ring on the 3D
-   orb (Orb.tsx) so text and shape always agree. Acid-green + a filling left
-   border while in progress; once resolved it calms to --ink-faint, matching the
-   orb's own "quietly retired" fade rather than a celebratory flash. */
-.wd-streak-line {
-  margin: 8px 0 0;
-  padding: 4px 0 4px 10px;
-  border-left: 2px solid var(--acid);
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.03em;
-  color: var(--ink);
-}
-.wd-streak-line.is-resolved {
-  border-left-color: var(--hair-bright);
-  color: var(--ink-faint);
-}
-
 .wd-detail-ledger { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
 .wd-detail-ledger span {
   border: 1px solid var(--hair);
@@ -714,7 +701,7 @@ html, body {
 .wd-diff-file { color: var(--ink-faint); }
 .wd-diff-ctx { color: var(--ink-soft); opacity: 0.85; }
 
-/* (3a) APPLY — the acid CTA (mirrors .wd-ask-run), pulsing verdict-amber on hover
+/* (3a) APPLY — the acid CTA (mirrors .wd-diagnose), pulsing verdict-amber on hover
    to signal "this writes". cursor:progress + disabled while the invoke is in flight. */
 .wd-fix-apply {
   width: 100%;
@@ -1240,28 +1227,6 @@ html, body {
 .wd-radar-id-grid > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .wd-radar-id-grid dt { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); }
 .wd-radar-id-grid dd { margin: 0; font-size: 12px; color: var(--ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* ── empty state (center invite) ───────────────────────────────────────────*/
-.wd-empty {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-}
-.wd-empty-card {
-  max-width: 440px;
-  margin: 0 24px;
-  padding: 22px 24px;
-  text-align: center;
-  background: linear-gradient(180deg, rgba(4, 22, 12, 0.55), rgba(2, 9, 6, 0.28));
-  box-shadow: 0 0 50px rgba(118, 255, 157, 0.08);
-  animation: wd-bloom 400ms ease both;
-}
-.wd-empty-kicker { color: var(--acid); font-size: 12px; letter-spacing: 0.22em; text-transform: uppercase; text-shadow: var(--glow); }
-.wd-empty-card p { margin: 12px 0 0; color: var(--ink-soft); font-size: 13px; line-height: 1.6; }
-.wd-empty-hint { margin-top: 14px; color: var(--ink-faint); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; }
 
 /* ── motion ────────────────────────────────────────────────────────────────*/
 @keyframes wd-bloom { from { opacity: 0; transform: scale(0.94); filter: blur(2px); } to { opacity: 1; transform: scale(1); filter: blur(0); } }

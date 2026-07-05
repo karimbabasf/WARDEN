@@ -759,6 +759,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
             onJumpTo={onRadarJump}
             onClose={onClear}
             onTerminate={onTerminate}
+            onDiagnose={onDiagnose}
+            diagnosing={Boolean(scene.running)}
           />
         ) : null}
       </div>

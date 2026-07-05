@@ -321,6 +321,14 @@ export type RadarDetailPanelProps = {
   onJumpTo?: (id: string) => void;
   onClose?: () => void;
   /**
+   * Run the workflow diagnosis (the same implicit query as the "Diagnose my
+   * workflow" button). Exposed here so clicking an agent orb also leads straight to
+   * the diagnosis — the second sanctioned entry point per the product direction.
+   */
+  onDiagnose?: () => void;
+  /** True while a diagnosis run is in flight — disables the footer affordance. */
+  diagnosing?: boolean;
+  /**
    * Forcefully terminate this agent. What this does depends on the harness (see
    * `terminateAffordance` below): a Claude root kills its own process; a Claude
    * subagent has no process and the control is disabled; a Codex agent force-quits
@@ -368,7 +376,7 @@ export function terminateAffordance(agent: Pick<RadarAgent, 'harness' | 'depth' 
   return { label: 'Terminate', enabled: true, confirm: false, reason: '' };
 }
 
-export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose, onTerminate }: RadarDetailPanelProps) {
+export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose, onTerminate, onDiagnose, diagnosing = false }: RadarDetailPanelProps) {
   const theme = radarHarness(agent.harness);
   const title = agent.label || agent.nickname || agent.id;
   const subtitle = radarSubtitle(agent);
@@ -525,6 +533,29 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose, onTe
       <ActivitySection agent={agent} />
       <RosterSection children={children} onJumpTo={onJumpTo} />
       <IdentitySection agent={agent} />
+
+      {/* Second sanctioned entry to the diagnosis: clicking an orb lands here, and
+          this footer runs the same implicit workflow diagnosis as the main button. */}
+      {onDiagnose ? (
+        <section className="wd-radar-section wd-radar-diagnose-foot" data-section="diagnose">
+          <button
+            type="button"
+            className="wd-diagnose wd-diagnose-compact"
+            data-radar-diagnose
+            disabled={diagnosing}
+            aria-label="Diagnose my agent workflow"
+            onClick={() => {
+              if (!diagnosing) onDiagnose();
+            }}
+          >
+            <span className="wd-diagnose-glyph" aria-hidden>⌖</span>
+            <span className="wd-diagnose-label">
+              {diagnosing ? 'Diagnosing your workflow' : 'Diagnose my workflow'}
+            </span>
+            {diagnosing ? <span className="wd-diagnose-spin" aria-hidden /> : null}
+          </button>
+        </section>
+      ) : null}
     </aside>
   );
 }
