@@ -157,4 +157,4 @@ One rule holds across every stage: **WARDEN is read-only.** It previews fixes as
 
 ## License
 
-Private. © Karim. All rights reserved.
+[MIT](LICENSE) © Karim Baba
