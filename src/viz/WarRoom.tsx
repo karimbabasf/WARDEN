@@ -1,42 +1,38 @@
-// WarRoom.tsx — the persistent orb mind-map AND the whole interface.
+// WarRoom.tsx — the live RADAR fleet map AND the whole interface.
 //
-// This is no longer an ambient backdrop behind a terminal: the terminal is gone
-// and the war room is the app. The 3D layer (fresnel orbs, free-orbit camera,
-// links, atmosphere) renders the aggregate `OrbSceneModel` built by Rust from
-// real detector hits; the DOM `Chrome` layer over it carries the HUD, ask bar,
-// live pipeline rail, inspector, legend and empty-state. Hubs are harnesses,
-// issue orbs are (harness × pattern), links are issue→own-hub only.
+// RADAR is the hero: the war room renders the live agent forest only. The 3D layer
+// (fresnel orbs, free-orbit camera, links, atmosphere) renders the `RadarSceneModel`
+// built by Rust from real local-transcript signals; the DOM `Chrome` layer over it
+// carries the HUD, the click-to-run diagnosis button + pipeline, the radar detail
+// panel, the harness filter and the guardrail ledger. Nav switches between RADAR
+// (this war room) and DOSSIER (the full-page profile overlay).
 //
-// Honest-viz holds throughout: every orb/link/flare maps to a computed signal,
-// and off-Fugu runs degrade gracefully (no fabricated counts, verdicts or costs).
+// Honest-viz holds throughout: every orb/link/flare maps to a computed signal, and
+// off-Fugu runs degrade gracefully (no fabricated counts, verdicts or costs).
 
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
-import { Environment, Lightformer, Html } from '@react-three/drei';
+import { Environment, Lightformer } from '@react-three/drei';
 import * as THREE from 'three';
 import { invoke } from '@tauri-apps/api/core';
-import type { Bridge, HabitsWindow, SceneState } from './bridge';
-import { harnessTheme } from './harnessTheme';
-import { layoutOrbScene } from './orbLayout';
-import type { LayoutNode, OrbIssue, OrbLayout, OrbSceneModel } from './orbTypes';
-import { Orb } from './Orb';
+import type { Bridge, SceneState } from './bridge';
+import type { LayoutNode, OrbIssue, OrbSceneModel } from './orbTypes';
 import { StarCatalog } from './StarCatalog';
-import { ConstellationWeb } from './Constellation';
 import { CameraRig } from './CameraRig';
 import { Chrome, type Artifact, type FixPreview } from './chrome';
 import type { RevealFinding } from './compositions/Reveal';
-import { NavBar, PRIMARY_CONSTELLATION_TAB, type ConstellationTab } from './NavBar';
+import { NavBar, PRIMARY_VIEW, type NavView } from './NavBar';
 import { RadarForest } from './RadarConstellation';
 import { RadarDetailPanel } from './RadarDetailPanel';
 import { FilterBar } from './FilterBar';
 import { Sidebar } from './Sidebar';
-import { buildRadarRoster, buildHabitsRoster } from './rosterTree';
+import { buildRadarRoster } from './rosterTree';
 import { layoutRadarScene, isFlatAgent } from './radarLayout';
 import { radarHarness } from './radarTheme';
-import { TransitionDriver, FoldGroup, makeTransition, beginTransition } from './Transition';
+import { openProfile, closeProfile, isProfileOpen } from './profile/mount';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
-import { targetDim, matchesFilter, type EmphasisFilter } from './emphasis';
+import { type EmphasisFilter } from './emphasis';
 import { subtreeBounds, type Bounds } from './cameraFraming';
 import IntroVideo from './IntroVideo';
 import { HandMode } from './gesture/HandMode';
@@ -97,6 +93,11 @@ export function humanizeBrainError(raw: string): string {
   return flat.length > 220 ? `${flat.slice(0, 200)}… (see logs)` : flat;
 }
 
+// The implicit prompt behind the "Diagnose my workflow" button — the diagnosis is
+// now click-to-run, not typed, so this is the single question WARDEN always asks of
+// the operator's own agent history.
+export const WORKFLOW_QUERY = "what's wrong with how I use my agents?";
+
 function humanisePattern(patternId: string): string {
   return (
     patternId
@@ -122,172 +123,40 @@ export function mergeArtifact(prev: Artifact[], next: Artifact): Artifact[] {
   return [next, ...without];
 }
 
-// Live-run fallback model: before `get_orb_scene` lands (or off-Fugu), build a
-// provisional scene from the nominated candidates so the map is never empty mid-run.
-function fallbackOrbScene(scene: SceneState): OrbSceneModel {
-  const agentsByHarness = new Map<string, { count: number; worst: number }>();
-  for (const c of scene.candidates) {
-    const cur = agentsByHarness.get(c.harness) ?? { count: 0, worst: 0 };
+// The chrome's harness-filter model is derived from the live radar agents (one
+// synthetic hub per real harness on screen) so the FilterBar's harness chips reflect
+// exactly what the fleet contains — honest-viz, never a fabricated harness.
+export function radarChromeModel(radarModel: RadarSceneModel): OrbSceneModel {
+  const byHarness = new Map<string, { count: number; load: number }>();
+  for (const agent of radarModel.agents) {
+    const cur = byHarness.get(agent.harness) ?? { count: 0, load: 0 };
     cur.count += 1;
-    cur.worst = Math.max(cur.worst, c.severityHint);
-    agentsByHarness.set(c.harness, cur);
+    cur.load += agent.contextTokens;
+    byHarness.set(agent.harness, cur);
   }
-  const agents = Array.from(agentsByHarness, ([harness, meta]) => {
-    const t = harnessTheme(harness);
-    return { id: harness, harness, label: t.label, glyph: t.glyph, color: t.color, sessions: 0, eventCount: 0, totalLoad: meta.count };
+  const agents = Array.from(byHarness, ([harness, meta]) => {
+    const t = radarHarness(harness);
+    return {
+      id: harness,
+      harness,
+      label: t.label,
+      glyph: t.glyph,
+      color: t.color,
+      sessions: meta.count,
+      eventCount: 0,
+      totalLoad: meta.load,
+    };
   });
-  const issues = scene.candidates.map((c) => ({
-    id: `${c.harness}:${c.patternId}`,
-    agentId: c.harness,
-    harness: c.harness,
-    patternId: c.patternId,
-    title: humanisePattern(c.patternId),
-    count: 1,
-    severity: c.severityHint,
-    rationale: 'Live candidate nominated by the current diagnosis run.',
-    estCostTokens: 0,
-    estCostMinutes: 0,
-    frequency: 0,
-    confidence: 0,
-    sessionIds: [c.sessionId],
-    evidence: [],
-    // Living-Habits streak fields: a live candidate has no streak history yet.
-    credits: 0,
-    streakK: 0,
-    fixed: false,
-    lastCreditAt: null,
-  }));
-  return {
-    agents,
-    issues,
-    links: issues.map((issue) => ({ source: issue.agentId, target: issue.id, kind: 'agent_issue' as const })),
-    guidance: { doItems: [], stopItems: [] },
-  };
-}
-
-export function chromeModelForTab(
-  tab: ConstellationTab,
-  habitsModel: OrbSceneModel,
-  radarModel: RadarSceneModel,
-): OrbSceneModel {
-  if (tab !== 'radar') return habitsModel;
-  return {
-    ...habitsModel,
-    agents: radarModel.agents.map((agent) => {
-      const t = radarHarness(agent.harness);
-      return {
-        id: agent.id,
-        harness: agent.harness,
-        label: agent.nickname ?? agent.label,
-        glyph: t.glyph,
-        color: t.color,
-        sessions: 1,
-        eventCount: agent.recentActivity.length,
-        totalLoad: agent.contextTokens,
-      };
-    }),
-  };
-}
-
-// Harness name under each hub — the explicit "this is Claude / this is Codex".
-function HubLabels({ hubs }: { hubs: LayoutNode[] }) {
-  return (
-    <>
-      {hubs.map((h) => {
-        const t = harnessTheme(h.harness);
-        const r = h.territoryRadius ?? 2;
-        return (
-          <Html
-            key={`label-${h.id}`}
-            position={[h.position.x, h.position.y - r * 0.84, h.position.z]}
-            center
-            zIndexRange={[6, 0]}
-            style={{ pointerEvents: 'none' }}
-          >
-            <div className="wd-hub-label" style={{ '--harness': t.color } as CSSProperties}>
-              <span className="wd-hub-label-glyph">{t.glyph}</span>
-              {t.label}
-            </div>
-          </Html>
-        );
-      })}
-    </>
-  );
-}
-
-// The Habits DATA forest only (orbs + tethers + hub labels), wrapped in the fold
-// group. Carries no background/lights/camera/post — those live once in `SceneShell`
-// so the void persists across the Habits↔Radar swap (mirrors radar's RadarForest).
-function HabitsForest({
-  layout,
-  selectedId,
-  hoveredId,
-  emphasisFilter,
-  scaleRef,
-  onHover,
-  onLeave,
-  onSelect,
-  onClear,
-}: {
-  layout: OrbLayout;
-  selectedId: string | null;
-  hoveredId: string | null;
-  /** Active legend filter; each globe's colour-only `dimTarget` is derived from it. */
-  emphasisFilter: EmphasisFilter;
-  /** Live fold scale for the constellation swap (1 = at rest). */
-  scaleRef: { current: number };
-  onHover: (node: LayoutNode) => void;
-  onLeave: (node: LayoutNode) => void;
-  onSelect: (node: LayoutNode) => void;
-  onClear: () => void;
-}) {
-  const selectedAgent = useMemo(
-    () => layout.nodes.find((n) => n.id === selectedId)?.agentId,
-    [layout, selectedId],
-  );
-  const hubs = useMemo(() => layout.nodes.filter((n) => n.kind === 'hub'), [layout]);
-
-  return (
-    <FoldGroup scaleRef={scaleRef}>
-      <group onPointerMissed={onClear}>
-        <ConstellationWeb layout={layout} />
-        {layout.nodes.map((node, i) => (
-          <Orb
-            key={node.id}
-            node={node}
-            selected={selectedId === node.id}
-            hovered={hoveredId === node.id}
-            dimmed={Boolean(selectedId && selectedId !== node.id && node.agentId !== selectedAgent)}
-            // Legend filter → colour-only dim. Severity buckets read the issue's
-            // severity; harness filters read the node's harness (both tabs). With a
-            // null filter `targetDim` is 0, so the look is unchanged until Task 10
-            // lights a chip. Reuses the pure `emphasis` module (no logic forked here).
-            dimTarget={targetDim({ harness: node.harness, severity: node.issue?.severity }, emphasisFilter)}
-            // …and a matching orb POPS (extra glow + a touch of scale) so the chosen
-            // severity/harness stands out, not just the others dimming.
-            emphasized={emphasisFilter !== null && matchesFilter({ harness: node.harness, severity: node.issue?.severity }, emphasisFilter)}
-            appearDelay={Math.min(i * 0.045, 0.6)}
-            onHover={onHover}
-            onLeave={onLeave}
-            onSelect={onSelect}
-          />
-        ))}
-      </group>
-      <HubLabels hubs={hubs} />
-    </FoldGroup>
-  );
+  return { agents, issues: [], links: [], guidance: { doItems: [], stopItems: [] } };
 }
 
 // The persistent scene shell — the SINGLE always-mounted void (background, fog,
 // lights, Environment, starfield, the shared free-orbit CameraRig and the post
-// stack). It is rendered UNCONDITIONALLY by WarRoom, so a Habits↔Radar tab swap
-// only ever changes the ONE forest child slot (already folded to nothing at the
-// swap); none of the void unmounts, so the whole app is one continuous motion with
-// no flicker. The Environment carries formers for every harness hue (Claude-emerald,
-// Codex-violet, warm) so neither tab loses its glint.
+// stack) wrapping the live RADAR forest. RADAR is the only scene now, so the shell
+// never swaps a child: the whole app is one continuous motion with no flicker. The
+// Environment carries formers for every harness hue (Claude-emerald, Codex-violet,
+// warm) so every gem keeps its glint.
 function SceneShell({
-  displayTab,
-  habitsLayout,
   radarModel,
   selected,
   selectedId,
@@ -295,25 +164,21 @@ function SceneShell({
   emphasisFilter,
   focusBounds,
   homeSignal,
-  scaleRef,
   onHover,
   onLeave,
   onSelect,
   onClear,
 }: {
-  displayTab: ConstellationTab;
-  habitsLayout: OrbLayout;
   radarModel: RadarSceneModel;
   selected: LayoutNode | null;
   selectedId: string | null;
   hoveredId: string | null;
-  /** Active legend filter, forwarded to whichever forest is on screen. */
+  /** Active legend filter, forwarded to the forest for the colour-only dim/pop. */
   emphasisFilter: EmphasisFilter;
   /** Cinematic fly-to bounds for the shared CameraRig (null = overview/home). */
   focusBounds: Bounds | null;
   /** Monotonic signal that asks the shared CameraRig to return to home. */
   homeSignal: number;
-  scaleRef: { current: number };
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -325,6 +190,10 @@ function SceneShell({
     gl.toneMapping = THREE.ACESFilmicToneMapping;
     gl.toneMappingExposure = 1.05;
   }, [gl]);
+
+  // RADAR renders at rest — no fold transition remains (there is no second scene to
+  // cross-fade to), so the forest's fold scale is pinned to 1.
+  const restScale = useRef(1);
 
   return (
     <>
@@ -338,8 +207,8 @@ function SceneShell({
       <directionalLight position={[5, 6, 4]} intensity={2.1} color="#fff3e9" />
       <directionalLight position={[-6, -1, -2]} intensity={0.65} color="#bfe2ff" />
       <Environment resolution={128}>
-        {/* one shared probe for both tabs — Claude-tangerine, Codex-cyan + warm
-            formers so every gem glints in its own hue without the void changing. */}
+        {/* Claude-tangerine, Codex-cyan + warm formers so every gem glints in its
+            own hue without the void changing. */}
         <Lightformer form="rect" intensity={1.7} color="#ffcaa0" position={[-5, 3, -3]} scale={[7, 7, 1]} />
         <Lightformer form="rect" intensity={1.4} color="#bfeaff" position={[5, 1, -4]} scale={[6, 6, 1]} />
         <Lightformer form="rect" intensity={1.0} color="#ffd9b8" position={[0, -3, -4]} scale={[6, 4, 1]} />
@@ -352,33 +221,17 @@ function SceneShell({
 
       <CameraRig selected={selected} focusBounds={focusBounds} homeSignal={homeSignal} />
 
-      {/* The ONLY thing that swaps on a tab change — folded to nothing at the swap
-          midpoint, then bloomed back. The shell around it never remounts. */}
-      {displayTab === 'radar' ? (
-        <RadarForest
-          model={radarModel}
-          selectedId={selectedId}
-          hoveredId={hoveredId}
-          emphasisFilter={emphasisFilter}
-          scaleRef={scaleRef}
-          onHover={onHover}
-          onLeave={onLeave}
-          onSelect={onSelect}
-          onClear={onClear}
-        />
-      ) : (
-        <HabitsForest
-          layout={habitsLayout}
-          selectedId={selectedId}
-          hoveredId={hoveredId}
-          emphasisFilter={emphasisFilter}
-          scaleRef={scaleRef}
-          onHover={onHover}
-          onLeave={onLeave}
-          onSelect={onSelect}
-          onClear={onClear}
-        />
-      )}
+      <RadarForest
+        model={radarModel}
+        selectedId={selectedId}
+        hoveredId={hoveredId}
+        emphasisFilter={emphasisFilter}
+        scaleRef={restScale}
+        onHover={onHover}
+        onLeave={onLeave}
+        onSelect={onSelect}
+        onClear={onClear}
+      />
 
       {/* multisampling AA on the composer input stops the thin bright lattice
           lines from sub-pixel shimmering into the bloom pass (the flicker). High
@@ -401,11 +254,10 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     clustered: 0,
   }));
   const [visHidden, setVisHidden] = useState(() => document.hidden);
-  // `tab` is the nav INTENT (the lit tab — flips instantly on click); `displayTab`
-  // is the constellation actually on screen, which only swaps at the PEAK of the
-  // hyperspace jump so the change happens hidden under the streaks.
-  const [tab, setTab] = useState<ConstellationTab>(PRIMARY_CONSTELLATION_TAB);
-  const [displayTab, setDisplayTab] = useState<ConstellationTab>(PRIMARY_CONSTELLATION_TAB);
+  // The nav view — RADAR (this war room) or DOSSIER (the profile overlay). The
+  // DOSSIER surface is a separate React root opened imperatively (profile/mount);
+  // this bit only mirrors that open/closed state so the nav lights the right item.
+  const [view, setView] = useState<NavView>(() => (isProfileOpen() ? 'dossier' : PRIMARY_VIEW));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   // Interactive-legend filter (Task 10 lights the chips). null = no filter, so every
@@ -436,19 +288,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const introPlayed = useRef(!document.hidden);
   const [showIntro, setShowIntro] = useState(false);
   // Roster sidebar (left dock) — closed by default; the ≡ button and the panel's
-  // ✕ both toggle it. Session-local (not persisted); a tab swap keeps it as-is.
+  // ✕ both toggle it. Session-local (not persisted).
   const [sidebarOpen, setSidebarOpen] = useState(false);
-
-  // ── tab fold transition (Radar spec §8 — nothing ever cuts) ─────────────────
-  // The single warm <Canvas> never remounts. On a Habits↔Radar switch the current
-  // constellation folds down to nothing, the content swaps at zero size, then the
-  // next blooms back out (Transition.tsx). `transitionRef` is the shared fold state
-  // the in-Canvas driver runs down each frame; `foldScale` is the live scale the
-  // constellation FoldGroups read; `pendingTab` is where we're headed (committed to
-  // the screen at the fold midpoint).
-  const transitionRef = useRef(makeTransition());
-  const foldScale = useRef(1);
-  const pendingTab = useRef<ConstellationTab>(PRIMARY_CONSTELLATION_TAB);
 
   useEffect(() => bridge.subscribe(setScene), [bridge]);
 
@@ -471,11 +312,10 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     };
   }, []);
 
-  const model = useMemo(() => scene.orbScene ?? fallbackOrbScene(scene), [scene.orbScene, scene.candidates]);
-  const layout = useMemo(() => layoutOrbScene(model), [model]);
   // Radar forest (live agents) — empty until the backend emits `radar_state`.
   const radarModel = useMemo<RadarSceneModel>(() => scene.radarScene ?? { agents: [], generatedAt: '' }, [scene.radarScene]);
-  const chromeModel = useMemo(() => chromeModelForTab(tab, model, radarModel), [tab, model, radarModel]);
+  // Harness-filter model for the FilterBar (one hub per real harness on screen).
+  const chromeModel = useMemo(() => radarChromeModel(radarModel), [radarModel]);
   // Memoised radar layout — also the source of the `id → {pos, radius}` map that
   // `subtreeBounds` frames against. Computed from the same deterministic layout the
   // forest renders, so the camera frames exactly what's on screen.
@@ -487,34 +327,25 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     }
     return m;
   }, [radarLayout]);
-  const activeLayout = displayTab === 'radar' ? radarLayout : layout;
-  const selectedNode = useMemo(() => activeLayout.nodes.find((n) => n.id === selectedId) ?? null, [activeLayout, selectedId]);
-  const hoveredNode = useMemo(() => activeLayout.nodes.find((n) => n.id === hoveredId) ?? null, [activeLayout, hoveredId]);
+  const selectedNode = useMemo(() => radarLayout.nodes.find((n) => n.id === selectedId) ?? null, [radarLayout, selectedId]);
+  const hoveredNode = useMemo(() => radarLayout.nodes.find((n) => n.id === hoveredId) ?? null, [radarLayout, hoveredId]);
 
-  // Roster (left sidebar) content for the constellation on screen: radar agents
-  // grouped by harness with subagents nested, or the habit orbs grouped by harness.
-  // Built from the SAME models the forest renders (honest-viz) so a row click
+  // Roster (left sidebar): the live radar agents grouped by harness with subagents
+  // nested. Built from the SAME model the forest renders (honest-viz) so a row click
   // selects exactly that globe via the shared `selectedId`.
-  const rosterGroups = useMemo(
-    () => (displayTab === 'radar' ? buildRadarRoster(radarModel.agents) : buildHabitsRoster(layout)),
-    [displayTab, radarModel, layout],
-  );
+  const rosterGroups = useMemo(() => buildRadarRoster(radarModel.agents), [radarModel]);
   const rosterHeader = useMemo(() => {
-    if (displayTab === 'radar') {
-      const n = radarModel.agents.length;
-      const working = radarModel.agents.filter((a) => a.status === 'working').length;
-      return `${n} ${n === 1 ? 'agent' : 'agents'} · ${working} working`;
-    }
-    const habits = layout.nodes.filter((node) => node.kind === 'issue').length;
-    return `${habits} ${habits === 1 ? 'habit' : 'habits'}`;
-  }, [displayTab, radarModel, layout]);
+    const n = radarModel.agents.length;
+    const working = radarModel.agents.filter((a) => a.status === 'working').length;
+    return `${n} ${n === 1 ? 'agent' : 'agents'} · ${working} working`;
+  }, [radarModel]);
 
   // Radar detail-panel inputs: the selected live agent and its REAL children
   // (agents whose parentId === the selection). A flat agent yields []; the panel
   // then renders no roster (honest-viz — never a fabricated children list).
   const selectedRadarAgent = useMemo<RadarAgent | null>(
-    () => (displayTab === 'radar' && selectedId ? radarModel.agents.find((a) => a.id === selectedId) ?? null : null),
-    [displayTab, selectedId, radarModel],
+    () => (selectedId ? radarModel.agents.find((a) => a.id === selectedId) ?? null : null),
+    [selectedId, radarModel],
   );
   // A flat agent (VS Code Codex / unknown harness) yields [] even if a drifted
   // payload pointed a stray child at it — the roster mirrors the layout's flat-globe
@@ -580,10 +411,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // the selection empties the stack (camera backs out). Deterministic — built purely
   // from the previous stack + the new selection + the live parent links.
   useEffect(() => {
-    if (displayTab !== 'radar') {
-      setFocusStack((cur) => (cur.length ? [] : cur));
-      return;
-    }
     if (!selectedId || !radarModel.agents.some((a) => a.id === selectedId)) {
       setFocusStack((cur) => (cur.length ? [] : cur));
       return;
@@ -597,7 +424,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       if (parentId !== null && cur[cur.length - 1] === parentId) return [...cur, id]; // dive
       return [id]; // jump elsewhere → restart the path
     });
-  }, [displayTab, selectedId, radarModel]);
+  }, [selectedId, radarModel]);
 
   // The deepest crumb frames the camera: its subtree bounding sphere (the agent + all
   // live descendants) drives the CameraRig fly-to. Empty stack → null → overview pose.
@@ -676,33 +503,34 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   );
 
   useEffect(() => {
-    if (displayTab !== 'radar' || !active) return;
-    fetchRadar(); // immediate on entering the radar / on summon
+    if (!active) return;
+    fetchRadar(); // immediate on mount / on summon
     const id = window.setInterval(fetchRadar, RADAR_VISIBLE_PULL_MS); // fallback; push events remain the fast path
     return () => window.clearInterval(id);
-  }, [displayTab, active, fetchRadar]);
+  }, [active, fetchRadar]);
 
-  // The constellation on screen swaps at the FOLD MIDPOINT (folded to nothing), so
-  // the change is hidden at zero size — never a visible cut.
-  const onFoldMidpoint = useCallback(() => setDisplayTab(pendingTab.current), []);
-  // Fold landed — the driver has already cleared `transitionRef.active` and reset the
-  // scale to 1; selection/hover were reset at launch. Kept as a seam for arrival polish.
-  const onFoldDone = useCallback(() => {}, []);
+  // Nav: switch between RADAR (this war room) and DOSSIER (the profile overlay).
+  // The DOSSIER surface is a separate React root driven imperatively; selecting it
+  // opens the profile over the war room, selecting RADAR closes it back to the fleet.
+  // `view` mirrors that open/closed state so the nav lights the active surface.
+  const onView = useCallback((next: NavView) => {
+    if (next === 'dossier') openProfile();
+    else closeProfile();
+    setView(next);
+  }, []);
 
-  // Switching constellations clears the per-scene hover/selection (the two scenes
-  // have disjoint node-id spaces) so no inspector points at a stale node, lights the
-  // target tab instantly, and starts the fold. A tab click mid-fold is ignored so the
-  // collapse→bloom always completes cleanly.
-  const onTab = useCallback((next: ConstellationTab) => {
-    if (transitionRef.current.active) return;
-    if (next === tab) return;
-    setSelectedId(null);
-    setHoveredId(null);
-    setFixPreview(undefined);
-    pendingTab.current = next;
-    setTab(next);
-    beginTransition(transitionRef);
-  }, [tab]);
+  // Keep the nav in sync if the DOSSIER overlay is dismissed from within itself (its
+  // own Close button / the Escape + "D" hotkeys in main.ts). Sampling on focus/visibility
+  // catches the common close paths without reaching into the profile root's internals.
+  useEffect(() => {
+    const sync = () => setView(isProfileOpen() ? 'dossier' : 'radar');
+    window.addEventListener('focus', sync);
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      window.removeEventListener('focus', sync);
+      document.removeEventListener('visibilitychange', sync);
+    };
+  }, []);
 
   const onAsk = useCallback(
     async (query: string) => {
@@ -722,6 +550,10 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     },
     [bridge, scene.running],
   );
+
+  // The "Diagnose my workflow" button fires the single implicit workflow query —
+  // no typed prompt. Thin wrapper so the button's onClick carries no argument.
+  const onDiagnose = useCallback(() => onAsk(WORKFLOW_QUERY), [onAsk]);
 
   const onRequestFix = useCallback(async (issue: OrbIssue) => {
     setLoadingFix(true);
@@ -818,28 +650,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     invoke('hide_overlay').catch(() => {});
   }, []);
 
-  // ── Living Habits: pick a time-window → re-scan it ──────────────────────────
-  // Tell the backend which window to scan; it answers with a `habits_refreshed`
-  // event (routed in main.ts) that swaps the constellation's issue set. The dial's
-  // own optimistic highlight makes the click feel instant; the real highlight then
-  // reconciles from `scene.activeWindow` when the event lands. `invoke` rejects in
-  // the browser-QA harness (no Tauri) → swallowed, never disturbs the scene.
-  const onPickWindow = useCallback((w: HabitsWindow) => {
-    invoke('set_habits_window', { window: w }).catch(() => {});
-  }, []);
-
-  // Populate the habits constellation the first time the Habits tab is actually on
-  // screen: ask the backend to scan the default window (`today`) once. Keyed off
-  // `displayTab` (the constellation actually shown, post-fold) so we don't scan
-  // until the user lands on Habits, and only once per app session. `activeWindow`
-  // being set means a scan already happened (push or prior pick) — don't re-scan.
-  const habitsScanRequested = useRef(false);
-  useEffect(() => {
-    if (displayTab !== 'habits' || habitsScanRequested.current) return;
-    habitsScanRequested.current = true;
-    if (!scene.activeWindow) onPickWindow('today');
-  }, [displayTab, scene.activeWindow, onPickWindow]);
-
   const findings = useMemo(() => deriveFindings(scene), [scene.verdicts]);
   const diagnosisId = scene.diagnosisId ?? 'diagnosis';
 
@@ -849,25 +659,13 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         dpr={[1, 2]}
         frameloop={frameloopFor(!active)}
         gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
-        // Opens further back than before so the (now wider-spaced) constellation
-        // frames with room to breathe; |pos| ≈ CameraRig's OVERVIEW_DIST so the
-        // first frame already sits at rest. Both tabs share this one camera.
+        // Opens further back so the (wide-spaced) fleet frames with room to breathe;
+        // |pos| ≈ CameraRig's OVERVIEW_DIST so the first frame already sits at rest.
         camera={{ position: [4.8, 3.2, 11.7], fov: 46, near: 0.1, far: 140 }}
       >
-        {/* The fold driver — a sibling of the swapped scene so it survives the
-            mid-fold content swap and keeps running the collapse→bloom throughout. */}
-        <TransitionDriver
-          stateRef={transitionRef}
-          scaleRef={foldScale}
-          onMidpoint={onFoldMidpoint}
-          onDone={onFoldDone}
-        />
-
-        {/* One persistent shell; only its inner forest swaps on a tab change, so the
-            void never remounts — the whole app stays one continuous animation. */}
+        {/* One persistent shell wrapping the live RADAR forest — the void never
+            remounts, so the whole app stays one continuous animation. */}
         <SceneShell
-          displayTab={displayTab}
-          habitsLayout={layout}
           radarModel={radarModel}
           selected={selectedNode}
           selectedId={selectedId}
@@ -875,7 +673,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           emphasisFilter={emphasisFilter}
           focusBounds={focusBounds}
           homeSignal={homeSignal}
-          scaleRef={foldScale}
           onHover={onHover}
           onLeave={onLeave}
           onSelect={onSelect}
@@ -884,9 +681,9 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       </Canvas>
 
       <NavBar
-        tab={tab}
-        onTab={onTab}
-        counts={{ habits: layout.nodes.filter((n) => n.kind === 'issue').length, radar: radarModel.agents.length }}
+        view={view}
+        onView={onView}
+        counts={{ radar: radarModel.agents.length }}
       />
 
       {/* ≡ roster toggle (top-left) + the left roster Sidebar. The roster lists
@@ -906,7 +703,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
 
       <Sidebar
         open={sidebarOpen}
-        displayTab={displayTab}
         groups={rosterGroups}
         headerCount={rosterHeader}
         selectedId={selectedId}
@@ -914,24 +710,23 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         onToggle={onToggleSidebar}
       />
 
-      {/* The severity + harness emphasis filter, centred along the bottom (its own
-          dock now — it replaced the removed StatusDeck). */}
-      <FilterBar tab={tab} model={chromeModel} filter={emphasisFilter} onFilter={onFilter} />
+      {/* The harness emphasis filter, centred along the bottom (its own dock). */}
+      <FilterBar model={chromeModel} filter={emphasisFilter} onFilter={onFilter} />
 
       {/* Hand mode — toggle a webcam pinch-to-orbit controller (camera off until asked).
           Fixed-positioned chrome; gated on `active` so minimising releases the camera. */}
       <HandMode active={active} />
 
-      {/* Chrome is the Habits inspector (keys off node.issue/agent). On the radar
-          tab the live selection flows to RadarSceneBody via selectedId; the radar
-          detail panel is Phase 3, so keep the Habits inspector closed here rather
-          than feeding it a radar node it cannot render. */}
+      {/* Chrome — the screen-space cockpit: focus breadcrumb, the click-to-run
+          diagnose dock (button + pipeline + coach brief), the guardrail ledger. The
+          live radar selection flows to the RadarDetailPanel below, so Chrome's own
+          orb inspector stays closed here (null nodes) — it renders the Forge fix
+          preview only when a habits-issue node is fed to it (unit-tested path). */}
       <Chrome
         scene={scene}
         model={chromeModel}
-        tab={tab}
-        hoveredNode={displayTab === 'radar' ? null : hoveredNode}
-        selectedNode={displayTab === 'radar' ? null : selectedNode}
+        hoveredNode={null}
+        selectedNode={null}
         focusStack={focusStack}
         running={Boolean(scene.running)}
         error={runError}
@@ -942,7 +737,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         applying={applying}
         reverting={reverting}
         ledgerOpen={ledgerOpen}
-        onAsk={onAsk}
+        onAsk={onDiagnose}
         onRequestFix={onRequestFix}
         onApplyFix={onApplyFix}
         onRevertFix={onRevertFix}
@@ -951,13 +746,12 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         onDismiss={onDismiss}
         onPopFocus={onPopFocus}
         onClearFocus={onClearFocus}
-        onPickWindow={onPickWindow}
       />
 
-      {/* Radar detail panel — its own right-dock (the Chrome inspector is Habits-
-          only). Opens when a radar globe is selected and the camera has dived in;
-          the roster's jump-to flies to a child via onRadarJump (select + focus). */}
-      <div className={`wd-inspector wd-radar-dock ${displayTab === 'radar' && selectedRadarAgent ? 'is-open' : ''}`}>
+      {/* Radar detail panel — its own right-dock. Opens when a live globe is selected
+          and the camera has dived in; the roster's jump-to flies to a child via
+          onRadarJump (select + focus). */}
+      <div className={`wd-inspector wd-radar-dock ${selectedRadarAgent ? 'is-open' : ''}`}>
         {selectedRadarAgent ? (
           <RadarDetailPanel
             agent={selectedRadarAgent}
@@ -971,7 +765,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
 
       {/* Honest empty state — the radar is live and watching, there's just nothing
           running yet. Never reads as "broken": it says what to do to populate it. */}
-      {displayTab === 'radar' && radarModel.agents.length === 0 ? (
+      {radarModel.agents.length === 0 ? (
         <div className="wd-radar-empty" aria-live="polite">
           <span className="wd-radar-empty-pulse" aria-hidden />
           <span className="wd-radar-empty-title">Watching for live agents</span>

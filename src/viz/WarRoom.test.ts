@@ -1,51 +1,10 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from 'vitest';
-import { chromeModelForTab, humanizeBrainError, isDiscoveryHomeDoubleClickAllowed, mergeArtifact } from './WarRoom';
+import { radarChromeModel, humanizeBrainError, isDiscoveryHomeDoubleClickAllowed, mergeArtifact } from './WarRoom';
 import type { OrbSceneModel } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 import type { Artifact } from './chrome';
-
-function habitsModel(): OrbSceneModel {
-  return {
-    agents: [
-      {
-        id: 'habit-hub',
-        harness: 'claude_code',
-        label: 'Claude',
-        glyph: '✶',
-        color: '#ff8636',
-        sessions: 3,
-        eventCount: 12,
-        totalLoad: 7,
-      },
-    ],
-    issues: [
-      {
-        id: 'issue-1',
-        agentId: 'habit-hub',
-        harness: 'claude_code',
-        patternId: 'no_delegation',
-        title: 'No Delegation',
-        count: 2,
-        severity: 4,
-        rationale: 'Search-heavy turns stayed in main context.',
-        estCostTokens: 1200,
-        estCostMinutes: 6,
-        frequency: 0.2,
-        confidence: 0.8,
-        sessionIds: ['s1'],
-        evidence: [],
-        credits: 0,
-        streakK: 0,
-        fixed: false,
-        lastCreditAt: null,
-      },
-    ],
-    links: [],
-    guidance: { doItems: [], stopItems: [] },
-  };
-}
 
 function radarAgent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id' | 'harness' | 'label'>): RadarAgent {
   return {
@@ -122,28 +81,31 @@ describe('isDiscoveryHomeDoubleClickAllowed', () => {
   });
 });
 
-describe('chromeModelForTab', () => {
-  it('uses live radar agents for Radar chrome while preserving habit issues', () => {
-    const habits = habitsModel();
+describe('radarChromeModel', () => {
+  it('derives one harness hub per real harness on screen (for the FilterBar chips)', () => {
     const radar: RadarSceneModel = {
       generatedAt: 'T',
       agents: [
-        radarAgent({ id: 'live-agent-1', harness: 'codex', label: 'WARDEN' }),
-        radarAgent({ id: 'live-agent-2', harness: 'claude_code', label: 'MOBIUS' }),
+        radarAgent({ id: 'live-agent-1', harness: 'codex', label: 'WARDEN', contextTokens: 20000 }),
+        radarAgent({ id: 'live-agent-2', harness: 'claude_code', label: 'MOBIUS', contextTokens: 30000 }),
+        radarAgent({ id: 'live-agent-3', harness: 'claude_code', label: 'child', contextTokens: 5000 }),
       ],
     };
 
-    const model = chromeModelForTab('radar', habits, radar);
+    const model = radarChromeModel(radar);
 
-    expect(model.agents.map((a) => a.id)).toEqual(['live-agent-1', 'live-agent-2']);
-    expect(model.agents.map((a) => a.label)).toEqual(['WARDEN', 'MOBIUS']);
-    expect(model.issues).toBe(habits.issues);
+    // one hub per distinct harness (deduped), never per-agent
+    expect(model.agents.map((a: OrbSceneModel['agents'][number]) => a.harness).sort()).toEqual(['claude_code', 'codex']);
+    // the claude hub aggregates both claude agents' load
+    const claude = model.agents.find((a: OrbSceneModel['agents'][number]) => a.harness === 'claude_code');
+    expect(claude?.sessions).toBe(2);
+    expect(claude?.totalLoad).toBe(35000);
+    // no issues are fabricated for the radar-derived chrome model
+    expect(model.issues).toEqual([]);
   });
 
-  it('leaves the habits model untouched for the Habits tab', () => {
-    const habits = habitsModel();
-
-    expect(chromeModelForTab('habits', habits, { generatedAt: 'T', agents: [] })).toBe(habits);
+  it('yields no harness hubs when the fleet is empty', () => {
+    expect(radarChromeModel({ generatedAt: 'T', agents: [] }).agents).toEqual([]);
   });
 });
 

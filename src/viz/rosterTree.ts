@@ -14,7 +14,6 @@
 
 import type { RadarAgent, RadarStatus } from './radarTypes';
 import { radarSubtitle } from './radarTypes';
-import type { OrbLayout } from './orbTypes';
 import { harnessColor } from './harnessColors';
 
 export type RosterRow = {
@@ -107,25 +106,6 @@ export function buildRadarRoster(agents: RadarAgent[]): HarnessGroup[] {
     for (const r of order(roots)) visit(r);
     for (const a of order(mine)) visit(a);
 
-    return { ...groupMeta(harness), rows };
-  });
-}
-
-export function buildHabitsRoster(layout: OrbLayout): HarnessGroup[] {
-  const issues = layout.nodes.filter((n) => n.kind === 'issue' && n.issue);
-  return orderedHarnesses(issues.map((n) => n.harness)).map((harness) => {
-    const rows: RosterRow[] = issues
-      .filter((n) => n.harness === harness)
-      .slice()
-      .sort((a, b) => b.issue!.severity - a.issue!.severity || b.issue!.count - a.issue!.count)
-      .map((n) => ({
-        id: n.id,
-        title: n.issue!.title,
-        subtitle: `×${n.issue!.count} · sev ${n.issue!.severity}/5`,
-        harness,
-        depth: 0,
-        severity: n.issue!.severity,
-      }));
     return { ...groupMeta(harness), rows };
   });
 }

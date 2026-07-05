@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildRadarRoster, buildHabitsRoster, type HarnessGroup } from './rosterTree';
+import { buildRadarRoster, type HarnessGroup } from './rosterTree';
 import type { RadarAgent } from './radarTypes';
-import type { LayoutNode, OrbIssue, OrbLayout } from './orbTypes';
 
 // rosterTree is the PURE source of the sidebar list: it groups the live forest /
 // the habit orbs by harness (one source of truth = harnessColors) and, for radar,
@@ -118,79 +117,3 @@ describe('buildRadarRoster — row content', () => {
   });
 });
 
-// ── Habits roster (built from LAYOUT nodes so row.id === the node the forest
-//    rendered — a click selects exactly that orb, never a drifted issue id). ──────
-function issueNode(over: Partial<OrbIssue> & { id: string; harness: string }): LayoutNode {
-  const issue: OrbIssue = {
-    id: over.id,
-    agentId: over.harness,
-    harness: over.harness,
-    patternId: over.patternId ?? 'pattern',
-    title: over.title ?? 'Some Habit',
-    count: over.count ?? 1,
-    severity: over.severity ?? 3,
-    rationale: '',
-    estCostTokens: 0,
-    estCostMinutes: 0,
-    frequency: 0,
-    confidence: 0,
-    sessionIds: [],
-    evidence: [],
-    credits: 0,
-    streakK: 0,
-    fixed: false,
-    lastCreditAt: null,
-  };
-  return {
-    id: over.id,
-    kind: 'issue',
-    position: { x: 0, y: 0, z: 0 },
-    radius: 1,
-    agentId: over.harness,
-    harness: over.harness,
-    issue,
-  };
-}
-
-function layoutOf(nodes: LayoutNode[]): OrbLayout {
-  return { nodes, links: [] };
-}
-
-describe('buildHabitsRoster', () => {
-  it('builds rows from issue nodes only, ignoring hubs', () => {
-    const hub: LayoutNode = {
-      id: 'claude_code',
-      kind: 'hub',
-      position: { x: 0, y: 0, z: 0 },
-      radius: 2,
-      agentId: 'claude_code',
-      harness: 'claude_code',
-    };
-    const groups = buildHabitsRoster(
-      layoutOf([hub, issueNode({ id: 'i1', harness: 'claude_code', title: 'Context Bloat' })]),
-    );
-    expect(groups).toHaveLength(1);
-    expect(ids(groups[0])).toEqual(['i1']);
-    expect(groups[0].rows[0].title).toBe('Context Bloat');
-  });
-
-  it('groups by harness and sorts rows by severity desc, then count desc', () => {
-    const groups = buildHabitsRoster(
-      layoutOf([
-        issueNode({ id: 'low', harness: 'claude_code', severity: 2, count: 9 }),
-        issueNode({ id: 'crit', harness: 'claude_code', severity: 5, count: 1 }),
-        issueNode({ id: 'mid-lots', harness: 'claude_code', severity: 3, count: 8 }),
-        issueNode({ id: 'mid-few', harness: 'claude_code', severity: 3, count: 2 }),
-        issueNode({ id: 'cx', harness: 'codex', severity: 4 }),
-      ]),
-    );
-    expect(groups.map((g) => g.harness)).toEqual(['claude_code', 'codex']);
-    expect(ids(groups[0])).toEqual(['crit', 'mid-lots', 'mid-few', 'low']);
-  });
-
-  it('uses the node id (selection-safe) and exposes severity for the dot', () => {
-    const [g] = buildHabitsRoster(layoutOf([issueNode({ id: 'node-7', harness: 'codex', severity: 4 })]));
-    expect(g.rows[0].id).toBe('node-7');
-    expect(g.rows[0].severity).toBe(4);
-  });
-});

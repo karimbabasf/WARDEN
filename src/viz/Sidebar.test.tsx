@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 //
-// Sidebar is the toggle roster: a left dock that lists every globe as a scannable
-// list — Radar agents (grouped by harness, subagents nested) or Habits orbs (grouped
-// by harness, titled). It is presentational; the grouping/nesting is the pure
-// `rosterTree`, and clicking a row calls `onPick(id)` which WarRoom turns into the
-// existing select → camera-dive → detail-dock flow. Rendered under jsdom.
+// Sidebar is the toggle roster: a left dock that lists every live agent as a
+// scannable list (grouped by harness, subagents nested). It is presentational; the
+// grouping/nesting is the pure `rosterTree`, and clicking a row calls `onPick(id)`
+// which WarRoom turns into the existing select → camera-dive → detail-dock flow.
+// Rendered under jsdom.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
@@ -48,7 +48,6 @@ afterEach(() => {
 
 const defaults = {
   open: true,
-  displayTab: 'radar' as const,
   selectedId: null,
   headerCount: '0 agents',
   onPick: () => {},
@@ -98,14 +97,11 @@ describe('Sidebar', () => {
     expect(el.querySelector('.wd-sidebar')?.getAttribute('aria-hidden')).toBe('false');
   });
 
-  it('labels the header per tab and shows the count', () => {
-    const radar = render(<Sidebar {...defaults} groups={[]} displayTab="radar" headerCount="12 agents · 3 working" />);
+  it('labels the header Roster and shows the live-agent count', () => {
+    const radar = render(<Sidebar {...defaults} groups={[]} headerCount="12 agents · 3 working" />);
     const head = radar.querySelector('.wd-sidebar-head')?.textContent?.toLowerCase() ?? '';
     expect(head).toContain('roster');
     expect(head).toContain('12 agents');
-
-    act(() => root!.render(<Sidebar {...defaults} groups={[]} displayTab="habits" headerCount="5 habits" />));
-    expect(radar.querySelector('.wd-sidebar-head')?.textContent?.toLowerCase()).toContain('habits');
   });
 
   it('pulses a working radar row but not a closed one', () => {

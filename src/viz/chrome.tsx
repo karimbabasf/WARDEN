@@ -1,19 +1,18 @@
-// chrome.tsx — the war-room's glass cockpit (the interface formerly known as the
-// terminal). Everything the old green-on-black terminal showed now lives here as
-// screen-space DOM over the 3D canvas: the WARDEN HUD + memory profile, the ask
-// bar, a live pipeline rail (real Fugu stages + token weight + streamed
-// reasoning), the orb inspector (hover preview + click-through detail with the
-// read-only fix preview), the harness/severity legend, and an empty-state invite.
+// chrome.tsx — the war-room's glass cockpit over the live RADAR canvas. Everything
+// screen-space lives here: the WARDEN HUD + memory profile, the "Diagnose my
+// workflow" button + 3-stage pipeline reveal (real Fugu stages + token weight +
+// streamed reasoning) + fresh coach brief, the orb inspector (hover preview +
+// click-through detail with the read-only fix preview), the radar focus breadcrumb,
+// and the guardrail ledger.
 //
 // It is a pure presentational layer: it reads a normalized `SceneState` + the
-// resolved orb layout and calls back to WarRoom for the few user actions
-// (ask, request fix, clear, dismiss). No Tauri, no Three — trivially reasoned about.
+// resolved orb model and calls back to WarRoom for the few user actions (run a
+// diagnosis, request/apply/revert a fix, clear, dismiss). No Tauri, no Three.
 
-import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { HabitsWindow, SceneState } from './bridge';
+import { Fragment, type CSSProperties } from 'react';
+import type { SceneState } from './bridge';
 import { harnessTheme, severityColor } from './harnessTheme';
 import type { LayoutNode, OrbIssue, OrbSceneModel } from './orbTypes';
-import type { ConstellationTab } from './NavBar';
 
 export type FixPreview = {
   finding_id: string;
@@ -78,7 +77,6 @@ export function provenanceLabel(targetPath: string): string {
 }
 
 const PIPELINE_STAGES = ['Diagnostician', 'Coach', 'Verifier'] as const;
-const DEFAULT_QUERY = "what's wrong with how I use my agents?";
 
 function fmtCount(n: number | undefined): string {
   return typeof n === 'number' && Number.isFinite(n) ? Math.round(n).toLocaleString() : '—';
@@ -90,131 +88,6 @@ function compact(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0';
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
   return String(Math.round(n));
-}
-
-// Living Habits — legibility (no "K/S" jargon): turn the raw streak fields into
-// ONE plain-language line. `null` means "no active streak yet" (streakK is 0 —
-// the habit hasn't been seen clean even once) so the caller renders nothing
-// rather than a confusing "0/0". Once `fixed`, the tally is kept (so the operator
-// still sees what was proven) with "resolved" appended, matching the calm
-// fade/shrink the same state drives on the 3D orb (Orb.tsx) — text and shape
-// agree, never contradict.
-export function streakLineText(issue: Pick<OrbIssue, 'credits' | 'streakK' | 'fixed'>): string | null {
-  if (issue.streakK <= 0) return null;
-  const tally = `${issue.credits}/${issue.streakK} clean sessions`;
-  return issue.fixed ? `${tally} · resolved` : tally;
-}
-
-// ── Living Habits: the time-window dial + a live "last scanned" readout ──────
-// The dial is a segmented control over the five window wire strings; clicking one
-// asks the backend to re-scan that window (`set_habits_window`) and optimistically
-// lights the chosen segment so the UI feels instant (the real highlight then
-// reconciles from `scene.activeWindow` when `habits_refreshed` echoes back). The
-// readout derives a relative age from `scene.lastScannedAt`, re-rendered on a 1s
-// tick so "last scanned Ns ago" actually counts up. Rendered ONLY on the habits tab
-// (its caller gates it). Phosphor chrome: active = --acid, text --ink-soft, the
-// rest from the shared tokens so it matches the FilterBar dock it sits above.
-export const HABITS_WINDOW_OPTIONS: ReadonlyArray<{ value: HabitsWindow; label: string }> = [
-  { value: 'today', label: 'Today' },
-  { value: '7d', label: '7d' },
-  { value: '30d', label: '30d' },
-  { value: '6mo', label: '6mo' },
-  { value: 'all', label: 'All-time' },
-];
-
-// Pure: format an age in seconds as a compact relative string. Exported for the
-// unit test (no DOM/clock dependence — the tick that re-runs it lives in the view).
-export function relativeScanAge(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return 'just now';
-  if (seconds < 1) return 'just now';
-  if (seconds < 60) return `${Math.floor(seconds)}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
-}
-
-// How long the "diagnosed" blip stays lit after `habits_diagnosed` lands. Purely
-// a display duration — not a claim about backend timing.
-const DIAGNOSED_BLIP_MS = 8000;
-
-function HabitsDial({
-  activeWindow,
-  lastScannedAt,
-  habitsDiagnosedAt,
-  onPickWindow,
-}: {
-  activeWindow: HabitsWindow | undefined;
-  lastScannedAt: string | undefined;
-  habitsDiagnosedAt: number | undefined;
-  onPickWindow: (w: HabitsWindow) => void;
-}) {
-  // Optimistic highlight: lit on click immediately, reconciled to the backend's
-  // echoed window whenever `activeWindow` changes (the honest source of truth).
-  const [optimistic, setOptimistic] = useState<HabitsWindow | undefined>(activeWindow);
-  useEffect(() => {
-    if (activeWindow) setOptimistic(activeWindow);
-  }, [activeWindow]);
-  const lit = optimistic ?? activeWindow ?? 'today';
-
-  // 1s tick so the relative "last scanned" age counts up live, and so the
-  // "diagnosed" blip (below) expires on its own without a separate timer. The
-  // interval is the ONLY clock here; `relativeScanAge` stays pure.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  const scannedMs = lastScannedAt ? Date.parse(lastScannedAt) : NaN;
-  const age = Number.isFinite(scannedMs) ? relativeScanAge((Date.now() - scannedMs) / 1000) : null;
-
-  // Living Habits (4e): a real `habits_diagnosed` event landed — the background
-  // GLM re-diagnosis pass for the active window finished. We only render the
-  // COMPLETION, never a fabricated "re-diagnosing…" pre-state: the backend's
-  // heartbeat worker (scheduler.rs `run_habits_expensive`) emits no "started"
-  // signal to key that on, and honest-viz (see CLAUDE.md) means no signal the
-  // backend didn't actually emit. The blip self-expires after DIAGNOSED_BLIP_MS
-  // via the same 1s tick that drives the live-scanned age, so no extra timer.
-  const showDiagnosed =
-    typeof habitsDiagnosedAt === 'number' && now - habitsDiagnosedAt < DIAGNOSED_BLIP_MS;
-
-  return (
-    <div className="wd-habits-dial" data-habits-dial role="group" aria-label="Habits time window">
-      <div className="wd-dial-seg" role="radiogroup" aria-label="Time window">
-        {HABITS_WINDOW_OPTIONS.map((o) => {
-          const active = lit === o.value;
-          return (
-            <button
-              type="button"
-              key={o.value}
-              className={`wd-dial-opt${active ? ' is-active' : ''}`}
-              data-window={o.value}
-              role="radio"
-              aria-checked={active}
-              title={`Show habits over: ${o.label}`}
-              onClick={() => {
-                setOptimistic(o.value); // optimistic — reconciles from scene.activeWindow
-                onPickWindow(o.value);
-              }}
-            >
-              {o.label}
-            </button>
-          );
-        })}
-      </div>
-      {showDiagnosed && (
-        <span className="wd-dial-diagnosed" data-habits-diagnosed-blip>
-          diagnosed
-        </span>
-      )}
-      <div className="wd-dial-live" data-habits-live aria-live="polite">
-        <span className="wd-dial-live-dot" aria-hidden="true" />
-        <span className="wd-dial-live-text">
-          live{age ? ` · last scanned ${age}` : ''}
-        </span>
-      </div>
-    </div>
-  );
 }
 
 // ── top HUD: identity + live memory profile ────────────────────────────────
@@ -260,8 +133,11 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-// ── bottom console: ask bar + live pipeline rail ───────────────────────────
-function Console({
+// ── diagnosis trigger: the "Diagnose my workflow" button + live pipeline ─────
+// Diagnosis is click-to-run now: one CTA fires the implicit workflow query (no
+// terminal, no typed prompt). While a run is in flight the 3-stage pipeline reveal
+// sits above the button; a failed run surfaces one plain error line beneath it.
+function DiagnoseConsole({
   scene,
   running,
   error,
@@ -270,74 +146,84 @@ function Console({
   scene: SceneState;
   running: boolean;
   error: string | null;
-  onAsk: (q: string) => void;
+  onAsk: () => void;
 }) {
-  const [value, setValue] = useState(DEFAULT_QUERY);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  // Summon focuses the ask bar so the user can type over the suggestion at once.
-  useEffect(() => {
-    if (scene.summoned) {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
-  }, [scene.summoned]);
-
   return (
-    <div className="wd-console">
+    <div className="wd-console" data-diagnose-console>
       {(running || scene.stream) && <PipelineRail scene={scene} running={running} />}
-      <form
-        className="wd-ask"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const q = value.trim();
-          if (q && !running) onAsk(q);
+      <button
+        type="button"
+        className="wd-diagnose"
+        data-diagnose-run
+        disabled={running}
+        aria-label="Diagnose my agent workflow"
+        onClick={() => {
+          if (!running) onAsk();
         }}
       >
-        <span className="wd-ask-chevron" aria-hidden="true">▸</span>
-        <input
-          ref={inputRef}
-          className="wd-ask-input"
-          value={value}
-          spellCheck={false}
-          disabled={running}
-          aria-label="Ask WARDEN about your agent habits"
-          onChange={(e) => setValue(e.target.value)}
-        />
-        <button className="wd-ask-run" type="submit" disabled={running}>
-          {running ? 'DIAGNOSING' : 'DIAGNOSE'}
-        </button>
-      </form>
-      {error && <div className="wd-ask-error">{error}</div>}
+        <span className="wd-diagnose-glyph" aria-hidden="true">⌖</span>
+        <span className="wd-diagnose-label">
+          {running ? 'Diagnosing your workflow' : 'Diagnose my workflow'}
+        </span>
+        {running && <span className="wd-diagnose-spin" aria-hidden="true" />}
+      </button>
+      {error && <div className="wd-ask-error" data-diagnose-error>{error}</div>}
     </div>
   );
 }
 
+// The 3-stage progress reveal (Diagnostician → Coach → Verifier). Not a scrolling
+// terminal: a composed horizontal track where a connecting rail fills left-to-right
+// as stages complete, each node lighting from pending → active (pulsing) → done. The
+// fill fraction is derived from the real active/done stage indices, so the motion
+// tracks the actual pipeline, never a fake timer. Per-stage token weight rides under
+// each node (honest — 0 tokens shows no number), and the current reasoning stream
+// (when the engine emits one) sits below the track.
 function PipelineRail({ scene, running }: { scene: SceneState; running: boolean }) {
   const activeIndex = PIPELINE_STAGES.indexOf((scene.stage ?? '') as (typeof PIPELINE_STAGES)[number]);
+  const states = PIPELINE_STAGES.map((stage, i) => {
+    const usage = scene.usage[stage];
+    const tokens = usage ? usage.in + usage.out : 0;
+    const orchestrated = usage ? usage.orchIn + usage.orchOut > 0 : false;
+    const isActive = running && stage === scene.stage;
+    const isDone = activeIndex > i || (tokens > 0 && !isActive);
+    return { stage, tokens, orchestrated, isActive, isDone };
+  });
+  // Completed stages fully advance the rail; an in-flight stage sits half-way to its
+  // node so the fill visibly reaches into the working segment.
+  const doneCount = states.filter((s) => s.isDone).length;
+  const activeAt = states.findIndex((s) => s.isActive);
+  const steps = PIPELINE_STAGES.length - 1;
+  const reached = activeAt >= 0 ? activeAt - 0.5 : doneCount - 1;
+  const fillPct = steps > 0 ? Math.max(0, Math.min(1, reached / steps)) * 100 : 0;
+
   return (
     <div className="wd-pipeline" role="status" aria-live="polite">
-      <div className="wd-pipeline-stages">
-        {PIPELINE_STAGES.map((stage, i) => {
-          const usage = scene.usage[stage];
-          const tokens = usage ? usage.in + usage.out : 0;
-          const orchestrated = usage ? usage.orchIn + usage.orchOut > 0 : false;
-          const isActive = running && stage === scene.stage;
-          const isDone = activeIndex > i || (tokens > 0 && !isActive);
-          const cls = isActive ? 'is-active' : isDone ? 'is-done' : 'is-pending';
-          return (
-            <div className={`wd-stage ${cls}`} key={stage}>
-              <span className="wd-stage-dot" aria-hidden="true" />
-              <span className="wd-stage-name">{stage}</span>
-              {tokens > 0 && (
-                <span className="wd-stage-tokens" title={orchestrated ? 'orchestration tokens (Fugu)' : 'tokens'}>
-                  {compact(tokens)}
-                  {orchestrated ? ' ✦' : ''}
+      <div className="wd-pipeline-track" style={{ '--wd-fill': `${fillPct}%` } as CSSProperties}>
+        <span className="wd-pipeline-rail" aria-hidden="true" />
+        <span className="wd-pipeline-rail-fill" aria-hidden="true" />
+        <div className="wd-pipeline-stages">
+          {states.map(({ stage, tokens, orchestrated, isActive, isDone }, i) => {
+            const cls = isActive ? 'is-active' : isDone ? 'is-done' : 'is-pending';
+            return (
+              <div
+                className={`wd-stage ${cls}`}
+                key={stage}
+                data-stage={stage}
+                data-state={isActive ? 'active' : isDone ? 'done' : 'pending'}
+                style={{ '--wd-stage-i': i } as CSSProperties}
+              >
+                <span className="wd-stage-node" aria-hidden="true">
+                  <span className="wd-stage-dot" />
                 </span>
-              )}
-            </div>
-          );
-        })}
+                <span className="wd-stage-name">{stage}</span>
+                <span className="wd-stage-tokens" title={orchestrated ? 'orchestration tokens (Fugu)' : 'tokens'}>
+                  {tokens > 0 ? `${compact(tokens)}${orchestrated ? ' ✦' : ''}` : '·'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
       {scene.stream?.text && (
         <div className="wd-stream">
@@ -727,11 +613,6 @@ function DetailPanel({
           <span key={i} className={i < issue.severity ? 'on' : ''} />
         ))}
       </div>
-      {streakLineText(issue) && (
-        <div className={`wd-streak-line${issue.fixed ? ' is-resolved' : ''}`} data-streak-line>
-          {streakLineText(issue)}
-        </div>
-      )}
       <p>{issue.rationale}</p>
       <div className="wd-detail-ledger">
         <span>×{fmtCount(issue.count)} occurrences</span>
@@ -793,26 +674,9 @@ function DetailHead({ kicker, title, onClose }: { kicker: string; title: string;
   );
 }
 
-function EmptyState({ running }: { running: boolean }) {
-  if (running) return null;
-  return (
-    <div className="wd-empty">
-      <div className="wd-empty-card">
-        <div className="wd-empty-kicker">no habits mapped yet</div>
-        <p>
-          Ask WARDEN what's wrong with how you use your agents. It reads your local Claude &amp; Codex transcripts and
-          maps every recurring habit as an orb you can explore.
-        </p>
-        <div className="wd-empty-hint">type below · press DIAGNOSE</div>
-      </div>
-    </div>
-  );
-}
-
 export function Chrome({
   scene,
   model,
-  tab,
   hoveredNode,
   selectedNode,
   focusStack,
@@ -834,11 +698,9 @@ export function Chrome({
   onDismiss,
   onPopFocus,
   onClearFocus,
-  onPickWindow,
 }: {
   scene: SceneState;
   model: OrbSceneModel;
-  tab: ConstellationTab;
   hoveredNode: LayoutNode | null;
   selectedNode: LayoutNode | null;
   focusStack: string[];
@@ -853,7 +715,8 @@ export function Chrome({
   applying: boolean;
   reverting: boolean;
   ledgerOpen: boolean;
-  onAsk: (q: string) => void;
+  /** Fire the implicit "diagnose my workflow" run (no argument — the query is fixed). */
+  onAsk: () => void;
   onRequestFix: (issue: OrbIssue) => void;
   onApplyFix: (issue: OrbIssue) => void;
   onRevertFix: (id: string) => void;
@@ -862,51 +725,30 @@ export function Chrome({
   onDismiss: () => void;
   onPopFocus: (index: number) => void;
   onClearFocus: () => void;
-  /** Living Habits: the dial picked a time-window → re-scan it (`set_habits_window`). */
-  onPickWindow: (w: HabitsWindow) => void;
 }) {
   const ledgerCount = artifacts.filter(isHistoric).length;
-  // Chrome now carries only the radar focus trail (Breadcrumb, top of the chrome
-  // on the Radar tab) and the orb inspector. The emphasis filter is its own
-  // bottom-centre `FilterBar` dock and the old bottom `StatusDeck` was removed
-  // (its agent count now lives in the roster Sidebar header). The HUD +
-  // conversational ask bar stay defined-but-dormant for the later chat interface.
+  const busy = running || Boolean(scene.running);
+  // RADAR is the hero; the chrome carries the live focus trail (Breadcrumb), the
+  // orb inspector (Forge fix-preview when a node is open), the click-to-run diagnose
+  // dock (button + pipeline + fresh coach brief), and the guardrail ledger. The
+  // emphasis filter is its own bottom-centre FilterBar dock.
   return (
     <div className="wd-chrome">
-      {tab === 'radar' && (
-        <Breadcrumb
-          focusStack={focusStack}
-          model={model}
-          onPopFocus={onPopFocus}
-          onClearFocus={onClearFocus}
-        />
-      )}
+      <Breadcrumb
+        focusStack={focusStack}
+        model={model}
+        onPopFocus={onPopFocus}
+        onClearFocus={onClearFocus}
+      />
 
-      {/* Living Habits time-window dial + live "last scanned" readout — habits tab
-          only (severity/streaks are a habits-only signal). Picking a window asks the
-          backend to re-scan it; the constellation then refreshes via habits_refreshed. */}
-      {tab === 'habits' && (
-        <HabitsDial
-          activeWindow={scene.activeWindow}
-          lastScannedAt={scene.lastScannedAt}
-          habitsDiagnosedAt={scene.habitsDiagnosedAt}
-          onPickWindow={onPickWindow}
-        />
-      )}
-
-      {/* The ask console — the diagnosis flow's front door — lives on the habits
-          tab (the constellation it feeds). Radar keeps its FilterBar dock clear.
-          The fresh coach brief rides directly above it so a completed run's
-          narrative + DO/STOP land in front of the operator, not just the DB. */}
-      {tab === 'habits' && model.issues.length === 0 && (
-        <EmptyState running={running || Boolean(scene.running)} />
-      )}
-      {tab === 'habits' && (
-        <div className="wd-console-dock">
-          <DiagnosisBrief diagnosis={scene.diagnosis} running={running || Boolean(scene.running)} />
-          <Console scene={scene} running={running || Boolean(scene.running)} error={error} onAsk={onAsk} />
-        </div>
-      )}
+      {/* The diagnosis dock — one "Diagnose my workflow" button (click-to-run, no
+          terminal), the 3-stage pipeline reveal while a run is in flight, and the
+          fresh coach brief above it so a completed run's narrative + DO/STOP land in
+          front of the operator, not just the DB. */}
+      <div className="wd-console-dock">
+        <DiagnosisBrief diagnosis={scene.diagnosis} running={busy} />
+        <DiagnoseConsole scene={scene} running={busy} error={error} onAsk={onAsk} />
+      </div>
 
       <div className={`wd-inspector ${selectedNode || hoveredNode ? 'is-open' : ''}`}>
         {selectedNode ? (

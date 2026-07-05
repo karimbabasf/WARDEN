@@ -1,41 +1,25 @@
-// FilterBar.tsx — the interactive severity + harness emphasis filter, lifted out
-// of chrome.tsx into its own bottom-centre dock (it replaces the removed StatusDeck
-// as the only thing along the bottom). Behaviour is unchanged from the old Legend:
-// each chip toggles a single `EmphasisFilter`; a lit chip clears it; matching orbs
-// pop while siblings dim (the dim channel is wired in WarRoom). Honest-viz + a11y:
-// every chip pairs colour + glyph + text label (colour is never the only signal),
-// and harness chips key off the real snake_case harness id so `matchesFilter` lines
-// up with the scene nodes. Severity is a per-habit signal → severity chips show on
-// the Habits tab only; harness chips show on both.
+// FilterBar.tsx — the interactive harness emphasis filter, in its own bottom-centre
+// dock. Each chip toggles a single `EmphasisFilter`; a lit chip clears it; matching
+// orbs pop while siblings dim (the dim channel is wired in WarRoom). Honest-viz +
+// a11y: every chip pairs colour + glyph + text label (colour is never the only
+// signal), and harness chips key off the real snake_case harness id so `matchesFilter`
+// lines up with the live fleet nodes. Severity buckets were a Habits-only signal and
+// went with the Habits scene — RADAR filters by harness alone.
 
 import { type CSSProperties } from 'react';
-import { harnessTheme, severityColor } from './harnessTheme';
+import { harnessTheme } from './harnessTheme';
 import type { OrbSceneModel } from './orbTypes';
 import type { EmphasisFilter } from './emphasis';
-import type { ConstellationTab } from './NavBar';
 
-type SevBucket = Extract<EmphasisFilter, { kind: 'severity' }>;
-const SEVERITY_CHIPS: ReadonlyArray<{ bucket: SevBucket['bucket']; label: string; sev: number; glyph: string }> = [
-  { bucket: 'low', label: 'Low', sev: 2, glyph: '○' },
-  { bucket: 'med', label: 'Watch', sev: 3, glyph: '◔' },
-  { bucket: 'high', label: 'High', sev: 4, glyph: '◑' },
-  { bucket: 'crit', label: 'Critical', sev: 5, glyph: '●' },
-];
-
-function isSeverityActive(filter: EmphasisFilter, bucket: SevBucket['bucket']): boolean {
-  return filter?.kind === 'severity' && filter.bucket === bucket;
-}
 function isHarnessActive(filter: EmphasisFilter, harness: string): boolean {
   return filter?.kind === 'harness' && filter.harness === harness;
 }
 
 export function FilterBar({
-  tab,
   model,
   filter,
   onFilter,
 }: {
-  tab: ConstellationTab;
   model: OrbSceneModel;
   filter: EmphasisFilter;
   onFilter: (f: EmphasisFilter) => void;
@@ -50,31 +34,6 @@ export function FilterBar({
   return (
     <div className="wd-filterbar" role="group" aria-label="Emphasis filter">
       <span className="wd-legend-key wd-filterbar-lead">filter</span>
-      {tab === 'habits' && (
-        <div className="wd-legend-group" aria-label="severity">
-          <span className="wd-legend-key">severity</span>
-          {SEVERITY_CHIPS.map((c) => {
-            const active = isSeverityActive(filter, c.bucket);
-            const next: EmphasisFilter = active ? null : { kind: 'severity', bucket: c.bucket };
-            return (
-              <button
-                type="button"
-                key={c.bucket}
-                className={`wd-chip wd-chip-sev${active ? ' is-active' : ''}`}
-                aria-pressed={active}
-                aria-label={`${active ? 'Clear' : 'Show only'} ${c.label} severity habits`}
-                title={`${c.label} severity${active ? ' (active — click to clear)' : ''}`}
-                onClick={() => onFilter(next)}
-                style={{ '--chip': severityColor(c.sev) } as CSSProperties}
-              >
-                <span className="wd-chip-swatch" aria-hidden="true" />
-                <span className="wd-chip-glyph" aria-hidden="true">{c.glyph}</span>
-                <span className="wd-chip-label">{c.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
       <div className="wd-legend-group" aria-label="harness">
         <span className="wd-legend-key">harness</span>
         {harnesses.map((a) => {

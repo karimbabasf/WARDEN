@@ -1,16 +1,15 @@
-// Sidebar.tsx — the toggle roster dock (left). It lists every globe as a scannable
-// list so a 20-25 agent fleet is navigable without hunting in 3D: Radar shows live
-// agents grouped by harness with subagents nested under their root; Habits shows the
-// habit orbs grouped by harness. Closed by default; the ≡ button (in WarRoom) and the
-// header ✕ both call `onToggle`. A row click calls `onPick(id)`, which WarRoom turns
-// into the existing select → camera-dive → detail-dock flow (no new selection state).
+// Sidebar.tsx — the toggle roster dock (left). It lists every live agent as a
+// scannable list so a 20-25 agent fleet is navigable without hunting in 3D: agents
+// grouped by harness with subagents nested under their root. Closed by default; the
+// ≡ button (in WarRoom) and the header ✕ both call `onToggle`. A row click calls
+// `onPick(id)`, which WarRoom turns into the existing select → camera-dive →
+// detail-dock flow (no new selection state).
 //
 // Pure presentation: the grouping/nesting is `rosterTree`; the dot keys off the row's
-// real liveness (radar) or severity (habits) — colour is paired with the status word
-// in the aria-label so it is never the only signal.
+// real liveness — colour is paired with the status word in the aria-label so it is
+// never the only signal.
 
 import { type CSSProperties } from 'react';
-import type { ConstellationTab } from './NavBar';
 import type { HarnessGroup, RosterRow } from './rosterTree';
 import { severityColor } from './harnessTheme';
 
@@ -54,7 +53,6 @@ function Row({
 
 export function Sidebar({
   open,
-  displayTab,
   groups,
   headerCount,
   selectedId,
@@ -62,14 +60,13 @@ export function Sidebar({
   onToggle,
 }: {
   open: boolean;
-  displayTab: ConstellationTab;
   groups: HarnessGroup[];
   headerCount: string;
   selectedId: string | null;
   onPick: (id: string) => void;
   onToggle: () => void;
 }) {
-  const title = displayTab === 'radar' ? 'Roster' : 'Habits';
+  const title = 'Roster';
   return (
     <aside id="wd-roster" className="wd-sidebar" data-open={open} aria-hidden={!open} aria-label={`${title} list`}>
       <div className="wd-sidebar-head">
@@ -89,7 +86,7 @@ export function Sidebar({
       </div>
       <div className="wd-sidebar-body">
         {groups.length === 0 ? (
-          <div className="wd-sidebar-empty">{displayTab === 'radar' ? 'No live agents' : 'No habits mapped'}</div>
+          <div className="wd-sidebar-empty">No live agents</div>
         ) : (
           groups.map((g) => (
             <section className="wd-roster-group" data-group={g.harness} key={g.harness} role="group" aria-label={g.label}>

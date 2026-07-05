@@ -1,10 +1,9 @@
 // @vitest-environment jsdom
 //
-// FilterBar is the severity + harness emphasis filter, lifted out of chrome.tsx
-// into its own bottom-centre dock (the StatusDeck it sat above is removed). The
-// behaviour is unchanged from the old Legend: severity chips appear on Habits only,
-// harness chips on both tabs, a chip toggles a single EmphasisFilter, and clicking
-// the lit chip clears it. Rendered under jsdom (house no-deps style).
+// FilterBar is the harness emphasis filter in its own bottom-centre dock. Severity
+// buckets were a Habits-only signal and went with the Habits scene — RADAR filters
+// by harness alone. A chip toggles a single EmphasisFilter, and clicking the lit
+// chip clears it. Rendered under jsdom (house no-deps style).
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
@@ -43,19 +42,15 @@ afterEach(() => {
 });
 
 describe('FilterBar', () => {
-  it('shows severity chips on Habits and hides them on Radar (harness chips on both)', () => {
-    const habits = render(<FilterBar tab="habits" model={model()} filter={null} onFilter={() => {}} />);
-    expect(habits.querySelectorAll('.wd-chip-sev').length).toBe(4);
-    expect(habits.querySelectorAll('.wd-chip-harness').length).toBeGreaterThan(0);
-
-    act(() => root!.render(<FilterBar tab="radar" model={model()} filter={null} onFilter={() => {}} />));
-    expect(habits.querySelectorAll('.wd-chip-sev').length).toBe(0);
-    expect(habits.querySelectorAll('.wd-chip-harness').length).toBeGreaterThan(0);
+  it('renders a harness chip per present harness and no severity chips', () => {
+    const el = render(<FilterBar model={model(['claude_code', 'codex'])} filter={null} onFilter={() => {}} />);
+    expect(el.querySelectorAll('.wd-chip-sev').length).toBe(0);
+    expect(el.querySelectorAll('.wd-chip-harness').length).toBe(2);
   });
 
   it('toggles a harness filter on click, and clears it when the lit chip is clicked again', () => {
     const onFilter = vi.fn();
-    const el = render(<FilterBar tab="radar" model={model(['claude_code'])} filter={null} onFilter={onFilter} />);
+    const el = render(<FilterBar model={model(['claude_code'])} filter={null} onFilter={onFilter} />);
     const chip = el.querySelector('.wd-chip-harness') as HTMLButtonElement;
     act(() => chip.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(onFilter).toHaveBeenCalledWith({ kind: 'harness', harness: 'claude_code' });
@@ -63,7 +58,7 @@ describe('FilterBar', () => {
     onFilter.mockClear();
     act(() =>
       root!.render(
-        <FilterBar tab="radar" model={model(['claude_code'])} filter={{ kind: 'harness', harness: 'claude_code' }} onFilter={onFilter} />,
+        <FilterBar model={model(['claude_code'])} filter={{ kind: 'harness', harness: 'claude_code' }} onFilter={onFilter} />,
       ),
     );
     const active = el.querySelector('.wd-chip-harness') as HTMLButtonElement;
@@ -72,17 +67,8 @@ describe('FilterBar', () => {
     expect(onFilter).toHaveBeenCalledWith(null);
   });
 
-  it('emits a severity filter from a severity chip on the Habits tab', () => {
-    const onFilter = vi.fn();
-    const el = render(<FilterBar tab="habits" model={model()} filter={null} onFilter={onFilter} />);
-    const sev = el.querySelector('.wd-chip-sev') as HTMLButtonElement;
-    act(() => sev.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-    expect(onFilter).toHaveBeenCalledTimes(1);
-    expect(onFilter.mock.calls[0][0]).toMatchObject({ kind: 'severity' });
-  });
-
   it('falls back to a single Unknown harness chip when no agents are present', () => {
-    const el = render(<FilterBar tab="radar" model={model([])} filter={null} onFilter={() => {}} />);
+    const el = render(<FilterBar model={model([])} filter={null} onFilter={() => {}} />);
     const chips = el.querySelectorAll('.wd-chip-harness');
     expect(chips.length).toBe(1);
     expect((chips[0].textContent ?? '').toLowerCase()).toContain('unknown');
