@@ -106,22 +106,30 @@ Dossier — `WARDEN_DOSSIER_DISABLE_EMBEDDINGS`, `_ENABLE_EMBEDDINGS_IN_TEST`.
   RADAR debounced recompute/cache, Habits ticking.
 
 **Frontend `src/`**
-- `index.html` — overlay DOM: `#war-room-root` R3F island mount, `#terminal`, `#screen`, `#prompt`/`#command`,
-  HUD `#hud-{sessions,events,findings,stage}`, `#status`.
-- `main.ts` — vanilla-TS screen router. Listens `warden_hotkey`,`ingest_progress`,`fugu_delta`,`fugu_usage`,
-  `candidates_nominated`,`finding_verdict`,`diagnosis_ready`; invokes `query_profile`,`get_diagnosis`,`run_diagnosis`.
-- `diagnosis.ts` — pure-DOM forensic readout: ranked holes, discrete severity meter, cost ledger, harness
-  badges, evidence drill-down (`resolve_evidence` fallback), read-only fix-preview diff. jsdom-unit-tested.
-- `style.css` — green-phosphor tokens: `--bg #020403`, `--green #76ff9d`, `--dim #1b6f3a`,
-  `--acid #b8ff6b`, `--warn #ffd166`, `--red #ff5470`, verdict `--amber #ff5a37`.
+- `index.html` — overlay DOM: `#war-room-root` (the R3F island mount — RADAR + all screen-space chrome)
+  and `#profile-root` (the DOSSIER full-page overlay's own React root). The old terminal DOM
+  (`#terminal/#screen/#prompt/#command/#hud-*/#status`) is gone — everything is React inside the island.
+- `main.ts` — the Tauri↔island router (no DOM UI): mounts the island, hydrates the bridge, fans every
+  Tauri event in. Listens `warden_hotkey`,`ingest_progress`,`fugu_delta`,`fugu_usage`,`candidates_nominated`,
+  `finding_verdict`,`diagnosis_ready`,`radar_state`, and the **Living-Habits pipeline** (`habits_refreshed`→
+  bridge, `habits_diagnosed`→bridge — the data feed Habits/DOSSIER consumes); invokes `query_profile`,
+  `get_diagnosis`,`run_diagnosis`. Owns the guarded **D** hotkey (toggle DOSSIER) + Escape (close it).
+- `style.css` — green-phosphor tokens: `--bg #020403`, `--green #76ff9d`, `--dim #1b6f3a`, `--acid #b8ff6b`,
+  `--warn #ffd166`, `--red #ff5470`, verdict `--amber #ff5a37`. **Safe-area anchor frame**: `--inset-{t,b,x}`
+  = `max(16px, env(safe-area-inset-*))` + `.wd-anchor-{tl,tc,tr,bl,bc,br}` zones own every floater's placement.
 - `src/viz/` — React + R3F + Remotion island, mounted once into `#war-room-root` on the pre-warmed hidden
-  window. Core: `WarRoom.tsx`, `compositions/` (Intro/Reveal/Recap + pure `timing.ts` + shared `palette.ts`),
-  `bridge.ts`, `harnessTheme.ts`/`harnessColors.ts`, `PlayerHost.tsx`, `Orb.tsx`/`AgentCore.tsx`/
-  `Constellation.tsx`/`StarCatalog.tsx`, `chrome.tsx`, `NavBar.tsx`/`Sidebar.tsx`/`FilterBar.tsx`.
+  window. The war room renders **RADAR only** (the live 3D fleet — the hero); nav is **`RADAR | DOSSIER`**
+  (`NavBar.tsx`: RADAR = the war room, DOSSIER = `openProfile()`). Diagnosis is **click-to-run** — a
+  "Diagnose my workflow" button (implicit query) + clicking an agent orb; no terminal ask. Core:
+  `WarRoom.tsx`, `compositions/` (Intro/Reveal/Recap + pure `timing.ts` + shared `palette.ts`), `bridge.ts`,
+  `harnessTheme.ts`/`harnessColors.ts`, `PlayerHost.tsx`, `Orb.tsx`/`AgentCore.tsx`/
+  `Constellation.tsx`/`StarCatalog.tsx`, `chrome.tsx` (HUD, diagnose button + 3-stage pipeline reveal,
+  Forge inspector, ledger), `NavBar.tsx`/`Sidebar.tsx`/`FilterBar.tsx` (harness filter).
   **RADAR**: `RadarConstellation.tsx`, `RadarHoverCard.tsx`, `RadarDetailPanel.tsx`,
   `radarLayout/radarLifecycle/radarTheme/radarTypes.ts`. **DOSSIER**: `profile/` (`ProfileScreen.tsx`,
-  `heatmap.ts`, `mount.tsx`, `types.ts`). Gesture: `gesture/` (hand-tracked orbit). Dev harnesses:
-  `preview/` (`orbLab`,`radarLab`,`radarReal`), `devWarRoom.tsx`.
+  `heatmap.ts`, `mount.tsx`, `types.ts`) — the full-page profile overlay; **Living Habits is folded into
+  DOSSIER** (the war room no longer has a Habits scene, but the `habits_*` pipeline still feeds it). Gesture:
+  `gesture/` (hand-tracked orbit). Dev harnesses: `preview/` (`orbLab`,`radarLab`,`radarReal`), `devWarRoom.tsx`.
 
 ## Conventions
 - **Env helper**: `std::env::var("X").ok().map(...).unwrap_or_else(default)` (see `util.rs`).
