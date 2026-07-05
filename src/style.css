@@ -452,6 +452,49 @@ html, body {
 }
 .wd-hub-label-glyph { filter: drop-shadow(0 0 6px var(--harness, var(--green))); }
 
+/* ── per-globe identity chip (3D-anchored under each RADAR globe) ───────────────
+   The at-a-glance hierarchy label: harness glyph (always) + a short name (roots /
+   working / hovered). Deliberately quiet so it annotates the constellation without
+   competing with it — a subs-label is fainter + smaller than a root's, a working
+   globe's reads brighter, and hover lifts it to full. --harness tints glyph + name
+   (colour is ALWAYS paired with the glyph → legible without colour, color-blind a11y). */
+.wd-globe-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  color: var(--harness, var(--green));
+  opacity: 0.62;
+  pointer-events: none;
+  user-select: none;
+  text-shadow: 0 0 8px color-mix(in srgb, var(--harness, var(--green)) 45%, transparent), 0 0 3px rgba(0, 0, 0, 0.95);
+  transition: opacity 200ms ease;
+}
+.wd-globe-label-glyph {
+  font-size: 11px;
+  line-height: 1;
+  filter: drop-shadow(0 0 5px var(--harness, var(--green)));
+}
+.wd-globe-label-text {
+  max-width: 15ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* roots read as the primary anchors — brighter, letter-spaced, uppercased. */
+.wd-globe-label.is-root {
+  opacity: 0.82;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-size: 10.5px;
+}
+/* a working globe's label blazes a touch so the eye tracks live agents. */
+.wd-globe-label.is-working { opacity: 0.9; }
+/* hover lifts any chip to full presence. */
+.wd-globe-label.is-hovered { opacity: 1; }
+
 /* ── inspector (right dock): hover preview + selected detail ───────────────*/
 .wd-inspector {
   position: absolute;

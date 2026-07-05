@@ -20,6 +20,7 @@ import { Environment, Lightformer, Wireframe, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode, OrbLayout } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
+import { radarGlobeLabel } from './radarTypes';
 import { layoutRadarScene, type RadarCluster, type RadarLayout } from './radarLayout';
 import { radarHarness } from './radarTheme';
 import { AgentCore } from './AgentCore';
@@ -165,6 +166,67 @@ let glowCache: THREE.Texture | null = null;
 const glowTexture = () => (glowCache ??= radialTexture(128, [[0, 1], [0.18, 0.8], [0.5, 0.22], [1, 0]]));
 let dotCache: THREE.Texture | null = null;
 const dotTexture = () => (dotCache ??= radialTexture(48, [[0, 1], [0.4, 0.75], [1, 0]]));
+
+// ── per-globe billboard label (glyph + short name) ─────────────────────────────
+// Legibility law (spec §4.1/B4): a globe is NEVER just a coloured ball — its harness
+// is ALWAYS paired with a glyph (color-blind a11y), and the ones that matter carry a
+// short name so the hero reads as a NAMED hierarchy at a glance. To keep a 40-agent
+// fleet from becoming a wall of text, the TEXT is gated to the globes that matter
+// (roots, anything working, or the hovered/selected one); the GLYPH is always shown
+// (so every globe still states its harness without relying on colour). The chip
+// billboards via drei <Html> (constant pixel size at any zoom) and never captures the
+// pointer, so the orbit camera + the globe's own hit-sphere stay fully reachable. It
+// is hidden while THIS globe is the active selection — the detail panel owns the read
+// then and a chip over the dimmed globe would just be noise.
+function RadarGlobeLabel({
+  node,
+  isRoot,
+  working,
+  terminated,
+  selected,
+  hovered,
+}: {
+  node: LayoutNode;
+  isRoot: boolean;
+  working: boolean;
+  terminated: boolean;
+  selected: boolean;
+  hovered: boolean;
+}) {
+  const agent = node.radarAgent;
+  if (!agent || selected) return null;
+  const theme = radarHarness(agent.harness);
+  // The text rides only on globes worth naming; the glyph is unconditional.
+  const showText = isRoot || working || hovered;
+  const label = showText ? radarGlobeLabel(agent) : null;
+  // Terminated globes wear the verdict-amber identity (matches the globe flare);
+  // everyone else uses their harness hue.
+  const accent = terminated ? '#ff5a37' : theme.color;
+  // sit the chip just under the globe's lower reach so it never overlaps the lattice.
+  const drop = Math.max(0.55, node.radius) + 0.42;
+  const cls =
+    'wd-globe-label' +
+    (isRoot ? ' is-root' : '') +
+    (working ? ' is-working' : '') +
+    (hovered ? ' is-hovered' : '');
+  return (
+    <Html
+      position={[0, -drop, 0]}
+      center
+      zIndexRange={[5, 0]}
+      style={{ pointerEvents: 'none' } as CSSProperties}
+      // drei scales <Html> by camera distance when `distanceFactor` is set — a subtle
+      // depth cue: near globes' labels read larger, far ones recede, so the chip layer
+      // itself conveys front-to-back order instead of every label being flat-equal.
+      distanceFactor={8}
+    >
+      <div className={cls} style={{ '--harness': accent } as CSSProperties}>
+        <span className="wd-globe-label-glyph" aria-hidden="true">{theme.glyph}</span>
+        {label ? <span className="wd-globe-label-text">{label}</span> : null}
+      </div>
+    </Html>
+  );
+}
 
 // ── one live agent globe — lattice shell + crystal heart, heat-coloured ────────
 function RadarGlobe({
@@ -375,6 +437,7 @@ function RadarGlobe({
   });
 
   return (
+    <>
     <group ref={group} position={[node.position.x, node.position.y, node.position.z]}>
       {/* tight invisible hit-sphere — the only interactive object (R3F raycasts
           only handler-bearing meshes); sized inside the lattice so clicks land on
@@ -476,7 +539,23 @@ function RadarGlobe({
       {isRoot && (
         <AgentCore harness={agent.harness} color={color} dimmed={dimmed} active={working || selected || hovered} working={working} />
       )}
-    </group>
+      </group>
+
+      {/* The billboard identity chip sits in a SEPARATE, un-scaled group at the same
+          node position — so it never inherits the globe's breathing/lifecycle scale
+          (a label must not pulse or implode). Anchored to the static layout position;
+          the globe's tiny float-bob is irrelevant at label scale. */}
+      <group position={[node.position.x, node.position.y, node.position.z]}>
+        <RadarGlobeLabel
+          node={node}
+          isRoot={isRoot}
+          working={working}
+          terminated={terminated}
+          selected={selected}
+          hovered={hovered}
+        />
+      </group>
+    </>
   );
 }
 
@@ -735,6 +814,48 @@ function RadarHoverLayer({ node, suppressed }: { node: LayoutNode | null; suppre
   );
 }
 
+// Per-FOLDER grounding rings — a faint disc-ring lying flat on the y=0 field under
+// each folder constellation, sized to the cluster's footprint and tinted by its
+// dominant harness. Two jobs, both legibility (B4): it GROUPS a folder-family (the
+// ring visually bounds "these globes are one project"), and it plants a ground-plane
+// reference so the spheres read as sitting IN a space with depth, not floating as
+// featureless balls on black. Honest-viz: centre + radius come straight from the
+// layout's cluster plan (no fabricated geometry). pointer-events are impossible on a
+// mesh with no handler, so it never touches the orbit camera or a globe click.
+function RadarClusterGrounds({ clusters }: { clusters: RadarCluster[] }) {
+  // One shared unit ring, scaled per cluster — cheap (no per-cluster geometry alloc).
+  const ringGeo = useMemo(() => new THREE.RingGeometry(0.86, 1, 96), []);
+  useEffect(() => () => ringGeo.dispose(), [ringGeo]);
+  return (
+    <>
+      {clusters.map((c) => {
+        const t = radarHarness(c.harness);
+        // a touch outside the family's outer extent so globes sit within the ring.
+        const r = Math.max(1.2, c.radius * 0.96);
+        return (
+          <mesh
+            key={`ground-${c.key}`}
+            geometry={ringGeo}
+            position={[c.center.x, c.center.y - 0.02, c.center.z]}
+            rotation={[-Math.PI / 2, 0, 0]}
+            scale={[r, r, r]}
+          >
+            <meshBasicMaterial
+              color={t.color}
+              transparent
+              opacity={0.12}
+              side={THREE.DoubleSide}
+              depthWrite={false}
+              toneMapped={false}
+              blending={THREE.AdditiveBlending}
+            />
+          </mesh>
+        );
+      })}
+    </>
+  );
+}
+
 // Per-FOLDER constellation labels — the explicit "this is the WARDEN folder / the JB
 // Hunting folder" pinned under each cluster, mirroring the Habits hub labels. Colour
 // + glyph come from the cluster's dominant harness (color-blind a11y); the text is the
@@ -852,6 +973,8 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
 
       {/* The whole forest folds as one on a tab swap (Transition.tsx). */}
       <FoldGroup scaleRef={sref}>
+        {/* faint ground rings bounding each folder-family (grouping + depth ref) */}
+        <RadarClusterGrounds clusters={layout.clusters} />
         <group onPointerMissed={onClear}>
           <RadarLinks layout={layout} lifecycleRef={lifecycleRef} goneIdsRef={goneIdsRef} />
           {renderNodes.map((node) => (

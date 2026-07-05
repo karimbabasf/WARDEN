@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeRadarState, radarSubtitle } from './radarTypes';
+import { normalizeRadarState, radarSubtitle, radarGlobeLabel } from './radarTypes';
 
 // The backend emits the frozen `radar_state` contract (camelCase). The frontend
 // must survive missing optionals + out-of-range numbers without throwing, so
@@ -211,5 +211,33 @@ describe('normalizeRadarState', () => {
     });
     expect(model.agents[0].composition.exact).toEqual({ cacheRead: 5, fresh: 6, output: 7 });
     expect(model.agents[0].composition.estimated).toBeNull();
+  });
+});
+
+describe('radarGlobeLabel', () => {
+  const base = { label: '', nickname: null, role: null, model: null, id: 'agent-xyz' };
+
+  it('prefers role → nickname → label → model → id', () => {
+    expect(radarGlobeLabel({ ...base, role: 'reviewer', nickname: 'nn', label: 'lbl' })).toBe('reviewer');
+    expect(radarGlobeLabel({ ...base, nickname: 'nn', label: 'lbl' })).toBe('nn');
+    expect(radarGlobeLabel({ ...base, label: 'lbl' })).toBe('lbl');
+    expect(radarGlobeLabel({ ...base, model: 'claude-opus-4-8' })).toBe('opus');
+    expect(radarGlobeLabel({ ...base })).toBe('agent-xyz');
+  });
+
+  it('never returns empty — falls back to a stable placeholder', () => {
+    expect(radarGlobeLabel({ label: '', nickname: null, role: null, model: null, id: '' })).toBe('agent');
+  });
+
+  it('clamps a long name with an ellipsis under the max', () => {
+    const long = radarGlobeLabel({ ...base, label: 'refactor the entire authentication subsystem end to end' }, 22);
+    expect(long.length).toBeLessThanOrEqual(22);
+    expect(long.endsWith('…')).toBe(true);
+  });
+
+  it('leaves a short name untouched (no ellipsis)', () => {
+    const s = radarGlobeLabel({ ...base, label: 'api' }, 22);
+    expect(s).toBe('api');
+    expect(s.includes('…')).toBe(false);
   });
 });

@@ -117,6 +117,33 @@ export function radarSubtitle(agent: Pick<RadarAgent, 'label' | 'cwd' | 'cwdPath
   return m;
 }
 
+/**
+ * A SHORT, glanceable name for an agent's in-scene billboard label (the text pinned
+ * beside its globe on the hero radar). Prefers the most identifying human name —
+ * role → nickname → label → a short model → id — and clamps it to `max` chars with an
+ * ellipsis so a long task title never sprawls across the constellation. Pure so the
+ * label logic is unit-tested without WebGL; the glyph is added by the renderer (colour
+ * is ALWAYS paired with the glyph for color-blind a11y).
+ */
+export function radarGlobeLabel(
+  agent: Pick<RadarAgent, 'label' | 'nickname' | 'role' | 'model' | 'id'>,
+  max = 22,
+): string {
+  const raw =
+    (agent.role && agent.role.trim()) ||
+    (agent.nickname && agent.nickname.trim()) ||
+    (agent.label && agent.label.trim()) ||
+    shortModel(agent.model) ||
+    agent.id ||
+    'agent';
+  if (raw.length <= max) return raw;
+  // clamp on a word/segment boundary when one is near the limit, else hard-cut.
+  const clipped = raw.slice(0, max - 1);
+  const lastBreak = Math.max(clipped.lastIndexOf(' '), clipped.lastIndexOf('/'));
+  const base = lastBreak >= max - 8 ? clipped.slice(0, lastBreak) : clipped;
+  return `${base.trimEnd()}…`;
+}
+
 /** Last two segments of a home-abbreviated path (`~/alpha/api` → `alpha/api`). */
 function shortPath(p: string | null | undefined): string | null {
   if (!p) return null;
