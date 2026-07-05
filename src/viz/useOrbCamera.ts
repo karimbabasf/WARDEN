@@ -38,6 +38,12 @@ export function cameraTargetForOrbitOverview(): CameraTarget {
  * RADAR overview pose. The live agent forest spreads wider than a single Habits
  * cluster (multiple root planets on a ring, each with orbiting moons), so the
  * camera pulls back a touch further to frame the whole constellation.
+ *
+ * This fixed pose is now only a FALLBACK for callers/tests without live bounds — the
+ * live camera frames the real fleet via `fitDistanceForBounds` + `radarHeroPose`
+ * (see CameraRig), so summon lands on an auto-fit, composed ¾ shot rather than a
+ * one-size constant. Kept as the deterministic baseline (and the standalone dev
+ * <Canvas>'s opening pose) so "where the radar opens" still has a stable source.
  */
 export function cameraTargetForRadarOverview(): CameraTarget {
   return {
@@ -46,6 +52,47 @@ export function cameraTargetForRadarOverview(): CameraTarget {
     // wheel covers the rest either way (MAX_DIST raised in CameraRig).
     position: { x: 0, y: 3, z: 21 },
     lookAt: { x: 0, y: 0, z: 0 },
+  };
+}
+
+// ── the composed RADAR "hero" angle ────────────────────────────────────────────
+// A deliberate three-quarter shot so a summon lands on an INTENTIONAL, cinematic
+// frame — never an axis-aligned "looking straight down −Z" default that reads as a
+// flat wall of globes. Azimuth swings the camera off the front axis (front-right),
+// elevation tilts it gently down onto the fleet. Both sit comfortably inside the
+// CameraRig polar clamps (MIN_POLAR ≈ 0.16π .. MAX_POLAR ≈ 0.84π): the resulting
+// polar angle is π/2 − elevation ≈ 66°, well within range.
+export const RADAR_HERO_AZIMUTH = 0.62; // ≈ 35° off the +Z front axis (front-right)
+export const RADAR_HERO_ELEVATION = 0.42; // ≈ 24° above the horizon, looking down a touch
+
+/**
+ * Compose a camera pose from an auto-fit result (`{ target, distance }` — see
+ * `fitDistanceForBounds`) and a hero azimuth/elevation. The camera is placed on the
+ * sphere of `distance` around `target` at the given angles; it looks AT `target`.
+ *
+ * Spherical placement (azimuth `az` about +Y from the +Z axis, elevation `el` above
+ * the XZ plane): offset = distance · (cosEl·sinAz, sinEl, cosEl·cosAz). At az=el=0
+ * this is +Z (the classic "looking down −Z" overview), so non-zero angles rotate the
+ * shot to the composed three-quarter view. Pure + exported so the framing is
+ * unit-tested without WebGL — the CameraRig just eases toward what this returns.
+ */
+export function radarHeroPose(
+  fit: { target: [number, number, number]; distance: number },
+  azimuth: number = RADAR_HERO_AZIMUTH,
+  elevation: number = RADAR_HERO_ELEVATION,
+): CameraTarget {
+  const [tx, ty, tz] = fit.target;
+  const d = Number.isFinite(fit.distance) && fit.distance > 0 ? fit.distance : 21;
+  const az = Number.isFinite(azimuth) ? azimuth : RADAR_HERO_AZIMUTH;
+  const el = Number.isFinite(elevation) ? elevation : RADAR_HERO_ELEVATION;
+  const cosEl = Math.cos(el);
+  return {
+    position: {
+      x: tx + d * cosEl * Math.sin(az),
+      y: ty + d * Math.sin(el),
+      z: tz + d * cosEl * Math.cos(az),
+    },
+    lookAt: { x: tx, y: ty, z: tz },
   };
 }
 

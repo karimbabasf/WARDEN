@@ -164,6 +164,8 @@ function SceneShell({
   emphasisFilter,
   focusBounds,
   homeSignal,
+  fitPoints,
+  reframeSignal,
   onHover,
   onLeave,
   onSelect,
@@ -179,6 +181,10 @@ function SceneShell({
   focusBounds: Bounds | null;
   /** Monotonic signal that asks the shared CameraRig to return to home. */
   homeSignal: number;
+  /** Live globe positions — the CameraRig auto-fits the hero frame to these. */
+  fitPoints: { x: number; y: number; z: number }[];
+  /** Monotonic reframe/fit signal (the radar dock's reframe control). */
+  reframeSignal: number;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -219,7 +225,13 @@ function SceneShell({
           deliberately subordinate so the data reads first (see StarCatalog.tsx). */}
       <StarCatalog />
 
-      <CameraRig selected={selected} focusBounds={focusBounds} homeSignal={homeSignal} />
+      <CameraRig
+        selected={selected}
+        focusBounds={focusBounds}
+        homeSignal={homeSignal}
+        fitPoints={fitPoints}
+        reframeSignal={reframeSignal}
+      />
 
       <RadarForest
         model={radarModel}
@@ -270,6 +282,10 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // breadcrumb UI; here we only own the stack + expose pop/clear.
   const [focusStack, setFocusStack] = useState<string[]>([]);
   const [homeSignal, setHomeSignal] = useState(0);
+  // Monotonic "reframe / fit" signal — bumped by the radar dock's reframe control to
+  // recall the auto-fit and ease the shared CameraRig back to the composed hero pose
+  // from any orbit state.
+  const [reframeSignal, setReframeSignal] = useState(0);
   const [fixPreview, setFixPreview] = useState<FixPreview | undefined>();
   const [loadingFix, setLoadingFix] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -327,6 +343,13 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     }
     return m;
   }, [radarLayout]);
+  // Live globe centres the CameraRig auto-fits its hero frame to — the SAME layout
+  // the forest renders, so the camera always frames exactly what's on screen. A fresh
+  // array identity only when a position actually moves keeps the rig's fit memo stable.
+  const radarFitPoints = useMemo(
+    () => radarLayout.nodes.map((n) => ({ x: n.position.x, y: n.position.y, z: n.position.z })),
+    [radarLayout],
+  );
   const selectedNode = useMemo(() => radarLayout.nodes.find((n) => n.id === selectedId) ?? null, [radarLayout, selectedId]);
   const hoveredNode = useMemo(() => radarLayout.nodes.find((n) => n.id === hoveredId) ?? null, [radarLayout, hoveredId]);
 
@@ -390,6 +413,17 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     },
     [focusStack.length, selectedId],
   );
+
+  // Reframe / fit control: recover a good view from any orbit state. Clears the
+  // selection (so the camera leaves any dive and returns to the whole fleet), drops
+  // the hover, and bumps the reframe signal the CameraRig eases toward — landing back
+  // on the auto-fit composed hero pose.
+  const onReframe = useCallback(() => {
+    setSelectedId(null);
+    setHoveredId(null);
+    setFixPreview(undefined);
+    setReframeSignal((s) => s + 1);
+  }, []);
 
   // ── interactive legend ───────────────────────────────────────────────────────
   // Lift-only: set the active filter. Task 10's legend chips call this; passing the
@@ -673,6 +707,8 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           emphasisFilter={emphasisFilter}
           focusBounds={focusBounds}
           homeSignal={homeSignal}
+          fitPoints={radarFitPoints}
+          reframeSignal={reframeSignal}
           onHover={onHover}
           onLeave={onLeave}
           onSelect={onSelect}
@@ -738,6 +774,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         reverting={reverting}
         ledgerOpen={ledgerOpen}
         onAsk={onDiagnose}
+        onReframe={onReframe}
         onRequestFix={onRequestFix}
         onApplyFix={onApplyFix}
         onRevertFix={onRevertFix}

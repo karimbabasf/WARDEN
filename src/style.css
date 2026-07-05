@@ -1454,6 +1454,58 @@ html, body {
   .wd-radar-empty-pulse { animation: none; opacity: 0.85; }
 }
 
+/* ── reframe / fit control (RADAR hero) ────────────────────────────────────────
+   The always-available "recover a good view of the whole fleet" affordance. Sits
+   top-centre just under the nav pill — clear of the HUD (top corners), the roster
+   toggle (top-left) and the ledger (bottom-right). A compact glass pill in the same
+   phosphor language as the roster toggle; one click recalls the camera auto-fit and
+   eases the constellation back to its composed hero shot. `.wd-chrome` is
+   pointer-transparent, so the button re-enables its own pointer events. */
+.wd-reframe {
+  position: absolute;
+  top: var(--top-safe);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-controls);
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  background: var(--panel-strong);
+  border: 1px solid var(--hair);
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(11px);
+  -webkit-backdrop-filter: blur(11px);
+  /* fast-in / gentle-out micro-interaction (no library for a hover). */
+  transition: color 160ms ease, border-color 160ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 180ms ease;
+}
+.wd-reframe:hover {
+  color: var(--green);
+  border-color: var(--hair-bright);
+  transform: translateX(-50%) translateY(-1px);
+  box-shadow: 0 0 18px rgba(118, 255, 157, 0.16);
+}
+.wd-reframe:active { transform: translateX(-50%) translateY(0); }
+.wd-reframe:focus-visible {
+  outline: none;
+  border-color: var(--hair-bright);
+  box-shadow: 0 0 0 2px rgba(118, 255, 157, 0.25);
+}
+.wd-reframe-glyph { font-size: 13px; line-height: 1; filter: drop-shadow(0 0 6px currentColor); }
+.wd-reframe-label { font-weight: 500; }
+@media (prefers-reduced-motion: reduce) {
+  .wd-reframe { transition: color 160ms ease, border-color 160ms ease; }
+  .wd-reframe:hover, .wd-reframe:active { transform: translateX(-50%); }
+}
+
 /* ════════════════════════════════════════════════════════════════════════════
    LEGEND CHIPS — task 10 introduced these; task 11 styles them.
    Pills in the green-phosphor CRT theme: swatch · glyph · label inline.

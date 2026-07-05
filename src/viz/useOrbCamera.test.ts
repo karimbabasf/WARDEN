@@ -5,6 +5,9 @@ import {
   cameraTargetForOverview,
   cameraTargetForRadarOverview,
   radarCanvasCamera,
+  radarHeroPose,
+  RADAR_HERO_AZIMUTH,
+  RADAR_HERO_ELEVATION,
   damp3,
 } from './useOrbCamera';
 
@@ -49,6 +52,38 @@ describe('useOrbCamera helpers', () => {
     expect(cam.position).toEqual([overview.position.x, overview.position.y, overview.position.z]);
     expect(cam.fov).toBeGreaterThan(0);
     expect(cam.far).toBeGreaterThan(cam.near);
+  });
+
+  it('composes a hero pose that looks at the fit target from `distance` away, off-axis', () => {
+    const fit = { target: [1, 2, -3] as [number, number, number], distance: 20 };
+    const pose = radarHeroPose(fit);
+    // looks AT the centroid
+    expect(pose.lookAt).toEqual({ x: 1, y: 2, z: -3 });
+    // sits exactly `distance` from the target (spherical placement preserves radius)
+    const dx = pose.position.x - 1;
+    const dy = pose.position.y - 2;
+    const dz = pose.position.z + 3;
+    expect(Math.sqrt(dx * dx + dy * dy + dz * dz)).toBeCloseTo(20, 4);
+    // three-quarter shot: OFF the front axis (x offset non-trivial) and ABOVE (y up)
+    expect(Math.abs(dx)).toBeGreaterThan(0.5);
+    expect(dy).toBeGreaterThan(0);
+    // elevation matches the configured hero angle: y-offset = distance·sin(elevation)
+    expect(dy).toBeCloseTo(20 * Math.sin(RADAR_HERO_ELEVATION), 4);
+  });
+
+  it('hero pose falls back to a sane distance when the fit distance is degenerate', () => {
+    const pose = radarHeroPose({ target: [0, 0, 0], distance: 0 });
+    const r = Math.hypot(pose.position.x, pose.position.y, pose.position.z);
+    expect(r).toBeGreaterThan(0);
+    expect(Number.isFinite(r)).toBe(true);
+  });
+
+  it('exposes hero angles that stay within the CameraRig polar clamps', () => {
+    // The rig clamps polar (from +Y) to [0.16π, 0.84π]. Hero polar = π/2 − elevation.
+    const polar = Math.PI / 2 - RADAR_HERO_ELEVATION;
+    expect(polar).toBeGreaterThan(Math.PI * 0.16);
+    expect(polar).toBeLessThan(Math.PI * 0.84);
+    expect(RADAR_HERO_AZIMUTH).toBeGreaterThan(0);
   });
 
   it('damps vector components without overshooting', () => {

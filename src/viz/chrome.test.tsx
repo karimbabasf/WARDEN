@@ -148,6 +148,7 @@ function renderChrome(props: Partial<React.ComponentProps<typeof Chrome>>): HTML
     reverting: false,
     ledgerOpen: false,
     onAsk: noop,
+    onReframe: noop,
     onRequestFix: noop,
     onApplyFix: noop,
     onRevertFix: noop,

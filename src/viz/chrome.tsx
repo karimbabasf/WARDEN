@@ -133,6 +133,28 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+// ── reframe / fit control ────────────────────────────────────────────────────
+// The always-available "recover a good view" affordance for the hero RADAR. One
+// click recalls the camera auto-fit and eases back to the composed hero pose from
+// any orbit/zoom/dive state — the antidote to "I've spun the constellation off and
+// can't get back". Sits top-centre in its own safe-area anchor so it never collides
+// with the HUD (top) or the nav (top-centre pill is the nav; this rides just under).
+function ReframeControl({ onReframe }: { onReframe: () => void }) {
+  return (
+    <button
+      type="button"
+      className="wd-reframe"
+      data-reframe
+      aria-label="Reframe the fleet (fit to view)"
+      title="Reframe · fit the whole fleet"
+      onClick={onReframe}
+    >
+      <span className="wd-reframe-glyph" aria-hidden="true">⤢</span>
+      <span className="wd-reframe-label">Reframe</span>
+    </button>
+  );
+}
+
 // ── diagnosis trigger: the "Diagnose my workflow" button + live pipeline ─────
 // Diagnosis is click-to-run now: one CTA fires the implicit workflow query (no
 // terminal, no typed prompt). While a run is in flight the 3-stage pipeline reveal
@@ -690,6 +712,7 @@ export function Chrome({
   reverting,
   ledgerOpen,
   onAsk,
+  onReframe,
   onRequestFix,
   onApplyFix,
   onRevertFix,
@@ -717,6 +740,8 @@ export function Chrome({
   ledgerOpen: boolean;
   /** Fire the implicit "diagnose my workflow" run (no argument — the query is fixed). */
   onAsk: () => void;
+  /** Recall the camera auto-fit and ease back to the composed hero pose. */
+  onReframe: () => void;
   onRequestFix: (issue: OrbIssue) => void;
   onApplyFix: (issue: OrbIssue) => void;
   onRevertFix: (id: string) => void;
@@ -740,6 +765,10 @@ export function Chrome({
         onPopFocus={onPopFocus}
         onClearFocus={onClearFocus}
       />
+
+      {/* Reframe / fit — the always-available "get me back to a good view of the
+          whole fleet" control for the hero RADAR. Recalls the camera auto-fit. */}
+      <ReframeControl onReframe={onReframe} />
 
       {/* The diagnosis dock — one "Diagnose my workflow" button (click-to-run, no
           terminal), the 3-stage pipeline reveal while a run is in flight, and the
