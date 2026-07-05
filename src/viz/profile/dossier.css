@@ -1,0 +1,1223 @@
+/* dossier.css — scoped presentation for the DOSSIER ("Profile by Proof").
+ *
+ * Every rule is namespaced under `.dossier` so this stylesheet is disjoint from
+ * the war-room `style.css` (Phase B's lane). Colors are the SHARED phosphor
+ * tokens from `:root` in style.css (never redefined here): --bg, --green, --dim,
+ * --acid, --warn, --red, --amber, the ink / panel / hair scale, and --mono.
+ *
+ * Design thesis: a forensic operator dossier — a classified instrument readout,
+ * not a marketing dashboard. Monospace throughout; hierarchy comes from scale +
+ * tracking + weight, not swapped faces. Boldness is spent in ONE place — THE
+ * SCORE hero (§①). Everything else stays quiet and scannable. Numbered sections
+ * (① ② ③ …) encode a real reading sequence (score → breaking → leaks → who →
+ * range → trajectory), not decoration.
+ *
+ * Motion is orchestrated but restrained and ALWAYS gated on
+ * `prefers-reduced-motion` (see the media query at the foot of this file).
+ */
+
+/* ── shell + scroll surface ──────────────────────────────────────────────── */
+.dossier {
+  position: fixed;
+  inset: 0;
+  z-index: 9000; /* above the war-room z-scale (max --z-controls: 50) */
+  background:
+    radial-gradient(120% 80% at 50% -10%, rgba(118, 255, 157, 0.06), transparent 60%),
+    var(--bg);
+  color: var(--ink);
+  font-family: var(--mono);
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.dossier__inner {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 clamp(16px, 4vw, 40px) 96px;
+}
+
+.dossier ::selection {
+  background: rgba(118, 255, 157, 0.24);
+}
+
+.dossier .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* visible focus ring for keyboard users on every interactive element */
+.dossier button:focus-visible,
+.dossier [tabindex]:focus-visible {
+  outline: 2px solid var(--acid);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ── sticky header ───────────────────────────────────────────────────────── */
+.dossier__header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px clamp(16px, 4vw, 40px);
+  margin: 0 calc(-1 * clamp(16px, 4vw, 40px));
+  background: linear-gradient(to bottom, var(--bg) 40%, rgba(2, 4, 3, 0.72));
+  border-bottom: 1px solid var(--hair);
+  backdrop-filter: blur(10px);
+}
+
+.dossier__wordmark {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.dossier__title {
+  font-size: 13px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--green);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dossier__title b {
+  color: var(--acid);
+  font-weight: 600;
+}
+.dossier__operator {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dossier__spacer {
+  flex: 1 1 auto;
+}
+
+/* window toggle — segmented, one live segment */
+.dossier__windows {
+  display: inline-flex;
+  gap: 0;
+  padding: 3px;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.dossier__win {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-soft);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.dossier__win:hover {
+  color: var(--ink);
+}
+.dossier__win[aria-selected='true'] {
+  background: rgba(118, 255, 157, 0.14);
+  color: var(--green);
+  box-shadow: inset 0 0 0 1px var(--hair-bright);
+}
+
+.dossier__close {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 16px;
+  line-height: 1;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.dossier__close:hover {
+  color: var(--red);
+  border-color: var(--red);
+  background: rgba(255, 84, 112, 0.08);
+}
+
+/* detector-only explainer — a calm full-width note, not a bare badge */
+.dossier__detector {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 209, 102, 0.34);
+  border-left: 2px solid var(--warn);
+  border-radius: 8px;
+  background: rgba(255, 209, 102, 0.05);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.dossier__detector .g {
+  color: var(--warn);
+  flex: none;
+}
+.dossier__detector code {
+  color: var(--warn);
+  background: rgba(255, 209, 102, 0.1);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+/* ── generic section frame ───────────────────────────────────────────────── */
+.dossier__section {
+  padding: 34px 0;
+  border-bottom: 1px solid var(--hair);
+}
+.dossier__section:last-child {
+  border-bottom: 0;
+}
+.dossier__eyebrow {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.dossier__num {
+  font-size: 12px;
+  color: var(--dim);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+.dossier__h {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--acid);
+  font-weight: 600;
+}
+.dossier__hint {
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.02em;
+}
+.dossier__empty {
+  font-size: 12px;
+  color: var(--ink-faint);
+  line-height: 1.5;
+  padding: 8px 0;
+}
+
+/* ── §① THE SCORE (hero — the one bold moment) ───────────────────────────── */
+.hero {
+  padding: 40px 0 38px;
+  border-bottom: 1px solid var(--hair);
+}
+.hero__grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: clamp(24px, 5vw, 56px);
+  align-items: center;
+}
+
+.hero__gauge {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  width: 100%;
+  max-width: 300px;
+}
+.hero__ring {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.hero__ring-track {
+  fill: none;
+  stroke: rgba(118, 255, 157, 0.1);
+  stroke-width: 6;
+}
+.hero__ring-arc {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 6;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 6px rgba(118, 255, 157, 0.55));
+  transition: stroke-dashoffset 1.1s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.hero__readout {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+}
+.hero__score {
+  font-size: clamp(56px, 12vw, 92px);
+  line-height: 0.9;
+  font-weight: 600;
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  text-shadow: 0 0 24px rgba(118, 255, 157, 0.35);
+}
+.hero__outof {
+  font-size: 13px;
+  color: var(--ink-faint);
+  letter-spacing: 0.14em;
+  margin-top: 6px;
+}
+
+.hero__side {
+  min-width: 0;
+}
+.hero__eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 8px;
+}
+.hero__eyebrow b {
+  color: var(--acid);
+}
+.hero__verdict {
+  font-size: clamp(19px, 2.4vw, 25px);
+  line-height: 1.28;
+  color: var(--ink);
+  font-weight: 500;
+  margin: 0 0 6px;
+  letter-spacing: -0.01em;
+}
+.hero__verdict .lose {
+  color: var(--warn);
+}
+.hero__verdict .strong {
+  color: var(--green);
+}
+.hero__meta {
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+  margin-bottom: 20px;
+}
+
+/* compact 7-family readout */
+.hero__families {
+  display: grid;
+  gap: 7px;
+}
+.famrow {
+  display: grid;
+  grid-template-columns: 130px 1fr 44px;
+  gap: 12px;
+  align-items: center;
+}
+.famrow__label {
+  font-size: 11px;
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.famrow__track {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(118, 255, 157, 0.08);
+  overflow: hidden;
+}
+.famrow__fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--dim), var(--green));
+  transform-origin: left center;
+  transition: transform 0.9s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.famrow__pct {
+  font-size: 11px;
+  color: var(--ink-faint);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.famrow--top .famrow__label {
+  color: var(--green);
+}
+.famrow--low .famrow__label {
+  color: var(--warn);
+}
+.famrow--low .famrow__fill {
+  background: linear-gradient(90deg, rgba(255, 209, 102, 0.5), var(--warn));
+}
+
+/* ── §② WHAT YOU'RE BREAKING (habits fold-in — the section with a pulse) ──── */
+.breaking__list {
+  display: grid;
+  gap: 12px;
+}
+.habit {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 18px;
+  align-items: center;
+  padding: 16px 18px;
+  border: 1px solid var(--hair);
+  border-left: 2px solid var(--sev, var(--warn));
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.habit__pulse {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--sev, var(--warn));
+  box-shadow: 0 0 10px var(--sev, var(--warn));
+  animation: habitPulse 2.4s ease-in-out infinite;
+}
+.habit__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.habit__title {
+  font-size: 14px;
+  color: var(--ink);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.habit__cost {
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+.habit__streakwrap {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+}
+.habit__bar {
+  position: relative;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(118, 255, 157, 0.08);
+  overflow: hidden;
+  border: 1px solid var(--hair);
+}
+.habit__bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--dim), var(--green));
+  transform-origin: left center;
+  transition: transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* discrete streak ticks so progress reads as "N of K", not a vague bar */
+.habit__ticks {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  pointer-events: none;
+}
+.habit__tick {
+  flex: 1 1 0;
+  border-right: 1px solid var(--bg);
+}
+.habit__tick:last-child {
+  border-right: 0;
+}
+.habit__progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+}
+.habit__progress .clean {
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
+}
+.habit__progress .more {
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+}
+.habit__progress .sep {
+  color: var(--dim);
+}
+
+/* erase-reward — the satisfying resolve when a habit is `fixed` */
+.habit--fixed {
+  border-color: var(--hair-bright);
+  border-left-color: var(--green);
+  background: linear-gradient(90deg, rgba(118, 255, 157, 0.09), var(--panel) 60%);
+  animation: eraseReward 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.habit--fixed .habit__title {
+  color: var(--green);
+}
+.habit__erased {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--green);
+  letter-spacing: 0.04em;
+}
+.habit__erased .check {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--green);
+  color: var(--green);
+  font-size: 11px;
+  box-shadow: 0 0 10px rgba(118, 255, 157, 0.4);
+}
+
+/* ── §③ WHERE YOU LOSE (leaks, evidence-forward) ─────────────────────────── */
+.leaks {
+  display: grid;
+  gap: 14px;
+}
+.leak {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.leak__rank {
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  min-width: 40px;
+}
+.leak__body {
+  min-width: 0;
+}
+.leak__title {
+  font-size: 15px;
+  color: var(--ink);
+  font-weight: 500;
+  line-height: 1.3;
+  margin-bottom: 6px;
+}
+.leak__cost {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.leak__cost b {
+  color: var(--amber);
+  font-weight: 600;
+}
+.leak__cost .dot {
+  color: var(--dim);
+}
+
+/* evidence — promoted to first-class, not an 11px toggle */
+.evidence {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+}
+.evidence__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 8px;
+}
+.evidence__head .count {
+  color: var(--acid);
+}
+.evidence__list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.evcite {
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--mono);
+  padding: 11px 13px;
+  border: 1px solid var(--hair);
+  border-left: 2px solid var(--dim);
+  border-radius: 8px;
+  background: rgba(4, 18, 11, 0.4);
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+.evcite:hover {
+  border-left-color: var(--green);
+  border-color: var(--hair-bright);
+  background: rgba(118, 255, 157, 0.05);
+}
+.evcite:active {
+  transform: translateX(1px);
+}
+.evcite:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.evcite:disabled:hover {
+  border-left-color: var(--dim);
+  border-color: var(--hair);
+  background: rgba(4, 18, 11, 0.4);
+}
+.evcite__quote {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+.evcite__source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 7px;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  letter-spacing: 0.02em;
+}
+.evcite__source .path {
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.evcite__source .go {
+  margin-left: auto;
+  color: var(--green);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.evcite:hover .go {
+  opacity: 1;
+}
+.evcite__resolved {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--hair);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+/* ── §④ WHO YOU ARE (dimensions — strengths vs holes, contrasted) ────────── */
+.who {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.who__col {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+.who__colhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--hair);
+}
+.who__col--strength .who__colhead {
+  color: var(--green);
+}
+.who__col--hole .who__colhead {
+  color: var(--warn);
+}
+.dim {
+  padding: 14px 16px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.who__col--strength .dim {
+  border-left: 2px solid var(--green);
+}
+.who__col--hole .dim {
+  border-left: 2px solid var(--warn);
+}
+.dim__title {
+  font-size: 13px;
+  color: var(--ink);
+  font-weight: 600;
+  margin-bottom: 4px;
+  letter-spacing: 0.02em;
+}
+.dim__narrative {
+  font-size: 12px;
+  color: var(--ink-faint);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+.dim__claims {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.claim {
+  display: grid;
+  gap: 5px;
+}
+.claim__line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.claim__text {
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.4;
+}
+.claim__foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 2px;
+}
+.claim__conf {
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.chip {
+  flex: none;
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.chip--asserted {
+  color: var(--green);
+  border: 1px solid var(--green);
+  background: rgba(118, 255, 157, 0.08);
+}
+.chip--emerging {
+  color: var(--warn);
+  border: 1px solid rgba(255, 209, 102, 0.6);
+  background: rgba(255, 209, 102, 0.06);
+}
+
+/* ── §⑤ YOUR RANGE (archetypes + heatmap) ────────────────────────────────── */
+.range__cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin-bottom: 28px;
+}
+.arch {
+  padding: 14px 16px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.arch__name {
+  font-size: 13px;
+  color: var(--green);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.arch__count {
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-bottom: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.arch__note {
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.45;
+  margin-bottom: 10px;
+}
+.arch__projects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.arch__proj {
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  padding: 2px 7px;
+}
+
+.heat__title {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 12px;
+}
+.heat__scroll {
+  position: relative;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.heat__grid {
+  display: grid;
+  grid-template-rows: repeat(7, 12px);
+  grid-auto-flow: column;
+  grid-auto-columns: 12px;
+  gap: 3px;
+  width: max-content;
+}
+.heat__cell {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  outline: 1px solid rgba(118, 255, 157, 0.1);
+}
+.heat__legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+.heat__legend .sw {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  display: inline-block;
+  outline: 1px solid rgba(118, 255, 157, 0.1);
+}
+.heat__tip {
+  position: fixed;
+  z-index: 9100;
+  pointer-events: none;
+  min-width: 180px;
+  max-width: 240px;
+  padding: 9px 11px;
+  background: var(--panel-strong);
+  border: 1px solid var(--hair-bright);
+  border-radius: 8px;
+  box-shadow: var(--glow);
+  font-size: 12px;
+}
+.heat__tip .d {
+  color: var(--green);
+}
+.heat__tip .t {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+.heat__tip .row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-top: 2px;
+}
+
+/* ── §⑥ TRAJECTORY (graceful sparse) ─────────────────────────────────────── */
+.traj {
+  display: grid;
+  gap: 10px;
+}
+.trend {
+  display: grid;
+  grid-template-columns: 170px 130px 1fr;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 16px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.trend__trait {
+  font-size: 12px;
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+}
+.trend__spark {
+  display: block;
+}
+.trend__dir {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.trend__dir .g {
+  font-size: 13px;
+}
+.trend__conf {
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+/* sparse / insufficient — graceful, not a broken muted row */
+.trend--sparse {
+  grid-template-columns: 1fr;
+  border-style: dashed;
+  border-color: var(--hair);
+  background: rgba(4, 18, 11, 0.3);
+}
+.trend__gather {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.trend__gather .trait {
+  font-size: 13px;
+  color: var(--ink-soft);
+  font-weight: 500;
+}
+.trend__gather .msg {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  line-height: 1.4;
+}
+.trend__dots {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+}
+.trend__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--dim);
+}
+.trend__dot--on {
+  background: var(--dim);
+  border-color: var(--green);
+}
+
+/* ── cold-start — the "generate your dossier" reveal ─────────────────────── */
+.cold {
+  display: grid;
+  place-items: center;
+  min-height: 62vh;
+  text-align: center;
+  padding: 40px 20px;
+}
+.cold__inner {
+  max-width: 460px;
+  display: grid;
+  gap: 18px;
+  justify-items: center;
+}
+.cold__seal {
+  width: 66px;
+  height: 66px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--hair-bright);
+  border-radius: 50%;
+  color: var(--green);
+  font-size: 28px;
+  box-shadow: var(--glow);
+  animation: sealBreathe 3.4s ease-in-out infinite;
+}
+.cold__title {
+  font-size: 20px;
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.cold__sub {
+  font-size: 13px;
+  color: var(--ink-faint);
+  line-height: 1.55;
+}
+.cold__cta {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  padding: 12px 26px;
+  border-radius: 8px;
+  border: 1px solid var(--green);
+  background: rgba(118, 255, 157, 0.12);
+  color: var(--green);
+  transition: background 0.15s ease, box-shadow 0.2s ease;
+}
+.cold__cta:hover:not(:disabled) {
+  background: rgba(118, 255, 157, 0.2);
+  box-shadow: var(--glow);
+}
+.cold__cta:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* anticipatory build progress — a staged reveal, NOT a raw <ol> of strings */
+.build {
+  width: 100%;
+  max-width: 420px;
+  display: grid;
+  gap: 14px;
+}
+.build__title {
+  font-size: 13px;
+  color: var(--green);
+  letter-spacing: 0.06em;
+}
+.build__stages {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+.bstage {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+.bstage__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid var(--dim);
+  flex: none;
+  position: relative;
+}
+.bstage__label {
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+.bstage--done .bstage__label {
+  color: var(--ink-soft);
+}
+.bstage--done .bstage__dot {
+  background: var(--green);
+  border-color: var(--green);
+  box-shadow: 0 0 8px rgba(118, 255, 157, 0.5);
+}
+.bstage--active {
+  background: rgba(118, 255, 157, 0.06);
+}
+.bstage--active .bstage__label {
+  color: var(--green);
+}
+.bstage--active .bstage__dot {
+  border-color: var(--green);
+  animation: stageThrob 1.1s ease-in-out infinite;
+}
+.bstage__check {
+  margin-left: auto;
+  color: var(--green);
+  font-size: 12px;
+}
+
+/* skeleton loader — a calm placeholder, not a debug line */
+.skeleton {
+  display: grid;
+  gap: 12px;
+  padding: 34px 0;
+}
+.sk {
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, rgba(118, 255, 157, 0.05), rgba(118, 255, 157, 0.11), rgba(118, 255, 157, 0.05));
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+.sk--hero {
+  height: 120px;
+}
+.sk--w60 {
+  width: 60%;
+}
+.sk--w40 {
+  width: 40%;
+}
+
+.dossier__errline {
+  margin: 14px 0 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 84, 112, 0.4);
+  border-left: 2px solid var(--red);
+  border-radius: 8px;
+  background: rgba(255, 84, 112, 0.05);
+  font-size: 12px;
+  color: var(--red);
+  line-height: 1.5;
+}
+
+/* ── entrance choreography (staggered section reveal) ─────────────────────── */
+.dossier__section,
+.hero {
+  animation: sectionIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.hero {
+  animation-delay: 0.02s;
+}
+.dossier__section:nth-of-type(1) {
+  animation-delay: 0.06s;
+}
+.dossier__section:nth-of-type(2) {
+  animation-delay: 0.1s;
+}
+.dossier__section:nth-of-type(3) {
+  animation-delay: 0.14s;
+}
+.dossier__section:nth-of-type(4) {
+  animation-delay: 0.18s;
+}
+.dossier__section:nth-of-type(5) {
+  animation-delay: 0.22s;
+}
+
+/* ── keyframes ────────────────────────────────────────────────────────────── */
+@keyframes sectionIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes habitPulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes eraseReward {
+  0% {
+    transform: scale(0.985);
+    box-shadow: 0 0 0 rgba(118, 255, 157, 0);
+  }
+  45% {
+    box-shadow: 0 0 26px rgba(118, 255, 157, 0.32);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 rgba(118, 255, 157, 0);
+  }
+}
+@keyframes sealBreathe {
+  0%,
+  100% {
+    box-shadow: 0 0 18px rgba(118, 255, 157, 0.3), 0 0 40px rgba(118, 255, 157, 0.08);
+  }
+  50% {
+    box-shadow: 0 0 26px rgba(118, 255, 157, 0.5), 0 0 60px rgba(118, 255, 157, 0.16);
+  }
+}
+@keyframes stageThrob {
+  0%,
+  100% {
+    box-shadow: 0 0 0 rgba(118, 255, 157, 0);
+  }
+  50% {
+    box-shadow: 0 0 10px rgba(118, 255, 157, 0.6);
+  }
+}
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* ── responsive ──────────────────────────────────────────────────────────── */
+@media (max-width: 760px) {
+  .hero__grid {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    text-align: center;
+  }
+  .hero__side {
+    width: 100%;
+  }
+  .hero__families {
+    text-align: left;
+  }
+  .who {
+    grid-template-columns: 1fr;
+  }
+  .trend {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .famrow {
+    grid-template-columns: 100px 1fr 40px;
+  }
+}
+
+/* ── reduced motion — honor the OS setting; keep everything legible ────────── */
+@media (prefers-reduced-motion: reduce) {
+  .dossier *,
+  .dossier *::before,
+  .dossier *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .dossier__section,
+  .hero {
+    opacity: 1;
+    transform: none;
+  }
+}

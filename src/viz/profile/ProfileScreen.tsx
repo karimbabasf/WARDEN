@@ -1,579 +1,169 @@
-// ProfileScreen.tsx — the full-page DOSSIER ("Profile by Proof") readout.
+// ProfileScreen.tsx — the full-page DOSSIER ("Profile by Proof").
 //
-// FUNCTIONALITY-FIRST (per product owner): correct data wiring + a full-page
-// layout that renders EVERYTHING the backend returns. Styling is deliberately
-// minimal — existing phosphor tokens only; the cinematic pass is deferred.
+// A forensic operator dossier: who you are as an operator, and what you're
+// fixing. Composed top→bottom (spec §4.3) as a real narrative, not a wall of
+// identical boxes:
 //
-// Data flow (the honest seam):
+//   Header ─▶ ① THE SCORE (hero) ─▶ ② WHAT YOU'RE BREAKING (habits) ─▶
+//   ③ WHERE YOU LOSE (leaks) ─▶ ④ WHO YOU ARE (dimensions) ─▶
+//   ⑤ YOUR RANGE (archetypes + heatmap) ─▶ ⑥ TRAJECTORY
+//
+// Data flow (the honest seam), unchanged from the backend's contract:
 //   open / window change ─▶ get_efficiency_score + get_activity_heatmap (fast,
 //                            deterministic) AND get_profile (may be null).
-//   get_profile === null  ─▶ show "Build profile" → build_profile() runs the
-//                            pipeline, emitting `dossier_progress` events that we
-//                            stream into a live stage list; on resolve we render
-//                            the returned Profile.
-// Every number on screen traces to a real field in types.ts — no UI invention.
+//   get_profile === null  ─▶ COLD-START: an inviting "generate your dossier"
+//                            moment. build_profile() runs the pipeline, emitting
+//                            `dossier_progress` we render as an anticipatory
+//                            staged reveal (not a raw <ol> of stage strings).
+//   detector_only         ─▶ a one-line explainer (what it means + how to
+//                            upgrade), not a bare badge.
+//
+// Every number traces to a real field in types.ts — no UI invention. All visual
+// styling lives in the scoped ./dossier.css (disjoint from the war-room
+// style.css); this file composes and wires.
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
   PROFILE_WINDOWS,
   WINDOW_LABELS,
   type ActivityCell,
-  type Claim,
   type DossierProgress,
   type EfficiencyScore,
-  type EvidenceRef,
-  type Leak,
   type Profile,
-  type ProfileDimension,
   type ProfileWindow,
-  type ProjectArchetype,
-  type TraitTrend,
 } from './types';
-import { HEATMAP_LEVELS, heatmapFill, heatmapLevel, maxTokens } from './heatmap';
+import './dossier.css';
+import { ScoreHero } from './ScoreHero';
+import { BreakingSection } from './BreakingSection';
+import { LeaksSection } from './LeaksSection';
+import { DimensionsSection } from './DimensionsSection';
+import { RangeSection } from './RangeSection';
+import { TrajectorySection } from './TrajectorySection';
 
-// ── tiny style helpers (tokens only; full page, scrollable) ───────────────────
-const SHELL: CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  zIndex: 9000, // above the war-room z-scale (max --z-controls: 50)
-  background: 'var(--bg)',
-  color: 'var(--ink)',
-  fontFamily: 'var(--mono)',
-  overflowY: 'auto',
-  overflowX: 'hidden',
-  padding: '0 0 80px',
-};
-const HEADER: CSSProperties = {
-  position: 'sticky',
-  top: 0,
-  zIndex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 16,
-  flexWrap: 'wrap',
-  padding: '16px 24px',
-  background: 'var(--panel-strong)',
-  borderBottom: '1px solid var(--hair)',
-  backdropFilter: 'blur(6px)',
-};
-const SECTION: CSSProperties = {
-  padding: '20px 24px',
-  borderBottom: '1px solid var(--hair)',
-};
-const H2: CSSProperties = {
-  margin: '0 0 12px',
-  fontSize: 13,
-  letterSpacing: '0.14em',
-  textTransform: 'uppercase',
-  color: 'var(--acid)',
-};
-const SUBTLE: CSSProperties = { color: 'var(--ink-faint)', fontSize: 12 };
+// The build pipeline's stages, in the order they run — used to render an
+// anticipatory reveal (a stage is 'done' once seen, the next is 'active').
+// Mirrors src-tauri/src/dossier/build.rs emit() calls.
+const BUILD_STAGES: { key: string; label: string }[] = [
+  { key: 'aggregate', label: 'Reading your sessions' },
+  { key: 'score', label: 'Scoring efficiency' },
+  { key: 'summarize', label: 'Distilling evidence' },
+  { key: 'synthesize', label: 'Writing your profile' },
+  { key: 'persist', label: 'Sealing the dossier' },
+];
 
-function pct(n: number): string {
-  return `${Math.round((Number.isFinite(n) ? n : 0) * 100)}%`;
+// ── header pieces ─────────────────────────────────────────────────────────────
+function WindowToggle({ value, onChange }: { value: ProfileWindow; onChange: (w: ProfileWindow) => void }) {
+  return (
+    <div className="dossier__windows" role="tablist" aria-label="time window">
+      {PROFILE_WINDOWS.map((w) => (
+        <button
+          key={w}
+          role="tab"
+          type="button"
+          aria-selected={w === value}
+          className="dossier__win"
+          onClick={() => onChange(w)}
+        >
+          {WINDOW_LABELS[w]}
+        </button>
+      ))}
+    </div>
+  );
 }
 
-// ── window toggle ─────────────────────────────────────────────────────────────
-function WindowToggle({
-  value,
-  onChange,
+function DetectorExplainer() {
+  return (
+    <div className="dossier__detector" role="note">
+      <span className="g" aria-hidden>
+        ◈
+      </span>
+      <span>
+        Deterministic read — scored from detectors alone, no narrative model. Set{' '}
+        <code>WARDEN_BRAIN_API_KEY</code> to have GLM synthesize the prose profile from the same evidence.
+      </span>
+    </div>
+  );
+}
+
+// ── the anticipatory build reveal (cold-start) ────────────────────────────────
+function BuildProgress({ seen }: { seen: Set<string> }) {
+  // The first stage not yet seen is "active"; earlier ones are "done".
+  const activeIdx = BUILD_STAGES.findIndex((s) => !seen.has(s.key));
+  return (
+    <div className="build">
+      <div className="build__title">Building your dossier…</div>
+      <div className="build__stages">
+        {BUILD_STAGES.map((s, i) => {
+          const done = seen.has(s.key) || (activeIdx >= 0 && i < activeIdx);
+          const active = i === activeIdx;
+          const cls = done ? 'bstage bstage--done' : active ? 'bstage bstage--active' : 'bstage';
+          return (
+            <div key={s.key} className={cls}>
+              <span className="bstage__dot" aria-hidden />
+              <span className="bstage__label">{s.label}</span>
+              {done ? (
+                <span className="bstage__check" aria-hidden>
+                  ✓
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ColdStart({
+  win,
+  building,
+  seen,
+  onBuild,
+  disabled,
 }: {
-  value: ProfileWindow;
-  onChange: (w: ProfileWindow) => void;
+  win: ProfileWindow;
+  building: boolean;
+  seen: Set<string>;
+  onBuild: () => void;
+  disabled: boolean;
 }) {
   return (
-    <div style={{ display: 'flex', gap: 6 }} role="tablist" aria-label="time window">
-      {PROFILE_WINDOWS.map((w) => {
-        const active = w === value;
-        return (
-          <button
-            key={w}
-            role="tab"
-            aria-selected={active}
-            onClick={() => onChange(w)}
-            style={{
-              cursor: 'pointer',
-              fontFamily: 'var(--mono)',
-              fontSize: 12,
-              padding: '6px 12px',
-              borderRadius: 4,
-              border: `1px solid ${active ? 'var(--green)' : 'var(--hair)'}`,
-              background: active ? 'rgba(118,255,157,0.14)' : 'transparent',
-              color: active ? 'var(--green)' : 'var(--ink-soft)',
-            }}
-          >
-            {WINDOW_LABELS[w]}
-          </button>
-        );
-      })}
+    <div className="cold">
+      <div className="cold__inner">
+        {building ? (
+          <BuildProgress seen={seen} />
+        ) : (
+          <>
+            <div className="cold__seal" aria-hidden>
+              ◈
+            </div>
+            <div className="cold__title">No dossier yet for {WINDOW_LABELS[win]}</div>
+            <p className="cold__sub">
+              WARDEN reads every session in this window, scores how you drive your agents, and writes an
+              evidence-cited profile of who you are as an operator. It takes a moment.
+            </p>
+            <button type="button" className="cold__cta" onClick={onBuild} disabled={disabled}>
+              Generate your dossier
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
 
-// ── efficiency ────────────────────────────────────────────────────────────────
-// GAP 2 fix: efficiency has two possible sources — the standalone
-// `get_efficiency_score` fetch (`eff`, fresher / lower-latency) and the copy
-// embedded in the built Profile (`profileEff`). Previously only `eff` was
-// rendered, so a failed/slow standalone call showed an empty panel even
-// though `profileEff` had the same numbers sitting in state. Prefer `eff`,
-// fall back to `profileEff`; if both exist and their rubric_version differs,
-// surface a visible-but-calm warning line (the two scores may not be
-// comparable in that case).
-export function EfficiencyPanel({ eff, profileEff }: { eff: EfficiencyScore | null; profileEff: EfficiencyScore | null }) {
-  const resolved = eff ?? profileEff;
-  if (!resolved) {
-    return (
-      <section style={SECTION}>
-        <h2 style={H2}>Efficiency</h2>
-        <div style={SUBTLE}>No efficiency score yet.</div>
-      </section>
-    );
-  }
-  const drift = eff && profileEff && eff.rubric_version !== profileEff.rubric_version;
-  // Show the headline on a 0–100 scale alongside the raw 0.00–1.00, NEVER alone:
-  // the per-family bars sit right beneath it so the composite is always in context.
-  const families = [...resolved.families].sort((a, b) => b.weight - a.weight);
+// ── skeleton loader (calm placeholder, not a debug line) ──────────────────────
+function Skeleton() {
   return (
-    <section style={SECTION}>
-      <h2 style={H2}>Efficiency</h2>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 8 }}>
-        <div style={{ fontSize: 44, lineHeight: 1, color: 'var(--green)' }}>
-          {Math.round(resolved.headline * 100)}
-          <span style={{ fontSize: 18, color: 'var(--ink-faint)' }}> / 100</span>
-        </div>
-        <div style={SUBTLE}>
-          {resolved.headline.toFixed(2)} · rubric {resolved.rubric_version} · {resolved.session_count} sessions
-        </div>
-      </div>
-      {drift ? (
-        <div style={{ fontSize: 11, color: 'var(--warn)', marginBottom: 8 }}>
-          rubric drift: profile v{profileEff!.rubric_version} / score v{eff!.rubric_version}
-        </div>
-      ) : null}
-      <div style={{ display: 'grid', gap: 8, maxWidth: 720 }}>
-        {families.map((f) => (
-          <div key={f.key} style={{ display: 'grid', gridTemplateColumns: '180px 1fr 96px', gap: 10, alignItems: 'center' }}>
-            <div style={{ fontSize: 12, color: 'var(--ink-soft)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.key}>
-              {f.key}
-            </div>
-            <div style={{ height: 12, background: 'rgba(118,255,157,0.08)', borderRadius: 3, overflow: 'hidden', border: '1px solid var(--hair)' }}>
-              <div
-                style={{
-                  height: '100%',
-                  width: pct(f.sub_score),
-                  background: 'var(--green)',
-                  borderRadius: 3,
-                }}
-              />
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--ink-faint)', textAlign: 'right' }}>
-              {pct(f.sub_score)} · w{f.weight.toFixed(2)}
-            </div>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-// ── activity heatmap ──────────────────────────────────────────────────────────
-function HeatmapPanel({ cells }: { cells: ActivityCell[] }) {
-  const [hover, setHover] = useState<{ cell: ActivityCell; x: number; y: number } | null>(null);
-  const max = useMemo(() => maxTokens(cells), [cells]);
-
-  if (cells.length === 0) {
-    return (
-      <section style={SECTION}>
-        <h2 style={H2}>Activity</h2>
-        <div style={SUBTLE}>No activity in this window.</div>
-      </section>
-    );
-  }
-
-  // GitHub-style: columns of 7 (a week each), oldest → newest left to right.
-  const sorted = [...cells].sort((a, b) => a.date.localeCompare(b.date));
-  const cell = 13;
-  const gap = 3;
-
-  return (
-    <section style={SECTION}>
-      <h2 style={H2}>Activity</h2>
-      <div style={{ position: 'relative', overflowX: 'auto' }}>
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateRows: `repeat(7, ${cell}px)`,
-            gridAutoFlow: 'column',
-            gridAutoColumns: `${cell}px`,
-            gap,
-            width: 'max-content',
-          }}
-        >
-          {sorted.map((c) => {
-            const level = heatmapLevel(c.total_tokens, max);
-            return (
-              <div
-                key={c.date}
-                onMouseEnter={(e) => setHover({ cell: c, x: e.clientX, y: e.clientY })}
-                onMouseMove={(e) => setHover({ cell: c, x: e.clientX, y: e.clientY })}
-                onMouseLeave={() => setHover(null)}
-                style={{
-                  width: cell,
-                  height: cell,
-                  borderRadius: 2,
-                  background: heatmapFill(level),
-                  outline: '1px solid rgba(118,255,157,0.10)',
-                }}
-              />
-            );
-          })}
-        </div>
-
-        {/* legend */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, ...SUBTLE }}>
-          <span>less</span>
-          {Array.from({ length: HEATMAP_LEVELS }, (_, i) => (
-            <span key={i} style={{ width: cell, height: cell, borderRadius: 2, background: heatmapFill(i), display: 'inline-block', outline: '1px solid rgba(118,255,157,0.10)' }} />
-          ))}
-          <span>more</span>
-        </div>
-      </div>
-
-      {hover ? (
-        <div
-          style={{
-            position: 'fixed',
-            left: Math.min(hover.x + 14, window.innerWidth - 240),
-            top: hover.y + 14,
-            zIndex: 9100,
-            pointerEvents: 'none',
-            minWidth: 180,
-            maxWidth: 240,
-            padding: '8px 10px',
-            background: 'var(--panel-strong)',
-            border: '1px solid var(--hair-bright)',
-            borderRadius: 6,
-            boxShadow: 'var(--glow)',
-            fontSize: 12,
-          }}
-        >
-          <div style={{ color: 'var(--green)' }}>{hover.cell.date}</div>
-          <div style={{ color: 'var(--ink-soft)' }}>
-            {hover.cell.total_tokens.toLocaleString()} tokens · {hover.cell.session_count} sessions
-          </div>
-          {hover.cell.by_harness.length > 0 ? (
-            <div style={{ marginTop: 4, display: 'grid', gap: 2 }}>
-              {hover.cell.by_harness.map((h) => (
-                <div key={h.harness} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, ...SUBTLE }}>
-                  <span style={{ color: 'var(--ink-soft)' }}>{h.harness}</span>
-                  <span>{h.tokens.toLocaleString()} · {h.sessions}s</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-// ── dimensions ────────────────────────────────────────────────────────────────
-function StatusChip({ status }: { status: Claim['status'] }) {
-  const asserted = status === 'asserted';
-  return (
-    <span
-      style={{
-        fontSize: 10,
-        letterSpacing: '0.08em',
-        textTransform: 'uppercase',
-        padding: '1px 6px',
-        borderRadius: 3,
-        border: `1px solid ${asserted ? 'var(--green)' : 'var(--warn)'}`,
-        color: asserted ? 'var(--green)' : 'var(--warn)',
-      }}
-    >
-      {status}
-    </span>
-  );
-}
-
-export function ClaimRow({ claim }: { claim: Claim }) {
-  return (
-    <li style={{ marginBottom: 8, listStyle: 'none' }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-        <StatusChip status={claim.status} />
-        <span style={{ fontSize: 13, color: 'var(--ink)', lineHeight: 1.4 }}>{claim.text}</span>
-      </div>
-      <div style={{ ...SUBTLE, marginLeft: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span>confidence {pct(claim.confidence)}</span>
-        <EvidenceToggle evidence={claim.evidence} idPrefix="claim" />
-      </div>
-    </li>
-  );
-}
-
-// ── evidence — the toggle every claim/leak reuses (GAP 1 fix) ─────────────────
-// Collapsed by default: shows only a count. Expanding reveals EVERY evidence
-// ref (not just the first) — quote (truncated ~140 chars), a source tail (last
-// 2 path segments of source_path, falling back to session_id), and the turn id
-// when present. All EvidenceRef fields may be null; every access is guarded.
-let evidenceIdSeq = 0;
-
-function sourceTail(ev: EvidenceRef): string {
-  const where = ev.source_path ?? ev.session_id ?? null;
-  if (!where) return 'session';
-  const segs = where.split('/').filter(Boolean);
-  return segs.length > 0 ? segs.slice(-2).join('/') : where;
-}
-
-function evidenceQuote(ev: EvidenceRef): string {
-  return ev.quote ? `“${truncate(ev.quote, 140)}”` : '(no quote)';
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
-}
-
-export function EvidenceToggle({ evidence, idPrefix }: { evidence: EvidenceRef[]; idPrefix: string }) {
-  const [open, setOpen] = useState(false);
-  const domId = useMemo(() => `${idPrefix}-evidence-${++evidenceIdSeq}`, [idPrefix]);
-
-  if (evidence.length === 0) {
-    return <span>0 evidence</span>;
-  }
-
-  return (
-    <span>
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={domId}
-        onClick={() => setOpen((o) => !o)}
-        style={{
-          cursor: 'pointer',
-          fontFamily: 'var(--mono)',
-          fontSize: 11,
-          padding: '0 4px',
-          borderRadius: 3,
-          border: '1px solid var(--hair)',
-          background: open ? 'rgba(118,255,157,0.10)' : 'transparent',
-          color: 'var(--ink-faint)',
-        }}
-      >
-        {evidence.length} evidence {open ? '▾' : '▸'}
-      </button>
-      {open ? (
-        <ul id={domId} style={{ margin: '4px 0 0', padding: 0, display: 'grid', gap: 4 }}>
-          {evidence.map((ev, i) => (
-            <li
-              key={i}
-              style={{
-                listStyle: 'none',
-                fontSize: 11,
-                color: 'var(--ink-soft)',
-                padding: '4px 8px',
-                border: '1px solid var(--hair)',
-                borderRadius: 4,
-                background: 'var(--panel)',
-              }}
-            >
-              <div>{evidenceQuote(ev)}</div>
-              <div style={{ color: 'var(--ink-faint)', marginTop: 2 }}>
-                {sourceTail(ev)}
-                {ev.turn_id ? ` · turn ${ev.turn_id}` : ''}
-              </div>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </span>
-  );
-}
-
-// ── hash badge (GAP 3 fix) ──────────────────────────────────────────────────
-// The 8-char display truncation is deliberate (space), but the full hash was
-// previously unreachable — no title, no copy. `title` exposes it on hover;
-// clicking copies the full hash and flips the label to "copied" briefly.
-// navigator.clipboard is absent in some test/embed environments, so the write
-// is best-effort and guarded rather than assumed.
-export function HashBadge({ hash }: { hash: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const onCopy = useCallback(() => {
-    const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
-    if (!clipboard?.writeText) return;
-    clipboard
-      .writeText(hash)
-      .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => {});
-  }, [hash]);
-
-  return (
-    <span
-      role="button"
-      tabIndex={0}
-      title={hash}
-      onClick={onCopy}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') onCopy();
-      }}
-      style={{ cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: 3 }}
-    >
-      {copied ? 'copied' : hash.slice(0, 8)}
-    </span>
-  );
-}
-
-function DimensionPanel({ dim }: { dim: ProfileDimension }) {
-  return (
-    <div
-      style={{
-        padding: 14,
-        border: '1px solid var(--hair)',
-        borderRadius: 8,
-        background: 'var(--panel)',
-      }}
-    >
-      <div style={{ fontSize: 14, color: 'var(--green)', marginBottom: 4 }}>{dim.title}</div>
-      <div style={{ fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.5, marginBottom: 10 }}>{dim.narrative}</div>
-      {dim.claims.length > 0 ? (
-        <ul style={{ margin: 0, padding: 0 }}>
-          {dim.claims.map((c, i) => (
-            <ClaimRow key={i} claim={c} />
-          ))}
-        </ul>
-      ) : (
-        <div style={SUBTLE}>No claims.</div>
-      )}
+    <div className="skeleton" aria-hidden>
+      <div className="sk sk--hero" />
+      <div className="sk sk--w60" />
+      <div className="sk sk--w40" />
+      <div className="sk" />
+      <div className="sk sk--w60" />
     </div>
-  );
-}
-
-// ── leaks ─────────────────────────────────────────────────────────────────────
-export function LeaksPanel({ leaks }: { leaks: Leak[] }) {
-  return (
-    <section style={SECTION}>
-      <h2 style={H2}>Ranked leaks</h2>
-      {leaks.length === 0 ? (
-        <div style={SUBTLE}>No leaks surfaced.</div>
-      ) : (
-        <div style={{ display: 'grid', gap: 8, maxWidth: 820 }}>
-          {[...leaks]
-            .sort((a, b) => a.rank - b.rank)
-            .map((l) => (
-              <div
-                key={`${l.rank}-${l.title}`}
-                style={{ display: 'flex', gap: 12, alignItems: 'flex-start', padding: '8px 10px', border: '1px solid var(--hair)', borderRadius: 6, background: 'var(--panel)' }}
-              >
-                <span style={{ color: 'var(--amber)', fontSize: 16, minWidth: 28 }}>#{l.rank}</span>
-                <span style={{ flex: 1, fontSize: 13, color: 'var(--ink)' }}>{l.title}</span>
-                <span style={{ ...SUBTLE, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  ~{l.est_cost_tokens.toLocaleString()} tok · ~{Math.round(l.est_cost_minutes)} min ·{' '}
-                  <EvidenceToggle evidence={l.evidence} idPrefix="leak" />
-                </span>
-              </div>
-            ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ── archetypes ────────────────────────────────────────────────────────────────
-function ArchetypesPanel({ archetypes }: { archetypes: ProjectArchetype[] }) {
-  return (
-    <section style={SECTION}>
-      <h2 style={H2}>Project archetypes</h2>
-      {archetypes.length === 0 ? (
-        <div style={SUBTLE}>No archetypes.</div>
-      ) : (
-        <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
-          {archetypes.map((a) => (
-            <div key={a.archetype} style={{ padding: 12, border: '1px solid var(--hair)', borderRadius: 8, background: 'var(--panel)' }}>
-              <div style={{ color: 'var(--green)', fontSize: 13 }}>{a.archetype}</div>
-              <div style={{ ...SUBTLE, marginBottom: 6 }}>{a.session_count} sessions</div>
-              <div style={{ fontSize: 12, color: 'var(--ink-soft)', lineHeight: 1.4, marginBottom: 6 }}>{a.note}</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {a.projects.map((p) => (
-                  <span key={p} style={{ fontSize: 11, color: 'var(--ink-faint)', border: '1px solid var(--hair)', borderRadius: 3, padding: '1px 6px' }}>
-                    {p.split('/').pop() || p}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ── trajectory ────────────────────────────────────────────────────────────────
-const DIRECTION_GLYPH: Record<TraitTrend['direction'], { glyph: string; color: string }> = {
-  improving: { glyph: '▲', color: 'var(--green)' },
-  regressing: { glyph: '▼', color: 'var(--red)' },
-  plateaued: { glyph: '▬', color: 'var(--warn)' },
-  insufficient: { glyph: '·', color: 'var(--ink-faint)' },
-};
-
-function Sparkline({ points }: { points: TraitTrend['points'] }) {
-  if (points.length < 2) return <span style={SUBTLE}>{points.length} point(s)</span>;
-  const vals = points.map((p) => p.value);
-  const lo = Math.min(...vals);
-  const hi = Math.max(...vals);
-  const span = hi - lo || 1;
-  const w = 120;
-  const h = 26;
-  const step = w / (points.length - 1);
-  const d = points
-    .map((p, i) => {
-      const x = i * step;
-      const y = h - ((p.value - lo) / span) * h;
-      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
-  return (
-    <svg width={w} height={h} style={{ display: 'block' }} aria-hidden>
-      <path d={d} fill="none" stroke="var(--green)" strokeWidth={1.5} />
-    </svg>
-  );
-}
-
-function TrajectoryPanel({ trajectory }: { trajectory: TraitTrend[] }) {
-  return (
-    <section style={SECTION}>
-      <h2 style={H2}>Trajectory</h2>
-      {trajectory.length === 0 ? (
-        <div style={SUBTLE}>No trajectory data.</div>
-      ) : (
-        <div style={{ display: 'grid', gap: 8, maxWidth: 720 }}>
-          {trajectory.map((t) => {
-            const d = DIRECTION_GLYPH[t.direction] ?? DIRECTION_GLYPH.insufficient;
-            return (
-              <div key={t.trait_key} style={{ display: 'grid', gridTemplateColumns: '180px 120px 1fr', gap: 12, alignItems: 'center', padding: '6px 10px', border: '1px solid var(--hair)', borderRadius: 6, background: 'var(--panel)' }}>
-                <div style={{ fontSize: 12, color: 'var(--ink-soft)' }}>{t.trait_key}</div>
-                <Sparkline points={t.points} />
-                <div style={{ fontSize: 12, color: d.color }}>
-                  {d.glyph} {t.direction} · {pct(t.confidence)}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </section>
   );
 }
 
@@ -583,10 +173,11 @@ export function ProfileScreen({ onClose }: { onClose: () => void }) {
   const [eff, setEff] = useState<EfficiencyScore | null>(null);
   const [cells, setCells] = useState<ActivityCell[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [building, setBuilding] = useState(false);
-  const [progress, setProgress] = useState<DossierProgress[]>([]);
+  const [seen, setSeen] = useState<Set<string>>(new Set());
   const [err, setErr] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
 
   // Guard against a stale window's response landing after a faster newer one.
   const reqSeq = useRef(0);
@@ -595,12 +186,11 @@ export function ProfileScreen({ onClose }: { onClose: () => void }) {
     const seq = ++reqSeq.current;
     setLoading(true);
     setErr(null);
+    setOffline(false);
     setProfile(null);
     setEff(null);
     setCells([]);
-    setProgress([]);
     try {
-      // Fast deterministic reads + the (maybe-null) cached profile, in parallel.
       const [effRes, cellRes, profRes] = await Promise.allSettled([
         invoke<EfficiencyScore>('get_efficiency_score', { window: w }),
         invoke<ActivityCell[]>('get_activity_heatmap', { window: w }),
@@ -611,10 +201,9 @@ export function ProfileScreen({ onClose }: { onClose: () => void }) {
       if (cellRes.status === 'fulfilled' && Array.isArray(cellRes.value)) setCells(cellRes.value);
       if (profRes.status === 'fulfilled') setProfile(profRes.value ?? null);
 
-      // If EVERYTHING rejected we're almost certainly off the Tauri runtime
-      // (browser preview) — surface a clear note instead of a blank page.
+      // Everything rejected → we're off the Tauri runtime (browser preview).
       if (effRes.status === 'rejected' && cellRes.status === 'rejected' && profRes.status === 'rejected') {
-        setErr(`backend unavailable: ${String((effRes as PromiseRejectedResult).reason)}`);
+        setOffline(true);
       }
     } finally {
       if (seq === reqSeq.current) setLoading(false);
@@ -625,13 +214,15 @@ export function ProfileScreen({ onClose }: { onClose: () => void }) {
     void load(win);
   }, [win, load]);
 
-  // Stream build progress from the backend while a build is in flight.
+  // Stream build progress while a build is in flight → an ordered "seen" set the
+  // reveal derives its done/active states from.
   useEffect(() => {
     if (!building) return;
     let un: undefined | (() => void);
     let cancelled = false;
     listen<DossierProgress>('dossier_progress', (e) => {
-      setProgress((prev) => [...prev, e.payload]);
+      const stage = e.payload?.stage;
+      if (typeof stage === 'string') setSeen((prev) => new Set(prev).add(stage));
     })
       .then((f) => {
         if (cancelled) f();
@@ -646,113 +237,73 @@ export function ProfileScreen({ onClose }: { onClose: () => void }) {
 
   const onBuild = useCallback(async () => {
     setBuilding(true);
-    setProgress([]);
+    setSeen(new Set());
     setErr(null);
     const w = win;
     try {
       const p = await invoke<Profile>('build_profile', { window: w });
       if (w === win) setProfile(p);
-      // Refresh the deterministic panels too (efficiency may have been recomputed).
-      void load(w);
+      void load(w); // refresh deterministic panels (efficiency may have recomputed)
     } catch (e) {
-      setErr(`build failed: ${String(e)}`);
+      setErr(`Couldn't build the dossier: ${String(e)}`);
     } finally {
       setBuilding(false);
     }
   }, [win, load]);
 
+  // Prefer the built profile's embedded efficiency copy if the standalone fetch
+  // lagged/failed, so THE SCORE never blanks while the profile has the numbers.
+  const effForHero = eff ?? profile?.efficiency ?? null;
+
   return (
-    <div style={SHELL}>
-      <header style={HEADER}>
-        <button
-          onClick={onClose}
-          aria-label="close profile"
-          style={{ cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 13, padding: '6px 12px', borderRadius: 4, border: '1px solid var(--hair)', background: 'transparent', color: 'var(--ink-soft)' }}
-        >
-          ← Close
-        </button>
-        <div style={{ fontSize: 14, letterSpacing: '0.16em', textTransform: 'uppercase', color: 'var(--green)' }}>
-          DOSSIER · Profile by Proof
-        </div>
-        <div style={{ flex: 1 }} />
-        <WindowToggle value={win} onChange={setWin} />
-      </header>
-
-      {err ? (
-        <div style={{ ...SECTION, color: 'var(--warn)' }}>{err}</div>
-      ) : null}
-
-      {loading ? (
-        <div style={{ ...SECTION, color: 'var(--ink-faint)' }}>Loading {WINDOW_LABELS[win]}…</div>
-      ) : null}
-
-      {/* Efficiency — always paired headline + family bars. Prefers the fresher
-          standalone `eff` fetch, falls back to the profile's embedded copy so
-          a failed/lagging standalone call doesn't blank the panel (GAP 2). */}
-      <EfficiencyPanel eff={eff} profileEff={profile?.efficiency ?? null} />
-
-      {/* Activity heatmap. */}
-      <HeatmapPanel cells={cells} />
-
-      {/* Profile body: either the cached/built profile, or the build affordance. */}
-      {profile ? (
-        <>
-          <section style={SECTION}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-              <h2 style={{ ...H2, margin: 0 }}>Dimensions</h2>
-              {profile.detector_only ? (
-                <span style={{ fontSize: 11, color: 'var(--warn)', border: '1px solid var(--warn)', borderRadius: 3, padding: '1px 6px' }}>
-                  deterministic (no LLM) mode
-                </span>
-              ) : null}
-              <span style={SUBTLE}>
-                generated {profile.generated_at} · {profile.session_count} sessions · hash{' '}
-                <HashBadge hash={profile.data_hash} />
-              </span>
+    <div className="dossier">
+      <div className="dossier__inner">
+        <header className="dossier__header">
+          <div className="dossier__wordmark">
+            <div className="dossier__title">
+              DOSSIER <b>·</b> Profile by Proof
             </div>
-            <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', marginTop: 12 }}>
-              {profile.dimensions.map((d) => (
-                <DimensionPanel key={d.key} dim={d} />
-              ))}
+            <div className="dossier__operator">
+              {profile ? `generated ${profile.generated_at} · ${profile.session_count} sessions` : 'operator profile'}
             </div>
-          </section>
+          </div>
+          <div className="dossier__spacer" />
+          <WindowToggle value={win} onChange={setWin} />
+          <button type="button" className="dossier__close" onClick={onClose} aria-label="Close dossier">
+            ✕
+          </button>
+        </header>
 
-          <LeaksPanel leaks={profile.ranked_leaks} />
-          <ArchetypesPanel archetypes={profile.archetypes} />
-          <TrajectoryPanel trajectory={profile.trajectory} />
-        </>
-      ) : (
-        <section style={SECTION}>
-          <h2 style={H2}>Profile</h2>
-          {building ? (
-            <div>
-              <div style={{ color: 'var(--green)', marginBottom: 8 }}>Building profile for {WINDOW_LABELS[win]}…</div>
-              <ol style={{ margin: 0, paddingLeft: 18, ...SUBTLE }}>
-                {progress.map((p, i) => (
-                  <li key={i} style={{ color: 'var(--ink-soft)' }}>
-                    {p.stage} — {p.status}
-                  </li>
-                ))}
-                {progress.length === 0 ? <li>starting…</li> : null}
-              </ol>
-            </div>
-          ) : (
-            <div>
-              <div style={{ ...SUBTLE, marginBottom: 10 }}>
-                No profile cached for {WINDOW_LABELS[win]} yet. Building runs the Diagnostician→synthesis
-                pipeline over this window.
-              </div>
-              <button
-                onClick={onBuild}
-                disabled={!!err}
-                style={{ cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 13, padding: '8px 16px', borderRadius: 4, border: '1px solid var(--green)', background: 'rgba(118,255,157,0.14)', color: 'var(--green)' }}
-              >
-                Build profile
-              </button>
-            </div>
-          )}
-        </section>
-      )}
+        {profile?.detector_only ? <DetectorExplainer /> : null}
+
+        {offline ? (
+          <div className="dossier__errline">
+            Backend unavailable — this is a browser preview. Run the app (`pnpm tauri dev`) for live data.
+          </div>
+        ) : null}
+        {err ? <div className="dossier__errline">{err}</div> : null}
+
+        {/* Loading: a calm skeleton, not a debug list. */}
+        {loading && !profile ? (
+          <Skeleton />
+        ) : profile ? (
+          <>
+            <ScoreHero eff={effForHero} />
+            <BreakingSection window={win} />
+            <LeaksSection leaks={profile.ranked_leaks} />
+            <DimensionsSection dimensions={profile.dimensions} />
+            <RangeSection archetypes={profile.archetypes} cells={cells} />
+            <TrajectorySection trajectory={profile.trajectory} />
+          </>
+        ) : (
+          // Cold-start: no cached profile for this window. Show the fast
+          // deterministic score if we have it, then the generate moment.
+          <>
+            {effForHero ? <ScoreHero eff={effForHero} /> : null}
+            <ColdStart win={win} building={building} seen={seen} onBuild={onBuild} disabled={offline} />
+          </>
+        )}
+      </div>
     </div>
   );
 }

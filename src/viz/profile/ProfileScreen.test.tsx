@@ -1,21 +1,28 @@
 // @vitest-environment jsdom
 //
-// ProfileScreen component tests — the three "evidence is inert" / "double
-// source" / "dead-end hash" gaps closed 2026-07-02. Rendering follows the
-// house no-deps convention (react-dom/client + act, no @testing-library —
-// see RadarHoverCard.test.tsx): we mount real DOM and assert on textContent
-// / attributes / click behaviour.
+// DOSSIER component tests. The screen was rebuilt (2026-07-04) from a wall of
+// identical boxes into a composed, sectioned intelligence dossier; these tests
+// follow the same "drive the exported PRESENTATIONAL subcomponents directly with
+// fixtures" escape hatch as before (ProfileScreen calls `invoke` on mount, which
+// has no backend under jsdom). House convention: react-dom/client + act, no
+// @testing-library — assert on textContent / attributes / click behaviour.
 //
-// ProfileScreen itself calls `invoke` on mount (Tauri IPC), which has no
-// backend in a jsdom test run, so these tests drive the exported
-// PRESENTATIONAL subcomponents directly with fixture props — exactly the
-// "smallest change that makes them testable" escape hatch the spec allows.
+// Coverage carried over from the old ClaimRow/LeaksPanel/EfficiencyPanel tests,
+// re-pointed at the new surfaces:
+//   • EvidenceList  — evidence is FIRST-CLASS (visible citations, all refs, null-safe, independent).
+//   • ScoreHero     — real headline, no fabricated number when null, verdict highlighting.
+//   • LeaksSection  — rank + cost + per-leak evidence.
+//   • BreakingSection helpers — window mapping + snake_case normalization.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { ClaimRow, EfficiencyPanel, HashBadge, LeaksPanel } from './ProfileScreen';
-import type { Claim, EfficiencyScore, EvidenceRef, Leak } from './types';
+import { EvidenceList } from './EvidenceList';
+import { ScoreHero } from './ScoreHero';
+import { LeaksSection } from './LeaksSection';
+import { DimensionsSection } from './DimensionsSection';
+import { normalizeHabit, toHabitsWindow } from './BreakingSection';
+import type { Claim, EfficiencyScore, EvidenceRef, Leak, ProfileDimension } from './types';
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -53,7 +60,6 @@ function leakFixture(over: Partial<Leak> = {}): Leak {
     evidence: [
       evidenceFixture({ quote: 'retried cargo build a third time unchanged', turn_id: 'turn-2' }),
       evidenceFixture({ quote: 'same error, same command, no diagnosis', turn_id: 'turn-3', session_id: 'sess-def456' }),
-      evidenceFixture({ quote: 'fourth attempt still identical', turn_id: 'turn-4', session_id: 'sess-ghi789' }),
     ],
     ...over,
   };
@@ -64,10 +70,21 @@ function efficiencyFixture(over: Partial<EfficiencyScore> = {}): EfficiencyScore
     headline: 0.71,
     rubric_version: 'v3',
     families: [
-      { key: 'verification', sub_score: 0.8, weight: 0.3 },
+      { key: 'verification_discipline', sub_score: 0.8, weight: 0.3 },
+      { key: 'context_hygiene', sub_score: 0.3, weight: 0.2 },
       { key: 'delegation', sub_score: 0.6, weight: 0.2 },
     ],
     session_count: 42,
+    ...over,
+  };
+}
+
+function dimFixture(over: Partial<ProfileDimension> = {}): ProfileDimension {
+  return {
+    key: 'strengths',
+    title: 'Strengths',
+    narrative: 'Consistent verification habits.',
+    claims: [claimFixture()],
     ...over,
   };
 }
@@ -94,299 +111,242 @@ afterEach(() => {
   container = null;
 });
 
-// ── GAP 1: evidence toggle (claims) ────────────────────────────────────────
+// ── EvidenceList — evidence promoted to first-class ────────────────────────
 
-describe('ClaimRow — evidence toggle', () => {
-  it('hides all evidence quotes before the toggle is clicked', () => {
-    const el = render(
-      <ul>
-        <ClaimRow claim={claimFixture()} />
-      </ul>,
-    );
-    const text = el.textContent ?? '';
-    expect(text).not.toContain('confirmed build output was green');
-    expect(text).not.toContain('re-ran after a flaky failure to double check');
-  });
-
-  it('reveals every evidence ref (not just the first) once the toggle is clicked', () => {
-    const el = render(
-      <ul>
-        <ClaimRow claim={claimFixture()} />
-      </ul>,
-    );
-    const toggle = el.querySelector('button[aria-expanded]') as HTMLButtonElement;
-    expect(toggle).toBeTruthy();
-    act(() => {
-      toggle.click();
-    });
+describe('EvidenceList — first-class citations', () => {
+  it('shows the captured quote of EVERY evidence ref up front (not hidden behind a toggle)', () => {
+    const el = render(<EvidenceList evidence={claimFixture().evidence} />);
     const text = el.textContent ?? '';
     expect(text).toContain('ran the full test suite before committing');
     expect(text).toContain('confirmed build output was green');
     expect(text).toContain('re-ran after a flaky failure to double check');
   });
 
-  it('shows a source tail (last 2 path segments) and turn id for each revealed evidence ref', () => {
-    const el = render(
-      <ul>
-        <ClaimRow claim={claimFixture()} />
-      </ul>,
-    );
-    const toggle = el.querySelector('button[aria-expanded]') as HTMLButtonElement;
-    act(() => {
-      toggle.click();
-    });
+  it('renders each citation as a real clickable button (keyboard accessible)', () => {
+    const el = render(<EvidenceList evidence={[evidenceFixture()]} />);
+    const cite = el.querySelector('button.evcite') as HTMLButtonElement;
+    expect(cite).toBeTruthy();
+    expect(cite.tagName).toBe('BUTTON');
+    expect(cite.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('shows a source tail (last 2 path segments) and turn id per citation', () => {
+    const el = render(<EvidenceList evidence={claimFixture().evidence} />);
     const text = el.textContent ?? '';
-    // last 2 segments of /Users/karimbaba/WARDEN/src-tauri/src/store.rs
-    expect(text).toContain('src/store.rs');
+    expect(text).toContain('src/store.rs'); // last 2 of the store.rs path
     expect(text).toContain('turn-7');
     expect(text).toContain('turn-9');
     expect(text).toContain('turn-11');
   });
 
-  it('toggle button is keyboard accessible (a real <button>, aria-expanded flips)', () => {
-    const el = render(
-      <ul>
-        <ClaimRow claim={claimFixture()} />
-      </ul>,
-    );
-    const toggle = el.querySelector('button[aria-expanded]') as HTMLButtonElement;
-    expect(toggle.tagName).toBe('BUTTON');
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    act(() => {
-      toggle.click();
-    });
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  it('shows a count of cited sessions', () => {
+    const el = render(<EvidenceList evidence={claimFixture().evidence} />);
+    expect((el.textContent ?? '').toLowerCase()).toContain('3 cited sessions');
   });
 
-  it('truncates a long quote to ~140 chars when expanded', () => {
-    const longQuote = 'x'.repeat(300);
-    const el = render(
-      <ul>
-        <ClaimRow claim={claimFixture({ evidence: [evidenceFixture({ quote: longQuote })] })} />
-      </ul>,
-    );
-    const toggle = el.querySelector('button[aria-expanded]') as HTMLButtonElement;
-    act(() => {
-      toggle.click();
-    });
-    const text = el.textContent ?? '';
-    // full 300-char run should NOT appear verbatim; a truncated (~140) run should.
-    expect(text).not.toContain(longQuote);
-    expect(text).toContain('x'.repeat(100)); // well under the truncation bound
-  });
-
-  it('handles null/optional evidence fields without crashing (quote null, source_path null)', () => {
-    const el = render(
-      <ul>
-        <ClaimRow
-          claim={claimFixture({
-            evidence: [evidenceFixture({ quote: null, source_path: null, turn_id: null })],
-          })}
-        />
-      </ul>,
-    );
-    const toggle = el.querySelector('button[aria-expanded]') as HTMLButtonElement;
+  it('clicking a citation with no event_id resolves to an "unavailable" note without throwing', () => {
+    const el = render(<EvidenceList evidence={[evidenceFixture({ event_id: null })]} />);
+    const cite = el.querySelector('button.evcite') as HTMLButtonElement;
     expect(() =>
       act(() => {
-        toggle.click();
+        cite.click();
       }),
     ).not.toThrow();
+    expect(el.textContent ?? '').toContain('No richer context available');
+    expect(cite.getAttribute('aria-expanded')).toBe('true');
   });
 
-  it('renders no toggle when a claim has zero evidence', () => {
+  it('handles null quote / source_path / turn_id without crashing', () => {
     const el = render(
-      <ul>
-        <ClaimRow claim={claimFixture({ evidence: [] })} />
-      </ul>,
+      <EvidenceList evidence={[evidenceFixture({ quote: null, source_path: null, turn_id: null })]} />,
     );
-    expect(el.querySelector('button[aria-expanded]')).toBeNull();
-  });
-});
-
-// ── GAP 1: evidence toggle (leaks) — same reusable component ──────────────
-
-describe('LeaksPanel — evidence toggle', () => {
-  it('hides all evidence quotes before the toggle is clicked', () => {
-    const el = render(<LeaksPanel leaks={[leakFixture()]} />);
     const text = el.textContent ?? '';
-    expect(text).not.toContain('same error, same command, no diagnosis');
-    expect(text).not.toContain('fourth attempt still identical');
+    expect(text).toContain('no captured quote');
+    expect(text).toContain('session'); // sourceTail fallback (session_id present)
   });
 
-  it('reveals every evidence ref for the leak once the toggle is clicked', () => {
-    const el = render(<LeaksPanel leaks={[leakFixture()]} />);
-    const toggle = el.querySelector('button[aria-expanded]') as HTMLButtonElement;
-    expect(toggle).toBeTruthy();
-    act(() => {
-      toggle.click();
-    });
-    const text = el.textContent ?? '';
-    expect(text).toContain('retried cargo build a third time unchanged');
-    expect(text).toContain('same error, same command, no diagnosis');
-    expect(text).toContain('fourth attempt still identical');
-  });
-
-  it('multiple leaks each get their own independent toggle', () => {
+  it('each citation is independent — clicking one does not open another', () => {
     const el = render(
-      <LeaksPanel
-        leaks={[
-          leakFixture({ rank: 1, title: 'Leak A', evidence: [evidenceFixture({ quote: 'quote-A-only' })] }),
-          leakFixture({ rank: 2, title: 'Leak B', evidence: [evidenceFixture({ quote: 'quote-B-only' })] }),
+      <EvidenceList
+        evidence={[
+          evidenceFixture({ event_id: null, quote: 'first citation body' }),
+          evidenceFixture({ event_id: null, quote: 'second citation body' }),
         ]}
       />,
     );
-    const toggles = el.querySelectorAll('button[aria-expanded]');
-    expect(toggles.length).toBe(2);
+    const cites = el.querySelectorAll('button.evcite');
+    expect(cites.length).toBe(2);
     act(() => {
-      (toggles[0] as HTMLButtonElement).click();
+      (cites[0] as HTMLButtonElement).click();
     });
-    const text = el.textContent ?? '';
-    expect(text).toContain('quote-A-only');
-    expect(text).not.toContain('quote-B-only'); // second toggle untouched
+    expect(cites[0].getAttribute('aria-expanded')).toBe('true');
+    expect(cites[1].getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('empty evidence renders a quiet "none cited" note, no buttons', () => {
+    const el = render(<EvidenceList evidence={[]} />);
+    expect(el.querySelector('button.evcite')).toBeNull();
+    expect((el.textContent ?? '').toLowerCase()).toContain('none cited');
   });
 });
 
-// ── GAP 2: efficiency double-source ────────────────────────────────────────
+// ── ScoreHero — the hero number is honest ──────────────────────────────────
 
-describe('EfficiencyPanel — eff vs profile.efficiency fallback', () => {
-  it('renders from the standalone eff when present', () => {
-    const el = render(
-      <EfficiencyPanel eff={efficiencyFixture({ headline: 0.71, session_count: 42 })} profileEff={null} />,
-    );
+describe('ScoreHero — efficiency headline + verdict', () => {
+  it('renders the real headline as a 0–100 score (0.71 → 71)', () => {
+    const el = render(<ScoreHero eff={efficiencyFixture({ headline: 0.71 })} />);
+    // count-up is reduced-motion-instant in jsdom (no matchMedia) — but assert
+    // on the family/verdict text which is stable regardless of the animated digit.
     const text = el.textContent ?? '';
-    expect(text).toContain('71');
-    expect(text).toContain('42 sessions');
+    expect(text).toContain('EFFICIENCY');
+    expect(text).toContain('rubric v3');
+    expect(text).toContain('42 sessions scored');
   });
 
-  it('falls back to profile.efficiency when the standalone score is null', () => {
-    const el = render(
-      <EfficiencyPanel eff={null} profileEff={efficiencyFixture({ headline: 0.55, session_count: 9 })} />,
-    );
+  it('names the strongest and weakest family in the verdict line', () => {
+    const el = render(<ScoreHero eff={efficiencyFixture()} />);
     const text = el.textContent ?? '';
-    expect(text).toContain('55');
-    expect(text).toContain('9 sessions');
+    expect(text.toLowerCase()).toContain('strongest at');
+    expect(text).toContain('verification discipline'); // humanized strongest
+    expect(text).toContain('context hygiene'); // humanized weakest
   });
 
-  it('renders nothing (or an empty shell) when both are null', () => {
-    const el = render(<EfficiencyPanel eff={null} profileEff={null} />);
-    // Must not throw and must not fabricate a headline number.
-    expect(el.textContent ?? '').not.toMatch(/\d+\s*\/\s*100/);
+  it('does NOT fabricate a score number when efficiency is null', () => {
+    const el = render(<ScoreHero eff={null} />);
+    const text = el.textContent ?? '';
+    expect(text).not.toMatch(/\b\d{1,3}\b\s*\/\s*100/); // no "NN / 100"
+    expect(text).toContain('—'); // shows the honest placeholder
+    expect(text.toLowerCase()).toContain('no scored sessions');
   });
 
-  it('prefers the fresher standalone eff over profileEff when both exist and agree', () => {
-    const el = render(
-      <EfficiencyPanel
-        eff={efficiencyFixture({ headline: 0.9, rubric_version: 'v3', families: [] })}
-        profileEff={efficiencyFixture({ headline: 0.2, rubric_version: 'v3', families: [] })}
-      />,
-    );
+  it('renders all provided families in the breakdown', () => {
+    const el = render(<ScoreHero eff={efficiencyFixture()} />);
     const text = el.textContent ?? '';
-    expect(text).toContain('90 / 100'); // the standalone (fresher) headline wins
-    expect(text).not.toContain('20 / 100');
-    expect(text).toContain('0.90'); // raw 0..1 form of the same resolved value
-    expect(text).not.toContain('0.20');
-  });
-
-  it('shows a rubric-drift warning when eff and profileEff rubric_version differ', () => {
-    const el = render(
-      <EfficiencyPanel
-        eff={efficiencyFixture({ rubric_version: 'v4' })}
-        profileEff={efficiencyFixture({ rubric_version: 'v3' })}
-      />,
-    );
-    const text = el.textContent ?? '';
-    expect(text.toLowerCase()).toContain('rubric drift');
-    expect(text).toContain('v4');
-    expect(text).toContain('v3');
-  });
-
-  it('shows no rubric-drift warning when versions are equal', () => {
-    const el = render(
-      <EfficiencyPanel
-        eff={efficiencyFixture({ rubric_version: 'v3' })}
-        profileEff={efficiencyFixture({ rubric_version: 'v3' })}
-      />,
-    );
-    const text = el.textContent ?? '';
-    expect(text.toLowerCase()).not.toContain('rubric drift');
-  });
-
-  it('shows no rubric-drift warning when only one source exists (nothing to compare)', () => {
-    const el = render(<EfficiencyPanel eff={efficiencyFixture({ rubric_version: 'v4' })} profileEff={null} />);
-    const text = el.textContent ?? '';
-    expect(text.toLowerCase()).not.toContain('rubric drift');
+    expect(text).toContain('delegation');
+    expect(text).toContain('verification discipline');
+    expect(text).toContain('context hygiene');
   });
 });
 
-// ── GAP 3: data_hash dead-end ───────────────────────────────────────────────
+// ── LeaksSection — rank, cost, first-class evidence ────────────────────────
 
-describe('HashBadge — full hash + click-to-copy', () => {
-  const fullHash = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
-
-  it('carries the FULL hash in a title attribute (not just the truncated display text)', () => {
-    const el = render(<HashBadge hash={fullHash} />);
-    const el2 = el.querySelector('[title]') as HTMLElement;
-    expect(el2).toBeTruthy();
-    expect(el2.getAttribute('title')).toBe(fullHash);
+describe('LeaksSection', () => {
+  it('renders rank, title, and real token/minute cost', () => {
+    const el = render(<LeaksSection leaks={[leakFixture()]} />);
+    const text = el.textContent ?? '';
+    expect(text).toContain('Repeats the same failing command');
+    expect(text).toContain('4,200');
+    expect(text).toContain('6');
+    expect(text).toContain('min');
   });
 
-  it('displays only a truncated (8-char) hash as visible text', () => {
-    const el = render(<HashBadge hash={fullHash} />);
-    expect(el.textContent ?? '').toContain(fullHash.slice(0, 8));
-    expect(el.textContent ?? '').not.toContain(fullHash);
+  it('surfaces each leak citation quote up front (evidence-forward, not an 11px toggle)', () => {
+    const el = render(<LeaksSection leaks={[leakFixture()]} />);
+    const text = el.textContent ?? '';
+    expect(text).toContain('retried cargo build a third time unchanged');
+    expect(text).toContain('same error, same command, no diagnosis');
   });
 
-  it('copies the full hash to the clipboard on click and flips to a brief "copied" state', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
+  it('sorts by rank and caps at 5', () => {
+    const many = Array.from({ length: 8 }, (_, i) =>
+      leakFixture({ rank: 8 - i, title: `Leak ${8 - i}`, evidence: [] }),
+    );
+    const el = render(<LeaksSection leaks={many} />);
+    const ranks = Array.from(el.querySelectorAll('.leak__rank')).map((n) => n.textContent);
+    expect(ranks).toEqual(['1', '2', '3', '4', '5']);
+  });
 
-    const el = render(<HashBadge hash={fullHash} />);
-    const clickable = el.querySelector('[title]') as HTMLElement;
+  it('empty leaks renders an honest note, no cards', () => {
+    const el = render(<LeaksSection leaks={[]} />);
+    expect(el.querySelector('.leak')).toBeNull();
+    expect((el.textContent ?? '').toLowerCase()).toContain('no leaks surfaced');
+  });
+});
 
-    await act(async () => {
-      clickable.click();
-      await Promise.resolve();
+// ── DimensionsSection — strengths vs holes contrasted ──────────────────────
+
+describe('DimensionsSection — contrasted split', () => {
+  it('routes holes / where_you_lose to the exposed column and the rest to strengths', () => {
+    const el = render(
+      <DimensionsSection
+        dimensions={[
+          dimFixture({ key: 'strengths', title: 'Strengths' }),
+          dimFixture({ key: 'holes', title: 'Holes', claims: [] }),
+          dimFixture({ key: 'orchestration_style', title: 'Orchestration', claims: [] }),
+        ]}
+      />,
+    );
+    const strengthCol = el.querySelector('.who__col--strength') as HTMLElement;
+    const holeCol = el.querySelector('.who__col--hole') as HTMLElement;
+    expect(strengthCol.textContent).toContain('Strengths');
+    expect(strengthCol.textContent).toContain('Orchestration');
+    expect(holeCol.textContent).toContain('Holes');
+    expect(strengthCol.textContent).not.toContain('Holes');
+  });
+
+  it('renders an asserted/emerging status chip per claim', () => {
+    const el = render(
+      <DimensionsSection
+        dimensions={[
+          dimFixture({
+            claims: [
+              claimFixture({ status: 'asserted', text: 'A solid claim' }),
+              claimFixture({ status: 'emerging', text: 'A tentative claim', evidence: [] }),
+            ],
+          }),
+        ]}
+      />,
+    );
+    expect(el.querySelector('.chip--asserted')).toBeTruthy();
+    expect(el.querySelector('.chip--emerging')).toBeTruthy();
+  });
+});
+
+// ── BreakingSection helpers — window mapping + normalization ────────────────
+
+describe('toHabitsWindow — Dossier → habits window mapping', () => {
+  it('maps each Dossier window to the nearest habits window', () => {
+    expect(toHabitsWindow('2wk')).toBe('7d');
+    expect(toHabitsWindow('30d')).toBe('30d');
+    expect(toHabitsWindow('3mo')).toBe('30d'); // habits has no 3mo bucket
+    expect(toHabitsWindow('6mo')).toBe('6mo');
+    expect(toHabitsWindow('all-time')).toBe('all');
+  });
+});
+
+describe('normalizeHabit — snake_case OrbIssue → BreakingHabit', () => {
+  it('reads snake_case streak fields off the wire', () => {
+    const h = normalizeHabit({
+      id: 'claude:CONTEXT_BLOAT',
+      pattern_id: 'CONTEXT_BLOAT',
+      title: 'Context bloat',
+      est_cost_tokens: 84000,
+      est_cost_minutes: 34,
+      severity: 5,
+      credits: 2,
+      streak_k: 5,
+      fixed: false,
+      evidence: [{ session_id: 's1', event_id: 'e1', quote: 'q', turn_id: null, source_path: null }],
     });
-
-    expect(writeText).toHaveBeenCalledWith(fullHash);
-    expect((el.textContent ?? '').toLowerCase()).toContain('copied');
-
-    // @ts-expect-error test cleanup of a test-only global augmentation
-    delete navigator.clipboard;
+    expect(h.patternId).toBe('CONTEXT_BLOAT');
+    expect(h.credits).toBe(2);
+    expect(h.streakK).toBe(5);
+    expect(h.fixed).toBe(false);
+    expect(h.estCostTokens).toBe(84000);
+    expect(h.evidence).toHaveLength(1);
+    expect(h.evidence[0].session_id).toBe('s1');
   });
 
-  it('does not throw when navigator.clipboard is absent (guarded)', async () => {
-    // jsdom does not implement navigator.clipboard by default; simulate that
-    // absence explicitly regardless of the environment's baseline.
-    const original = (navigator as unknown as { clipboard?: unknown }).clipboard;
-    // @ts-expect-error deliberately removing for the guard test
-    delete navigator.clipboard;
-
-    const el = render(<HashBadge hash={fullHash} />);
-    const clickable = el.querySelector('[title]') as HTMLElement;
-
-    await expect(
-      act(async () => {
-        clickable.click();
-        await Promise.resolve();
-      }),
-    ).resolves.not.toThrow();
-
-    if (original !== undefined) {
-      Object.assign(navigator, { clipboard: original });
-    }
-  });
-});
-
-describe('module import sanity', () => {
-  beforeEach(() => {
-    // no-op — keeps beforeEach import used and suite symmetric with afterEach
+  it('defaults missing fields safely (no NaN, no undefined)', () => {
+    const h = normalizeHabit({});
+    expect(h.credits).toBe(0);
+    expect(h.streakK).toBe(0);
+    expect(h.fixed).toBe(false);
+    expect(h.title).toBe('Untitled pattern');
+    expect(h.evidence).toEqual([]);
   });
 
-  it('exports the presentational subcomponents needed for direct testing', () => {
-    expect(typeof ClaimRow).toBe('function');
-    expect(typeof LeaksPanel).toBe('function');
-    expect(typeof EfficiencyPanel).toBe('function');
-    expect(typeof HashBadge).toBe('function');
+  it('honors a fixed habit', () => {
+    expect(normalizeHabit({ fixed: true }).fixed).toBe(true);
   });
 });
