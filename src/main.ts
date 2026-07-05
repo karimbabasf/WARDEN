@@ -153,22 +153,13 @@ appWindow.onResized(async () => {
 
 // ── DOSSIER full-page Profile surface ──────────────────────────────────────────
 // A separate React root (src/viz/profile/) opened OVER the war room. It is fully
-// additive: the warm R3F island is never touched. Open via the always-present
-// #open-profile button or the "D" hotkey; close via the panel's Close button or
-// Escape. The opener button hides itself while the Profile is open so it never
-// floats over its own header.
-const openBtn = document.getElementById('open-profile');
-function syncOpenBtn() {
-  if (openBtn) openBtn.style.display = isProfileOpen() ? 'none' : '';
-}
-openBtn?.addEventListener('click', () => {
-  toggleProfile();
-  syncOpenBtn();
-});
+// additive: the warm R3F island is never touched. The primary opener is the in-React
+// RADAR | DOSSIER nav (NavBar, inside the war-room island); this module keeps the
+// keyboard seams — "D" toggles it, Escape closes it — so the overlay is reachable and
+// dismissable without the mouse. Both keys are guarded so they never fire while typing.
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && isProfileOpen()) {
     closeProfile();
-    syncOpenBtn();
     return;
   }
   // "D" toggles the dossier, but only when the operator isn't typing into a field.
@@ -176,10 +167,8 @@ window.addEventListener('keydown', (e) => {
   const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
   if (!typing && (e.key === 'd' || e.key === 'D') && !e.metaKey && !e.ctrlKey && !e.altKey) {
     toggleProfile();
-    syncOpenBtn();
   }
 });
-syncOpenBtn();
 
 boot();
 
