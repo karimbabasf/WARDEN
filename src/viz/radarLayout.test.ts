@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { layoutRadarScene, radarRadius, TILT_Y, TILT_Z } from './radarLayout';
+import { layoutRadarScene, radarRadius } from './radarLayout';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
 
 function agent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id'>): RadarAgent {
@@ -241,7 +241,7 @@ describe('layoutRadarScene — busy constellations claim more room', () => {
   });
 });
 
-describe('layoutRadarScene — multi-shell siblings (no clumping when a parent has many children)', () => {
+describe('layoutRadarScene — sphere siblings (a 3-D halo, never a flat ring that lines up)', () => {
   function fanout(n: number): RadarSceneModel {
     const a: RadarAgent[] = [
       agent({ id: 'hub', harness: 'claude_code', depth: 0, contextTokens: 120000, childCount: n }),
@@ -259,89 +259,48 @@ describe('layoutRadarScene — multi-shell siblings (no clumping when a parent h
     return { generatedAt: 'T', agents: a };
   }
 
-  it('distributes many children across 2+ concentric shells (not one crammed ring)', () => {
+  it('surrounds the hub as a 3-D ball — real spread on x, y AND z (the anti-line-up guarantee)', () => {
     const { layout, byId } = roots(fanout(18));
     const hub = byId.get('hub')!;
     const kids = layout.nodes.filter((n) => n.radarAgent!.parentId === 'hub');
     expect(kids).toHaveLength(18);
-    const dists = kids.map((k) =>
-      Math.hypot(k.position.x - hub.position.x, k.position.y - hub.position.y, k.position.z - hub.position.z),
-    );
-    const minD = Math.min(...dists);
-    const maxD = Math.max(...dists);
-    // a single ring (plus tiny per-child stagger) would keep all radii within a hair
-    // of each other; multiple shells push the outer shell clearly past the inner one.
-    expect(maxD - minD).toBeGreaterThan(0.8);
+    const rel = kids.map((k) => ({
+      x: k.position.x - hub.position.x,
+      y: k.position.y - hub.position.y,
+      z: k.position.z - hub.position.z,
+    }));
+    const span = (axis: 'x' | 'y' | 'z') => {
+      const v = rel.map((r) => r[axis]);
+      return Math.max(...v) - Math.min(...v);
+    };
+    // The OLD tilted-ring layout put ~all spread in x with a squashed y and a tiny z
+    // (one plane → collapses to a line edge-on). A Fibonacci sphere spreads the moons
+    // meaningfully on ALL THREE axes, so NO camera angle can flatten it to a line.
+    expect(span('x')).toBeGreaterThan(1);
+    expect(span('y')).toBeGreaterThan(1);
+    expect(span('z')).toBeGreaterThan(1);
   });
 
-  it('keeps same-shell siblings at a readable minimum angular gap (no two crammed together)', () => {
+  it('keeps every pair of moons clear of one another (no two crammed together at 18)', () => {
     const { layout, byId } = roots(fanout(18));
     const hub = byId.get('hub')!;
     const kids = layout.nodes.filter((n) => n.radarAgent!.parentId === 'hub');
-
-    // M-1 strengthening: the radial-spread discriminator must be present in this
-    // test so it FAILS on the old single-ring layout (spread ≈ STAGGER_SPAN ≈ 0.18)
-    // and PASSES on the multi-shell layout (spread ≥ SHELL_STEP ≈ 1.15 > 0.8).
-    const dists = kids.map((k) => Math.hypot(
-      k.position.x - hub.position.x,
-      k.position.y - hub.position.y,
-      k.position.z - hub.position.z,
-    ));
-    expect(Math.max(...dists) - Math.min(...dists)).toBeGreaterThan(0.8);
-
-    // Recover the orbit radius for each child using the exact inverse of ringPosition:
-    //   ringPosition sets x = cx + cos(a)·R,  y = cy + sin(a)·R·TILT_Y
-    //   so  R = hypot(dx, dy/TILT_Y)  — exact, no approximation.
-    // Bin by orbit/0.5 (0.5 < SHELL_STEP gap of ~0.97) so shells never share a bin.
-    type ShellEntry = { polar: number };
-    const shellOf = new Map<number, ShellEntry[]>();
-    for (const k of kids) {
-      const dx = k.position.x - hub.position.x;
-      const dy = k.position.y - hub.position.y;
-      const dz = k.position.z - hub.position.z;
-      const orbit = Math.hypot(dx, dy / TILT_Y);
-      const key = Math.round(orbit / 0.5);
-      // polar angle — same formula as the updated bearing() helper
-      const polar = Math.atan2(dz / TILT_Z, dx);
-      const list = shellOf.get(key) ?? [];
-      list.push({ polar });
-      shellOf.set(key, list);
-    }
-    // at least two shells exist (18 children overflow the ~12-capacity inner ring)
-    expect(shellOf.size).toBeGreaterThanOrEqual(2);
-    // within every shell, the closest pair of siblings clears MIN_SIBLING_GAP in the
-    // polar (layout) plane — the layout's actual guarantee is 0.52 rad per shell,
-    // not a compressed 3D angle. Threshold 0.5 rad < 0.52 rad nominal, giving 4%
-    // tolerance for floating-point and stagger while still failing on old single-ring
-    // code (18 nodes at 2π/18 ≈ 0.35 rad < 0.5 rad).
-    for (const shell of shellOf.values()) {
-      if (shell.length < 2) continue;
-      let minGap = Infinity;
-      for (let i = 0; i < shell.length; i++) {
-        for (let j = i + 1; j < shell.length; j++) {
-          let gap = Math.abs(shell[i].polar - shell[j].polar) % (2 * Math.PI);
-          if (gap > Math.PI) gap = 2 * Math.PI - gap;
-          minGap = Math.min(minGap, gap);
-        }
-      }
-      expect(minGap).toBeGreaterThan(0.5);
-    }
+    let minGap = Infinity;
+    for (let i = 0; i < kids.length; i++)
+      for (let j = i + 1; j < kids.length; j++)
+        minGap = Math.min(minGap, distance(kids[i].position, kids[j].position));
+    // the shell auto-grows with sibling count (√count), so even 18 moons keep a clear
+    // surface gap — no crowding regardless of how many subagents a parent spawns.
+    expect(minGap).toBeGreaterThan(1);
   });
 
-  it('a small sibling set still fits on a single shell (no premature splitting)', () => {
+  it('places a small sibling set on one shell (roughly equidistant from the hub)', () => {
     const { layout, byId } = roots(fanout(3));
     const hub = byId.get('hub')!;
     const kids = layout.nodes.filter((n) => n.radarAgent!.parentId === 'hub');
-    // Recover the orbit radius for each child (exact inverse of ringPosition):
-    //   R = hypot(dx, dy / TILT_Y)
-    // Three children should share essentially one orbit (only the tiny per-child
-    // stagger separates them radially — bounded by STAGGER_SPAN = 0.18). They must
-    // NOT be pushed onto a far second shell (SHELL_STEP ≈ 1.15).
-    const orbits = kids.map((k) => Math.hypot(
-      k.position.x - hub.position.x,
-      (k.position.y - hub.position.y) / TILT_Y,
-    ));
-    expect(Math.max(...orbits) - Math.min(...orbits)).toBeLessThan(0.8);
+    const dists = kids.map((k) => distance(k.position, hub.position));
+    // all on one sphere shell → their radii match within a hair (no radial banding).
+    expect(Math.max(...dists) - Math.min(...dists)).toBeLessThan(0.5);
   });
 
   it('preserves honesty: a flat (codex_vscode) root grows no shells even with stray children', () => {

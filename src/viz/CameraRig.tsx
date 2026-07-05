@@ -32,7 +32,11 @@ const OVERVIEW_DIST = 12.6;
 // bent the scene (fisheye). 5 keeps you out of that distortion zone, and the
 // FOV taper below mops up whatever remains on the closest approach.
 const MIN_DIST = 5;
-const MAX_DIST = 24;
+// Raised 24 → 42 so a BUSY fleet (many folders, each a full subagent sphere) can be
+// pulled all the way back into frame. The volumetric layout spreads families across a
+// horizontal field; at 25–40 agents the outer families sit well past the old 24-unit
+// wall, so that wall stranded them off-screen with no way to zoom out to them.
+const MAX_DIST = 42;
 
 // Polar (vertical) orbit clamp — keep the constellation upright-ish, never tipping over
 // the poles. Shared by the OrbitControls props AND the hand-gesture clamp below so mouse

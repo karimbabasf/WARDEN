@@ -41,7 +41,10 @@ export function cameraTargetForOrbitOverview(): CameraTarget {
  */
 export function cameraTargetForRadarOverview(): CameraTarget {
   return {
-    position: { x: 0, y: 2.6, z: 17.5 },
+    // Opens a touch wider (17.5 → 21) so a busy multi-folder fleet lands closer to
+    // fully framed on summon; a lone-orchestrator swarm still reads fine, and the
+    // wheel covers the rest either way (MAX_DIST raised in CameraRig).
+    position: { x: 0, y: 3, z: 21 },
     lookAt: { x: 0, y: 0, z: 0 },
   };
 }

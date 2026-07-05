@@ -20,7 +20,7 @@ import { Environment, Lightformer, Wireframe, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode, OrbLayout } from './orbTypes';
 import type { RadarAgent, RadarSceneModel } from './radarTypes';
-import { layoutRadarScene, type RadarCluster } from './radarLayout';
+import { layoutRadarScene, type RadarCluster, type RadarLayout } from './radarLayout';
 import { radarHarness } from './radarTheme';
 import { AgentCore } from './AgentCore';
 import { StarCatalog } from './StarCatalog';
@@ -640,6 +640,10 @@ export type RadarConstellationProps = {
   emphasisFilter?: EmphasisFilter;
   /** Live fold scale for the constellation swap (1 = at rest). Omitted in the dev harness. */
   scaleRef?: { current: number };
+  /** Geometry strategy. Defaults to `layoutRadarScene`. The comparison harness swaps
+   *  this to A/B/C layout variants so they render through the identical mesh/link path
+   *  (apples-to-apples). Production leaves it unset → the shipped layout. */
+  layoutFn?: (model: RadarSceneModel) => RadarLayout;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -767,7 +771,7 @@ function RadarClusterLabels({ clusters }: { clusters: RadarCluster[] }) {
 // the persistent scene shell (WarRoom's SceneShell), so a Habits↔Radar swap only ever
 // remounts this forest (already folded to nothing) and the void never flickers. The
 // standalone dev harness wraps this in `RadarSceneBody`, which adds its own shell.
-export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
+export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, layoutFn = layoutRadarScene, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
   // The dev harness mounts the radar without a fold; default to a stable scale-1 ref.
   const fallbackScale = useRef(1);
   const sref = scaleRef ?? fallbackScale;
@@ -793,7 +797,7 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
   const [renderTick, setRenderTick] = useState(0);
   const nodeCache = useRef<Map<string, LayoutNode>>(new Map());
   const layoutModel = useMemo(() => radarModelWithoutGone(model, goneIdsRef.current), [model, renderTick]);
-  const layout = useMemo(() => layoutRadarScene(layoutModel), [layoutModel]);
+  const layout = useMemo(() => layoutFn(layoutModel), [layoutFn, layoutModel]);
   // Intentional mid-render write: append-only + idempotent. We record each live
   // node's latest layout so an imploding node keeps its last position after it
   // leaves `model.agents`. Writing the same id twice with the current layout is a
@@ -891,7 +895,8 @@ export function RadarSceneBody(props: RadarConstellationProps) {
     gl.toneMappingExposure = 1.05;
   }, [gl]);
 
-  const layout = useMemo(() => layoutRadarScene(props.model), [props.model]);
+  const layoutFn = props.layoutFn ?? layoutRadarScene;
+  const layout = useMemo(() => layoutFn(props.model), [layoutFn, props.model]);
   const selectedNode = useMemo(
     () => layout.nodes.find((n) => n.id === props.selectedId) ?? null,
     [layout, props.selectedId],
