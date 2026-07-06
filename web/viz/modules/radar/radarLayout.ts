@@ -1,10 +1,11 @@
-// radarLayout.ts — depth-N geometry for the RADAR constellation.
+// radarLayout.ts — abacus-board geometry for the RADAR constellation.
 //
 // Reuses the orb engine's `OrbLayout`/`LayoutNode`/`Vec3` (no fork) so the radar
-// scene renders through the same mesh/link path as Habits. Roots are planets
-// spread on a ring; their subagents orbit them as moons; sub-subagents orbit the
-// moons — recursively, depth-N. Every node carries its live `RadarAgent`, and a
-// glowing parent->child link is emitted per non-root agent whose parent exists.
+// scene renders through the same mesh/link path as Habits. The board is a stack of
+// horizontal rails, one per folder (cwd): a folder's root agents are beads laid out
+// left to right along its rail, and each agent's subagents hang one row-step below
+// it as a width-aware tidy tree. Every node sits on the z=0 plane and carries its
+// live `RadarAgent`; a glowing parent->child link is emitted per non-root agent.
 //
 // Visual law (spec §7): size = a bounded √(contextTokens) with a HIERARCHY BOOST
 // so a depth-0 main reads as noticeably larger than its subs. Pure + deterministic
@@ -15,18 +16,19 @@ import type { RadarAgent, RadarSceneModel } from '@/viz/shared/types/radarTypes'
 import { radarHarness, RADAR_NEUTRAL } from './radarTheme';
 
 /**
- * One folder constellation — every root sharing a project folder (cwd) is grouped
- * into one cluster, laid out as its own little loop and spread across the plane
- * with a labelled gap from its neighbours. The render draws `label` under `center`.
+ * One folder rail: every root sharing a project folder (cwd) is grouped into one
+ * cluster (the rail's beads). `center` is the rail HEAD (just left of the first
+ * bead, on the rail's y); the render draws `label` there and the rail rod runs from
+ * it to the rightmost root bead.
  */
 export type RadarCluster = {
   key: string;
-  /** The folder/project name shown under the constellation (e.g. "WARDEN"). */
+  /** The folder/project name shown at the rail head (e.g. "WARDEN"). */
   label: string;
-  /** Dominant harness in the cluster — drives the label hue only (color-blind a11y). */
+  /** Dominant harness on the rail: drives the label + rail-rod hue (color-blind a11y). */
   harness: string;
   center: Vec3;
-  /** Outer extent of the cluster (label placement + camera framing). */
+  /** Nominal tag extent (label placement); the rod length is computed in the renderer. */
   radius: number;
 };
 
@@ -73,80 +75,6 @@ export function radarRadius(contextTokens: number, depth: number): number {
   return 0.34 + occupancy + depthBoost(depth);
 }
 
-// ── sector + shell tuning (all pure constants; no RNG anywhere) ────────────────
-//
-// Roots are grouped into per-harness ANGULAR SECTORS on the root ring, so a forest
-// of 15+ agents reads as "Claude over here, Codex over there" instead of an
-// interleaved clump. Within a sector each root claims an angular slice whose width
-// scales with its descendant count (busy orchestrators get more room). Siblings
-// that overflow one orbital ring spill onto additional concentric SHELLS so they
-// never cram below a readable angular gap.
-
-// Smallest comfortable angular gap (radians) between two same-shell siblings. A
-// shell holds floor(2π / MIN_SIBLING_GAP) children before the next shell opens.
-const MIN_SIBLING_GAP = 0.52; // ≈ 30° → up to 12 children on the innermost ring
-// Radial step between consecutive sibling shells (must dominate the per-shell
-// stagger span so shells stay visually distinct / bucketable).
-const SHELL_STEP = 1.15;
-// Total radial stagger SPAN across one shell so co-shell moons don't all sit on a
-// perfectly flat circle. Kept well under SHELL_STEP so the shell banding (used by
-// camera framing to group a subtree) is never blurred, regardless of shell size.
-const STAGGER_SPAN = 0.18;
-
-// Local LOOP radius for a folder's roots: the ring each root sits on inside its
-// constellation, sized so a root plus its whole moon halo (`maxFoot`) clears its
-// neighbours. The chord between two adjacent roots on the loop is 2·R·sin(π/n), so
-// we invert that against the largest footprint. One root → 0 (it sits dead centre).
-function localRingRadius(count: number, maxFoot: number): number {
-  if (count <= 1) return 0;
-  return Math.max(maxFoot, maxFoot / Math.sin(Math.PI / count));
-}
-
-// A child's base orbit radius around its parent — scaled by the parent's size and
-// the child's depth so deeper moons hug tighter. The depth-1 gap is deliberately
-// generous so the parent→child link is a real DRAWN tether strand (the Habits look)
-// rather than a subagent bundled on top of its parent; deeper levels shrink back in
-// to keep the tree compact.
-function orbitRadius(parentRadius: number, childDepth: number): number {
-  const base = parentRadius + 2.2;
-  const shrink = Math.max(0.46, 1 - (childDepth - 1) * 0.26);
-  return base * shrink;
-}
-
-// Shared tilt plane for the whole constellation (roots AND children). A ROUNDER
-// ring (closer to 1.0) spreads a parent's moons in a clear circle around it so the
-// parent→child tether reads as a drawn strand — a very flat ring squashed the moons
-// almost onto the parent, which is what made subagents look "bundled". Still tilted
-// (not a flat 1.0) so the disk keeps a 3-D read. Exported so tests can recover the
-// true polar angle from tilted positions.
-export const TILT_Y = 0.52;
-export const TILT_Z = 0.3;
-
-// Polar placement on a tilted ring (mirrors orbLayout.satellitePosition): start
-// at 12 o'clock, flatten Y a touch and push Z for a 3D read. `angle` is supplied by
-// the caller (sector- or shell-aware) rather than derived from a bare index.
-function ringPosition(center: Vec3, angle: number, ring: number): Vec3 {
-  return {
-    x: center.x + Math.cos(angle) * ring,
-    y: center.y + Math.sin(angle) * ring * TILT_Y,
-    z: center.z + Math.sin(angle) * ring * TILT_Z,
-  };
-}
-
-// Deterministic small angle from an id so each parent's children fan out at a
-// stable, distinct phase (no RNG — layout must reproduce exactly).
-function angleSeed(id: string): number {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 997;
-  return (h / 997) * Math.PI * 2;
-}
-
-// Per-shell capacity at the minimum sibling gap. At least 1 so a shell always makes
-// progress (degenerate tiny gaps can't stall the distribution).
-function shellCapacity(): number {
-  return Math.max(1, Math.floor((Math.PI * 2) / MIN_SIBLING_GAP));
-}
-
 function makeNode(agent: RadarAgent, position: Vec3): LayoutNode {
   return {
     id: agent.id,
@@ -162,10 +90,11 @@ function makeNode(agent: RadarAgent, position: Vec3): LayoutNode {
 }
 
 /**
- * Lay out the live forest. Roots are deterministically ordered (by id) and placed
- * on a ring; children are placed by a recursive descent that orbits each parent's
- * resolved centre. Links are emitted parent->child only when the parent is present
- * in the model (an orphan renders solo — no dangling edge).
+ * Lay out the live forest as an abacus board. Roots are deterministically ordered
+ * (by id), grouped into per-folder rails stacked top to bottom, and placed as beads
+ * along each rail; children hang below their parent as a width-aware tidy subtree.
+ * Links are emitted parent->child only when the parent is present in the model (an
+ * orphan renders solo, no dangling edge).
  */
 export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
   const agents = model.agents;
