@@ -270,8 +270,6 @@ function SceneShell({
   focusBounds,
   homeSignal,
   sceneBounds,
-  overrides,
-  onMoveNode,
   scaleRef,
   onHover,
   onLeave,
@@ -292,10 +290,6 @@ function SceneShell({
   homeSignal: number;
   /** Bounding sphere of the active forest; scales the camera's zoom + framing. */
   sceneBounds: Bounds | null;
-  /** Sticky user position overrides for dragged nodes. */
-  overrides: PositionOverrides;
-  /** Commit a dragged node's new position. */
-  onMoveNode: (id: string, pos: [number, number, number]) => void;
   scaleRef: { current: number };
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
@@ -355,8 +349,6 @@ function SceneShell({
           onLeave={onLeave}
           onSelect={onSelect}
           onClear={onClear}
-          overrides={overrides}
-          onMoveNode={onMoveNode}
         />
       ) : (
         <HabitsForest
@@ -410,16 +402,10 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // breadcrumb UI; here we only own the stack + expose pop/clear.
   const [focusStack, setFocusStack] = useState<string[]>([]);
   const [homeSignal, setHomeSignal] = useState(0);
-  // Sticky user-dragged node positions (re-applied after every layout so they
-  // survive live data updates). Cleared by the double-click home/reset gesture.
+  // Sticky user-dragged node positions for the Habits forest (re-applied after every
+  // layout so they survive live data updates). Cleared by the double-click home/reset
+  // gesture. The radar board is not draggable (Task 6), so only Habits reads this.
   const [overrides, setOverrides] = useState<PositionOverrides>(NO_OVERRIDES);
-  const onMoveNode = useCallback((id: string, pos: [number, number, number]) => {
-    setOverrides((m) => {
-      const next = new Map(m);
-      next.set(id, pos);
-      return next;
-    });
-  }, []);
   const [fixPreview, setFixPreview] = useState<FixPreview | undefined>();
   const [loadingFix, setLoadingFix] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -481,7 +467,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // Memoised radar layout — also the source of the `id → {pos, radius}` map that
   // `subtreeBounds` frames against. Computed from the same deterministic layout the
   // forest renders, so the camera frames exactly what's on screen.
-  const radarLayout = useMemo(() => applyLayoutOverrides(layoutRadarScene(radarModel), overrides), [radarModel, overrides]);
+  const radarLayout = useMemo(() => layoutRadarScene(radarModel), [radarModel]);
   const radarPositions = useMemo(() => {
     const m = new Map<string, { pos: [number, number, number]; radius: number }>();
     for (const n of radarLayout.nodes) {
@@ -858,8 +844,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           focusBounds={focusBounds}
           homeSignal={homeSignal}
           sceneBounds={sceneBounds}
-          overrides={overrides}
-          onMoveNode={onMoveNode}
           scaleRef={foldScale}
           onHover={onHover}
           onLeave={onLeave}
