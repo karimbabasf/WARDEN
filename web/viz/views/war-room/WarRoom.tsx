@@ -919,6 +919,9 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         applying={applying}
         reverting={reverting}
         ledgerOpen={ledgerOpen}
+        // Ledger is Habits-only; the radar tab hides it so the filter is the single
+        // centred bottom element (the fit-chip owns the bottom-right corner there).
+        showLedger={displayTab !== 'radar'}
         onAsk={onAsk}
         onRequestFix={onRequestFix}
         onApplyFix={onApplyFix}

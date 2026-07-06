@@ -642,6 +642,7 @@ export function Chrome({
   applying,
   reverting,
   ledgerOpen,
+  showLedger,
   onAsk,
   onRequestFix,
   onApplyFix,
@@ -669,6 +670,8 @@ export function Chrome({
   applying: boolean;
   reverting: boolean;
   ledgerOpen: boolean;
+  /** Radar hides the guardrail ledger; Habits shows it. Gates the toggle + dock. */
+  showLedger: boolean;
   onAsk: (q: string) => void;
   onRequestFix: (issue: OrbIssue) => void;
   onApplyFix: (issue: OrbIssue) => void;
@@ -718,29 +721,35 @@ export function Chrome({
 
       {/* Guardrail ledger — a visible, reversible history of every write WARDEN
           made to your agent config. Toggle lives bottom-right; the panel slides
-          up from the corner. Counts only applied/reverted artifacts (honest). */}
-      <button
-        type="button"
-        className={`wd-ledger-toggle${ledgerOpen ? ' is-open' : ''}`}
-        aria-expanded={ledgerOpen}
-        aria-controls="wd-ledger"
-        title="Guardrail ledger"
-        onClick={onToggleLedger}
-      >
-        <span className="wd-ledger-toggle-glyph" aria-hidden="true">⬢</span>
-        LEDGER
-        {ledgerCount > 0 ? <span className="wd-ledger-toggle-count">{ledgerCount}</span> : null}
-      </button>
-      <div className={`wd-ledger-dock${ledgerOpen ? ' is-open' : ''}`} id="wd-ledger">
-        {ledgerOpen ? (
-          <Ledger
-            artifacts={artifacts}
-            reverting={reverting}
-            onRevert={onRevertFix}
-            onClose={onToggleLedger}
-          />
-        ) : null}
-      </div>
+          up from the corner. Counts only applied/reverted artifacts (honest).
+          Hidden on the radar tab (showLedger false): the radar's only bottom
+          element is the centred filter. */}
+      {showLedger ? (
+        <>
+          <button
+            type="button"
+            className={`wd-ledger-toggle${ledgerOpen ? ' is-open' : ''}`}
+            aria-expanded={ledgerOpen}
+            aria-controls="wd-ledger"
+            title="Guardrail ledger"
+            onClick={onToggleLedger}
+          >
+            <span className="wd-ledger-toggle-glyph" aria-hidden="true">⬢</span>
+            LEDGER
+            {ledgerCount > 0 ? <span className="wd-ledger-toggle-count">{ledgerCount}</span> : null}
+          </button>
+          <div className={`wd-ledger-dock${ledgerOpen ? ' is-open' : ''}`} id="wd-ledger">
+            {ledgerOpen ? (
+              <Ledger
+                artifacts={artifacts}
+                reverting={reverting}
+                onRevert={onRevertFix}
+                onClose={onToggleLedger}
+              />
+            ) : null}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }

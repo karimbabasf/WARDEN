@@ -144,6 +144,7 @@ function renderChrome(props: Partial<React.ComponentProps<typeof Chrome>>): HTML
     applying: false,
     reverting: false,
     ledgerOpen: false,
+    showLedger: true,
     onAsk: noop,
     onRequestFix: noop,
     onApplyFix: noop,
