@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { layoutRadarScene, radarRadius, TILT_Y, TILT_Z } from './radarLayout';
+import { layoutRadarScene, radarRadius } from './radarLayout';
 import type { RadarAgent, RadarSceneModel } from '@/viz/shared/types/radarTypes';
 
 function agent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id'>): RadarAgent {
@@ -70,17 +70,14 @@ describe('layoutRadarScene', () => {
     expect(layout.links).toHaveLength(2);
   });
 
-  it('orbits children around their own parent (within an orbit band, not on top of it)', () => {
+  it('hangs children below their parent as distinct beads (not stacked)', () => {
     const layout = layoutRadarScene(singleTree());
     const root = layout.nodes.find((n) => n.id === 'root')!;
     const childA = layout.nodes.find((n) => n.id === 'child-a')!;
     const childB = layout.nodes.find((n) => n.id === 'child-b')!;
-    const dA = distance(root.position, childA.position);
-    const dB = distance(root.position, childB.position);
-    // children sit off the parent (clear gap) but in the same neighbourhood
-    expect(dA).toBeGreaterThan(root.radius);
-    expect(dA).toBeLessThan(8);
-    expect(dB).toBeGreaterThan(root.radius);
+    // children sit one row below the parent on the board plane
+    expect(childA.position.y).toBeLessThan(root.position.y);
+    expect(childB.position.y).toBeLessThan(root.position.y);
     // the two siblings are placed at distinct positions (not stacked)
     expect(distance(childA.position, childB.position)).toBeGreaterThan(0.4);
   });
@@ -93,7 +90,7 @@ describe('layoutRadarScene', () => {
     );
   });
 
-  it('spreads multiple roots apart on a ring (no two roots collide)', () => {
+  it('spaces root beads apart on their rail (no two roots collide)', () => {
     const model: RadarSceneModel = {
       generatedAt: 'T',
       agents: [
@@ -119,7 +116,7 @@ describe('layoutRadarScene', () => {
     expect(root.kind).toBe('hub'); // roots are hubs, subs are issue nodes (reused union)
   });
 
-  it('places depth-2 sub-subagents around their depth-1 parent', () => {
+  it('hangs depth-2 sub-subagents below their depth-1 parent, linked down the tree', () => {
     const model: RadarSceneModel = {
       generatedAt: 'T',
       agents: [
@@ -131,8 +128,7 @@ describe('layoutRadarScene', () => {
     const layout = layoutRadarScene(model);
     const mid = layout.nodes.find((n) => n.id === 'mid')!;
     const leaf = layout.nodes.find((n) => n.id === 'leaf')!;
-    expect(distance(mid.position, leaf.position)).toBeGreaterThan(0);
-    expect(distance(mid.position, leaf.position)).toBeLessThan(5);
+    expect(leaf.position.y).toBeLessThan(mid.position.y);
     expect(layout.links).toEqual(
       expect.arrayContaining([
         { source: 'root', target: 'mid', kind: 'agent_issue' },
@@ -174,15 +170,15 @@ describe('layoutRadarScene — folder constellations (roots grouped by cwd)', ()
     };
   }
 
-  it('groups same-folder roots together and pushes different folders apart', () => {
+  it('puts same-folder roots on one rail and different folders on different rails', () => {
     const { byId } = roots(twoFolderForest());
     const w1 = byId.get('w1')!;
     const w2 = byId.get('w2')!;
     const j1 = byId.get('j1')!;
-    const sameFolder = distance(w1.position, w2.position); // both in WARDEN
-    const crossFolder = distance(w1.position, j1.position); // WARDEN → JB Hunting
-    // a same-folder neighbour is closer than a root in another folder.
-    expect(sameFolder).toBeLessThan(crossFolder);
+    // both WARDEN roots share the WARDEN rail (same y).
+    expect(w1.position.y).toBe(w2.position.y);
+    // the JB Hunting root is on its own rail (a different y).
+    expect(j1.position.y).not.toBe(w1.position.y);
   });
 
   it('exposes one labelled cluster per folder (for the on-screen constellation label)', () => {
@@ -222,128 +218,8 @@ describe('layoutRadarScene — folder constellations (roots grouped by cwd)', ()
   });
 });
 
-describe('layoutRadarScene — busy constellations claim more room', () => {
-  it('gives a folder whose root has many subagents a larger constellation extent than a barren one', () => {
-    // `busy-proj` holds one root with 6 subagents; `barren-proj` holds one barren
-    // root. The busy constellation's extent (which drives its lateral spacing) must
-    // be wider, so a busy orchestrator's moon halo never crowds its neighbours.
-    const a: RadarAgent[] = [
-      agent({ id: 'busy', cwd: 'busy-proj', depth: 0, contextTokens: 40000, childCount: 6 }),
-      agent({ id: 'barren', cwd: 'barren-proj', depth: 0, contextTokens: 40000, childCount: 0 }),
-    ];
-    for (let i = 0; i < 6; i++)
-      a.push(agent({ id: `busy-kid-${i}`, depth: 1, parentId: 'busy', contextTokens: 5000 }));
-    const { layout } = roots({ generatedAt: 'T', agents: a });
-    const busyC = layout.clusters.find((c) => c.label === 'busy-proj')!;
-    const barrenC = layout.clusters.find((c) => c.label === 'barren-proj')!;
-    expect(busyC.radius).toBeGreaterThan(barrenC.radius);
-  });
-});
-
-describe('layoutRadarScene — multi-shell siblings (no clumping when a parent has many children)', () => {
-  function fanout(n: number): RadarSceneModel {
-    const a: RadarAgent[] = [
-      agent({ id: 'hub', harness: 'claude_code', depth: 0, contextTokens: 120000, childCount: n }),
-    ];
-    for (let i = 0; i < n; i++)
-      a.push(
-        agent({
-          id: `kid-${String(i).padStart(2, '0')}`,
-          harness: 'claude_code',
-          depth: 1,
-          parentId: 'hub',
-          contextTokens: 6000,
-        }),
-      );
-    return { generatedAt: 'T', agents: a };
-  }
-
-  it('distributes many children across 2+ concentric shells (not one crammed ring)', () => {
-    const { layout, byId } = roots(fanout(18));
-    const hub = byId.get('hub')!;
-    const kids = layout.nodes.filter((n) => n.radarAgent!.parentId === 'hub');
-    expect(kids).toHaveLength(18);
-    const dists = kids.map((k) =>
-      Math.hypot(k.position.x - hub.position.x, k.position.y - hub.position.y, k.position.z - hub.position.z),
-    );
-    const minD = Math.min(...dists);
-    const maxD = Math.max(...dists);
-    // a single ring (plus tiny per-child stagger) would keep all radii within a hair
-    // of each other; multiple shells push the outer shell clearly past the inner one.
-    expect(maxD - minD).toBeGreaterThan(0.8);
-  });
-
-  it('keeps same-shell siblings at a readable minimum angular gap (no two crammed together)', () => {
-    const { layout, byId } = roots(fanout(18));
-    const hub = byId.get('hub')!;
-    const kids = layout.nodes.filter((n) => n.radarAgent!.parentId === 'hub');
-
-    // M-1 strengthening: the radial-spread discriminator must be present in this
-    // test so it FAILS on the old single-ring layout (spread ≈ STAGGER_SPAN ≈ 0.18)
-    // and PASSES on the multi-shell layout (spread ≥ SHELL_STEP ≈ 1.15 > 0.8).
-    const dists = kids.map((k) => Math.hypot(
-      k.position.x - hub.position.x,
-      k.position.y - hub.position.y,
-      k.position.z - hub.position.z,
-    ));
-    expect(Math.max(...dists) - Math.min(...dists)).toBeGreaterThan(0.8);
-
-    // Recover the orbit radius for each child using the exact inverse of ringPosition:
-    //   ringPosition sets x = cx + cos(a)·R,  y = cy + sin(a)·R·TILT_Y
-    //   so  R = hypot(dx, dy/TILT_Y)  — exact, no approximation.
-    // Bin by orbit/0.5 (0.5 < SHELL_STEP gap of ~0.97) so shells never share a bin.
-    type ShellEntry = { polar: number };
-    const shellOf = new Map<number, ShellEntry[]>();
-    for (const k of kids) {
-      const dx = k.position.x - hub.position.x;
-      const dy = k.position.y - hub.position.y;
-      const dz = k.position.z - hub.position.z;
-      const orbit = Math.hypot(dx, dy / TILT_Y);
-      const key = Math.round(orbit / 0.5);
-      // polar angle — same formula as the updated bearing() helper
-      const polar = Math.atan2(dz / TILT_Z, dx);
-      const list = shellOf.get(key) ?? [];
-      list.push({ polar });
-      shellOf.set(key, list);
-    }
-    // at least two shells exist (18 children overflow the ~12-capacity inner ring)
-    expect(shellOf.size).toBeGreaterThanOrEqual(2);
-    // within every shell, the closest pair of siblings clears MIN_SIBLING_GAP in the
-    // polar (layout) plane — the layout's actual guarantee is 0.52 rad per shell,
-    // not a compressed 3D angle. Threshold 0.5 rad < 0.52 rad nominal, giving 4%
-    // tolerance for floating-point and stagger while still failing on old single-ring
-    // code (18 nodes at 2π/18 ≈ 0.35 rad < 0.5 rad).
-    for (const shell of shellOf.values()) {
-      if (shell.length < 2) continue;
-      let minGap = Infinity;
-      for (let i = 0; i < shell.length; i++) {
-        for (let j = i + 1; j < shell.length; j++) {
-          let gap = Math.abs(shell[i].polar - shell[j].polar) % (2 * Math.PI);
-          if (gap > Math.PI) gap = 2 * Math.PI - gap;
-          minGap = Math.min(minGap, gap);
-        }
-      }
-      expect(minGap).toBeGreaterThan(0.5);
-    }
-  });
-
-  it('a small sibling set still fits on a single shell (no premature splitting)', () => {
-    const { layout, byId } = roots(fanout(3));
-    const hub = byId.get('hub')!;
-    const kids = layout.nodes.filter((n) => n.radarAgent!.parentId === 'hub');
-    // Recover the orbit radius for each child (exact inverse of ringPosition):
-    //   R = hypot(dx, dy / TILT_Y)
-    // Three children should share essentially one orbit (only the tiny per-child
-    // stagger separates them radially — bounded by STAGGER_SPAN = 0.18). They must
-    // NOT be pushed onto a far second shell (SHELL_STEP ≈ 1.15).
-    const orbits = kids.map((k) => Math.hypot(
-      k.position.x - hub.position.x,
-      (k.position.y - hub.position.y) / TILT_Y,
-    ));
-    expect(Math.max(...orbits) - Math.min(...orbits)).toBeLessThan(0.8);
-  });
-
-  it('preserves honesty: a flat (codex_vscode) root grows no shells even with stray children', () => {
+describe('layoutRadarScene — flat-agent honesty on the board (no fabricated hierarchy)', () => {
+  it('promotes every stray under a flat (codex_vscode) root to its own root bead, no links', () => {
     const a: RadarAgent[] = [
       agent({ id: 'vsc', harness: 'codex', origin: 'codex_vscode', depth: 0, childCount: 0 }),
     ];
@@ -352,18 +228,67 @@ describe('layoutRadarScene — multi-shell siblings (no clumping when a parent h
     const layout = layoutRadarScene({ generatedAt: 'T', agents: a });
     // no fabricated links under the flat parent …
     expect(layout.links).toHaveLength(0);
-    // … and every stray is promoted to its own root (none orbiting `vsc`).
+    // … and every stray still renders as its own node on the board plane, promoted
+    // to its own rail head (a moon hung under `vsc` would instead sit one ROW_STEP
+    // below it and share its x; a promoted root heads a distinct rail).
     const vsc = layout.nodes.find((n) => n.id === 'vsc')!;
     for (let i = 0; i < 12; i++) {
       const s = layout.nodes.find((n) => n.id === `stray-${i}`)!;
       expect(s).toBeTruthy();
-      const d = Math.hypot(
-        s.position.x - vsc.position.x,
-        s.position.y - vsc.position.y,
-        s.position.z - vsc.position.z,
-      );
-      expect(d).toBeGreaterThan(vsc.radius + 1);
+      expect(s.position.z).toBe(0);
+      expect(s.position.y).not.toBe(vsc.position.y - 1.5); // never a moon of vsc
     }
+  });
+});
+
+function twoFolders(): RadarSceneModel {
+  return {
+    generatedAt: 'T0',
+    agents: [
+      // folder A (cwd "alpha"): two roots, one with a child + grandchild
+      agent({ id: 'a1', depth: 0, parentId: null, cwd: 'alpha', contextTokens: 120000, childCount: 1 }),
+      agent({ id: 'a1-c', depth: 1, parentId: 'a1', cwd: 'alpha', contextTokens: 8000, childCount: 1 }),
+      agent({ id: 'a1-gc', depth: 2, parentId: 'a1-c', cwd: 'alpha', contextTokens: 3000 }),
+      agent({ id: 'a2', depth: 0, parentId: null, cwd: 'alpha', contextTokens: 40000 }),
+      // folder B (cwd "beta"): one root
+      agent({ id: 'b1', depth: 0, parentId: null, cwd: 'beta', contextTokens: 60000 }),
+    ],
+  };
+}
+
+describe('layoutRadarScene abacus board', () => {
+  it('places every node on the board plane (z = 0)', () => {
+    const layout = layoutRadarScene(twoFolders());
+    for (const n of layout.nodes) expect(n.position.z).toBe(0);
+  });
+
+  it('gives each folder its own rail (distinct y), ordered top to bottom', () => {
+    const layout = layoutRadarScene(twoFolders());
+    const railYalpha = layout.nodes.find((n) => n.id === 'a1')!.position.y;
+    const railYbeta = layout.nodes.find((n) => n.id === 'b1')!.position.y;
+    expect(railYalpha).not.toBe(railYbeta);
+    // folder "alpha" sorts before "beta", so alpha is the top rail (greater y)
+    expect(railYalpha).toBeGreaterThan(railYbeta);
+    // both roots of "alpha" share the alpha rail y
+    expect(layout.nodes.find((n) => n.id === 'a2')!.position.y).toBe(railYalpha);
+  });
+
+  it('orders root beads left to right on their rail', () => {
+    const layout = layoutRadarScene(twoFolders());
+    const a1 = layout.nodes.find((n) => n.id === 'a1')!;
+    const a2 = layout.nodes.find((n) => n.id === 'a2')!;
+    expect(a1.position.x).toBeLessThan(a2.position.x);
+  });
+
+  it('hangs subagents one row-step below their parent per depth level', () => {
+    const layout = layoutRadarScene(twoFolders());
+    const a1 = layout.nodes.find((n) => n.id === 'a1')!;
+    const c = layout.nodes.find((n) => n.id === 'a1-c')!;
+    const gc = layout.nodes.find((n) => n.id === 'a1-gc')!;
+    expect(c.position.y).toBeLessThan(a1.position.y);
+    expect(gc.position.y).toBeLessThan(c.position.y);
+    // equal steps per level
+    expect(a1.position.y - c.position.y).toBeCloseTo(c.position.y - gc.position.y, 5);
   });
 });
 
