@@ -1500,37 +1500,9 @@ html, body {
 }
 .wd-crumb.is-current:hover { background: transparent; }
 
-/* ── roster sidebar (left dock) — toggle list of every globe ──────────────────
-   Closed by default; the ≡ toggle (top-left) opens it and the panel ✕ closes it.
-   Mirrors the right inspector's slide so the two docks feel symmetric. Radar lists
-   live agents grouped by harness (subagents nested); Habits lists the habit orbs
-   grouped by harness. A row click selects that globe via the shared selection. */
-.wd-side-toggle {
-  position: absolute;
-  top: var(--top-safe);
-  left: var(--side-margin);
-  z-index: var(--z-controls);
-  width: 34px;
-  height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  background: var(--panel-strong);
-  border: 1px solid var(--hair);
-  color: var(--ink-soft);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  backdrop-filter: blur(11px);
-  -webkit-backdrop-filter: blur(11px);
-  transition: color 160ms ease, border-color 160ms ease, opacity 200ms ease;
-}
-.wd-side-toggle:hover { color: var(--green); border-color: var(--hair-bright); }
-.wd-side-toggle:focus-visible { outline: none; border-color: var(--hair-bright); box-shadow: 0 0 0 2px rgba(118, 255, 157, 0.25); }
-/* When the roster is open its own ✕ closes it, so the floating ≡ steps aside. */
-.wd-side-toggle.is-open { opacity: 0; pointer-events: none; }
-
+/* roster sidebar (left dock) styles. The live war-room no longer mounts the roster
+   (the hamburger toggle + Sidebar were removed from the radar); these rules remain
+   for the standalone Sidebar component and its colocated test. */
 .wd-sidebar {
   position: absolute;
   top: var(--top-safe);

@@ -30,8 +30,6 @@ import { NavBar, PRIMARY_CONSTELLATION_TAB, type ConstellationTab } from './NavB
 import { RadarForest } from '@/viz/modules/radar/RadarConstellation';
 import { RadarDetailPanel } from '@/viz/modules/radar/RadarDetailPanel';
 import { FilterBar } from './FilterBar';
-import { Sidebar } from './Sidebar';
-import { buildRadarRoster, buildHabitsRoster } from '@/viz/modules/radar/rosterTree';
 import { layoutRadarScene, isFlatAgent } from '@/viz/modules/radar/radarLayout';
 import { applyLayoutOverrides, NO_OVERRIDES, type PositionOverrides } from '@/viz/shared/scene/positionOverrides';
 import { radarHarness } from '@/viz/modules/radar/radarTheme';
@@ -427,9 +425,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   const active = activeFor(scene.summoned, visHidden, scene.minimized);
   const introPlayed = useRef(!document.hidden);
   const [showIntro, setShowIntro] = useState(false);
-  // Roster sidebar (left dock) — closed by default; the ≡ button and the panel's
-  // ✕ both toggle it. Session-local (not persisted); a tab swap keeps it as-is.
-  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // ── tab fold transition (Radar spec §8 — nothing ever cuts) ─────────────────
   // The single warm <Canvas> never remounts. On a Habits↔Radar switch the current
@@ -498,24 +493,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     [activeLayout],
   );
 
-  // Roster (left sidebar) content for the constellation on screen: radar agents
-  // grouped by harness with subagents nested, or the habit orbs grouped by harness.
-  // Built from the SAME models the forest renders (honest-viz) so a row click
-  // selects exactly that globe via the shared `selectedId`.
-  const rosterGroups = useMemo(
-    () => (displayTab === 'radar' ? buildRadarRoster(radarModel.agents) : buildHabitsRoster(layout)),
-    [displayTab, radarModel, layout],
-  );
-  const rosterHeader = useMemo(() => {
-    if (displayTab === 'radar') {
-      const n = radarModel.agents.length;
-      const working = radarModel.agents.filter((a) => a.status === 'working').length;
-      return `${n} ${n === 1 ? 'agent' : 'agents'} · ${working} working`;
-    }
-    const habits = layout.nodes.filter((node) => node.kind === 'issue').length;
-    return `${habits} ${habits === 1 ? 'habit' : 'habits'}`;
-  }, [displayTab, radarModel, layout]);
-
   // Radar detail-panel inputs: the selected live agent and its REAL children
   // (agents whose parentId === the selection). A flat agent yields []; the panel
   // then renders no roster (honest-viz — never a fabricated children list).
@@ -572,13 +549,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
   // Lift-only: set the active filter. Task 10's legend chips call this; passing the
   // same filter again (a chip toggled off) is the caller's job — we just store it.
   const onFilter = useCallback((next: EmphasisFilter) => setEmphasisFilter(next), []);
-
-  // Sidebar toggle, and the roster row → select that globe. Picking reuses the
-  // single selection source so the existing camera dive (focusStack/CameraRig) +
-  // detail dock follow for free on both tabs (a radar agent id and a habits node
-  // id both address `selectedId`).
-  const onToggleSidebar = useCallback(() => setSidebarOpen((o) => !o), []);
-  const onPickRoster = useCallback((id: string) => setSelectedId(id), []);
 
   // ── radar focus breadcrumb ───────────────────────────────────────────────────
   // The stack is DERIVED from the radar selection so `selectedId` stays the single
@@ -909,31 +879,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
         tab={tab}
         onTab={onTab}
         counts={{ habits: layout.nodes.filter((n) => n.kind === 'issue').length, radar: radarModel.agents.length }}
-      />
-
-      {/* ≡ roster toggle (top-left) + the left roster Sidebar. The roster lists
-          every globe as a scannable list (radar agents nested by harness / habits
-          by harness); a row click selects that globe via the shared selection. */}
-      <button
-        type="button"
-        className={`wd-side-toggle${sidebarOpen ? ' is-open' : ''}`}
-        aria-expanded={sidebarOpen}
-        aria-controls="wd-roster"
-        aria-label={sidebarOpen ? 'Collapse roster' : 'Open roster'}
-        title="Roster"
-        onClick={onToggleSidebar}
-      >
-        ☰
-      </button>
-
-      <Sidebar
-        open={sidebarOpen}
-        displayTab={displayTab}
-        groups={rosterGroups}
-        headerCount={rosterHeader}
-        selectedId={selectedId}
-        onPick={onPickRoster}
-        onToggle={onToggleSidebar}
       />
 
       {/* The severity + harness emphasis filter, centred along the bottom (its own
