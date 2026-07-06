@@ -738,6 +738,30 @@ html, body {
   box-shadow: 0 0 9px rgba(184, 255, 107, 0.5);
 }
 
+/* radar fit-to-overview chip: bottom-right pill (sits where the ledger toggle is
+   on Habits; the ledger is hidden on the radar tab so they never overlap). */
+.wd-fit-chip {
+  position: absolute;
+  right: var(--side-margin);
+  bottom: 18px;
+  z-index: var(--z-deck);
+  pointer-events: auto;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: var(--panel-strong);
+  border: 1px solid var(--hair);
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  backdrop-filter: blur(11px);
+  -webkit-backdrop-filter: blur(11px);
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.wd-fit-chip:hover { color: var(--green); border-color: var(--hair-bright); }
+
 .wd-ledger-dock {
   position: absolute;
   right: var(--side-margin);

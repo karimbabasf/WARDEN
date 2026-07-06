@@ -275,6 +275,7 @@ function SceneShell({
   onLeave,
   onSelect,
   onClear,
+  onPickFolder,
 }: {
   displayTab: ConstellationTab;
   habitsLayout: OrbLayout;
@@ -295,6 +296,8 @@ function SceneShell({
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
   onClear: () => void;
+  /** Radar-only: click a folder tag to frame that rail. */
+  onPickFolder: (key: string) => void;
 }) {
   const { gl } = useThree();
   useEffect(() => {
@@ -349,6 +352,7 @@ function SceneShell({
           onLeave={onLeave}
           onSelect={onSelect}
           onClear={onClear}
+          onPickFolder={onPickFolder}
         />
       ) : (
         <HabitsForest
@@ -603,13 +607,40 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     });
   }, [displayTab, selectedId, radarModel]);
 
-  // The deepest crumb frames the camera: its subtree bounding sphere (the agent + all
-  // live descendants) drives the CameraRig fly-to. Empty stack → null → overview pose.
-  const focusBounds = useMemo<Bounds | null>(() => {
+  // The camera fly-to bounds. Two sources write it: selecting a bead drives the focus
+  // stack (below), whose deepest crumb frames that agent's subtree; clicking a folder
+  // tag frames that whole rail (onPickFolder). It is state (not a bare memo) so the
+  // folder-tag pick can set it directly; the stack sync effect below keeps the
+  // bead-selection path working. Null → CameraRig holds the overview pose.
+  const [focusBounds, setFocusBounds] = useState<Bounds | null>(null);
+  useEffect(() => {
     const tip = focusStack[focusStack.length - 1];
-    if (!tip || !radarPositions.has(tip)) return null;
-    return subtreeBounds(radarPositions, radarModel.agents, tip);
+    if (!tip || !radarPositions.has(tip)) {
+      setFocusBounds((cur) => (cur === null ? cur : null));
+      return;
+    }
+    setFocusBounds(subtreeBounds(radarPositions, radarModel.agents, tip));
   }, [focusStack, radarPositions, radarModel]);
+
+  // Clicking a folder tag frames that rail: the enclosing sphere of every node sharing
+  // the rail's y (the root beads plus their subtrees). Reuses the shared CameraRig
+  // fly-to via focusBounds, so the glide + back-out match the bead-focus path.
+  const onPickFolder = useCallback(
+    (key: string) => {
+      const cluster = radarLayout.clusters.find((c) => c.key === key);
+      if (!cluster) return;
+      const members = radarLayout.nodes.filter(
+        (n) => Math.abs(n.position.y - cluster.center.y) < 0.01,
+      );
+      const pts = members.map((n) => ({
+        pos: [n.position.x, n.position.y, n.position.z] as [number, number, number],
+        radius: n.radius,
+      }));
+      const bounds = enclosingBounds(pts);
+      if (bounds) setFocusBounds(bounds);
+    },
+    [radarLayout],
+  );
 
   // Breadcrumb controls for Task 10 (lift-only; no UI built here). Both work by
   // re-pointing the SELECTION (the single source of truth); the derivation effect
@@ -626,6 +657,27 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
     },
     [focusStack],
   );
+
+  // Radar fit-to-overview: with nothing selected, Escape eases the locked camera back
+  // to the framed whole-board overview (bumps homeSignal). Guarded against typing and
+  // modifier chords. This bubble-phase listener never fires while a bead is selected:
+  // the capture-phase Esc handler below deselects first and stops propagation, so the
+  // first Esc backs out the selection and a second Esc (nothing selected) fits.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      const typing =
+        !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+      if (typing) return;
+      if (e.key === 'Escape' && displayTab === 'radar') {
+        e.preventDefault();
+        setHomeSignal((s) => s + 1);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [displayTab]);
 
   // Esc backs out one level: while an orb is focused, Esc deselects it (swallowed in
   // the capture phase). With nothing selected this listener is inert and Esc does
@@ -849,6 +901,7 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           onLeave={onLeave}
           onSelect={onSelect}
           onClear={onClear}
+          onPickFolder={onPickFolder}
         />
       </Canvas>
 
@@ -886,6 +939,20 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       {/* The severity + harness emphasis filter, centred along the bottom (its own
           dock now — it replaced the removed StatusDeck). */}
       <FilterBar tab={tab} model={chromeModel} filter={emphasisFilter} onFilter={onFilter} />
+
+      {/* Radar fit-to-overview chip (bottom-right, where the ledger used to sit).
+          Eases the locked camera back to the whole-board overview. Same gesture as
+          Escape and clicking empty space. */}
+      {displayTab === 'radar' ? (
+        <button
+          type="button"
+          className="wd-fit-chip"
+          title="Fit to overview"
+          onClick={() => setHomeSignal((s) => s + 1)}
+        >
+          ⤢ fit
+        </button>
+      ) : null}
 
       {/* Chrome is the Habits inspector (keys off node.issue/agent). On the radar
           tab the live selection flows to RadarSceneBody via selectedId; the radar

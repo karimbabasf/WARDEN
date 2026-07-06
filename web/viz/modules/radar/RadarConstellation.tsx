@@ -706,6 +706,8 @@ export type RadarConstellationProps = {
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
   onClear: () => void;
+  /** Click a folder tag to frame that rail. Omitted by the dev harness. */
+  onPickFolder?: (key: string) => void;
 };
 
 export function radarModelWithoutGone(model: RadarSceneModel, goneIds: ReadonlySet<string>): RadarSceneModel {
@@ -793,14 +795,16 @@ function RadarHoverLayer({ node, suppressed }: { node: LayoutNode | null; suppre
 // Hunting folder" pinned under each cluster, mirroring the Habits hub labels. Colour
 // + glyph come from the cluster's dominant harness (color-blind a11y); the text is the
 // project folder. pointer-events off so it never steals the orbit camera or a globe click.
-function RadarClusterLabels({ clusters }: { clusters: RadarCluster[] }) {
+function RadarClusterLabels({ clusters, onPick }: { clusters: RadarCluster[]; onPick?: (key: string) => void }) {
   return (
     <>
       {clusters.map((c) => {
         const t = radarHarness(c.harness);
         // Anchor the folder tag at the rail head (the abacus layout sets
         // cluster.center to the left of the first bead on the rail's y), so each
-        // tag reads as that rail's folder name at its left edge.
+        // tag reads as that rail's folder name at its left edge. The tag itself is
+        // clickable (pointer-events on the inner pill only) and frames that rail via
+        // onPick; the Html wrapper stays pass-through so it never eats a globe click.
         return (
           <Html
             key={`cluster-${c.key}`}
@@ -809,7 +813,13 @@ function RadarClusterLabels({ clusters }: { clusters: RadarCluster[] }) {
             zIndexRange={[6, 0]}
             style={{ pointerEvents: 'none' } as CSSProperties}
           >
-            <div className="wd-hub-label wd-folder-label" style={{ '--harness': t.color } as CSSProperties}>
+            <div
+              className="wd-hub-label wd-folder-label"
+              style={{ '--harness': t.color, pointerEvents: onPick ? 'auto' : 'none', cursor: onPick ? 'pointer' : 'default' } as CSSProperties}
+              onClick={onPick ? () => onPick(c.key) : undefined}
+              role={onPick ? 'button' : undefined}
+              title={onPick ? `Focus ${c.label}` : undefined}
+            >
               <span className="wd-hub-label-glyph" aria-hidden="true">{t.glyph}</span>
               {c.label}
             </div>
@@ -825,7 +835,7 @@ function RadarClusterLabels({ clusters }: { clusters: RadarCluster[] }) {
 // the persistent scene shell (WarRoom's SceneShell), so a Habits↔Radar swap only ever
 // remounts this forest (already folded to nothing) and the void never flickers. The
 // standalone dev harness wraps this in `RadarSceneBody`, which adds its own shell.
-export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, onHover, onLeave, onSelect, onClear }: RadarConstellationProps) {
+export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, onHover, onLeave, onSelect, onClear, onPickFolder }: RadarConstellationProps) {
   // The dev harness mounts the radar without a fold; default to a stable scale-1 ref.
   const fallbackScale = useRef(1);
   const sref = scaleRef ?? fallbackScale;
@@ -925,8 +935,8 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
           ))}
         </group>
 
-        {/* one "this is the WARDEN folder" label under each constellation */}
-        <RadarClusterLabels clusters={layout.clusters} />
+        {/* one "this is the WARDEN folder" tag at each rail head; click frames the rail */}
+        <RadarClusterLabels clusters={layout.clusters} onPick={onPickFolder} />
 
         <RadarHoverLayer node={hoveredNode} suppressed={Boolean(hoveredId && hoveredId === selectedId)} />
       </FoldGroup>
