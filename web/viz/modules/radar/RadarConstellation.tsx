@@ -639,6 +639,76 @@ function RadarLinks({
   );
 }
 
+// The abacus RAIL RODS: one glowing horizontal filament per folder, so a
+// single-root folder reads as a rail the bead sits on, not a floating globe. Each
+// rail runs at its cluster's y from the folder-tag head (cluster.center.x) to the
+// right edge of that rail's rightmost ROOT bead. Mirrors RadarLinks' additive-glow
+// look (harness-tinted, additive, no depth write) but is deliberately subtle: a
+// bright thin CORE line over a wider fainter UNDERLAY strip, rendered UNDER the
+// beads so the globes stay dominant. xEnd is computed here from `nodes` (the layout
+// and the RadarCluster type are untouched).
+function RadarRails({ clusters, nodes }: { clusters: RadarCluster[]; nodes: LayoutNode[] }) {
+  const PAD = 0.3; // clearance past the rightmost root bead's surface
+  const rails = useMemo(() => {
+    const out: { key: string; color: string; y: number; xStart: number; xEnd: number }[] = [];
+    for (const c of clusters) {
+      const railY = c.center.y;
+      // This rail's root beads: depth 0 AND on this rail's y (the layout parks a
+      // root's own subtree below railY, so the y test isolates this rail's roots).
+      let xEnd = -Infinity;
+      for (const n of nodes) {
+        if (n.depth === 0 && Math.abs(n.position.y - railY) < 0.01) {
+          xEnd = Math.max(xEnd, n.position.x + n.radius);
+        }
+      }
+      if (!Number.isFinite(xEnd)) continue; // no root bead on this rail, so no rod
+      out.push({ key: c.key, color: radarHarness(c.harness).color, y: railY, xStart: c.center.x, xEnd: xEnd + PAD });
+    }
+    return out;
+  }, [clusters, nodes]);
+
+  if (rails.length === 0) return null;
+  return (
+    <group renderOrder={-1}>
+      {rails.map((r) => {
+        const len = Math.max(0.001, r.xEnd - r.xStart);
+        const mid = (r.xStart + r.xEnd) / 2;
+        return (
+          <group key={`rail-${r.key}`} position={[mid, r.y, 0]}>
+            {/* wider fainter underlay glow: a thin additive strip that gives the
+                rod visible width without a fat line (WebGL ignores line width). */}
+            <mesh renderOrder={-2}>
+              <planeGeometry args={[len, 0.16]} />
+              <meshBasicMaterial
+                color={r.color}
+                transparent
+                opacity={0.12}
+                depthWrite={false}
+                toneMapped={false}
+                blending={THREE.AdditiveBlending}
+                side={THREE.DoubleSide}
+              />
+            </mesh>
+            {/* bright thin core: the crisp centre line of the rail. */}
+            <mesh renderOrder={-1}>
+              <planeGeometry args={[len, 0.03]} />
+              <meshBasicMaterial
+                color={r.color}
+                transparent
+                opacity={0.5}
+                depthWrite={false}
+                toneMapped={false}
+                blending={THREE.AdditiveBlending}
+                side={THREE.DoubleSide}
+              />
+            </mesh>
+          </group>
+        );
+      })}
+    </group>
+  );
+}
+
 export type RadarConstellationProps = {
   model: RadarSceneModel;
   hoveredId: string | null;
@@ -859,6 +929,8 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
       {/* The whole forest folds as one on a tab swap (Transition.tsx). */}
       <FoldGroup scaleRef={sref}>
         <group onPointerMissed={onClear}>
+          {/* rail rods under everything: the beads sit ON these filaments */}
+          <RadarRails clusters={layout.clusters} nodes={layout.nodes} />
           <RadarLinks layout={layout} lifecycleRef={lifecycleRef} goneIdsRef={goneIdsRef} />
           {renderNodes.map((node) => (
             <RadarGlobe
