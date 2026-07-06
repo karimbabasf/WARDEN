@@ -749,13 +749,13 @@ function RadarClusterLabels({ clusters }: { clusters: RadarCluster[] }) {
     <>
       {clusters.map((c) => {
         const t = radarHarness(c.harness);
-        // sit the label just below the constellation's lowest reach so it never
-        // collides with a globe (clusters are centred on the y=0 plane).
-        const drop = c.radius * 0.62 + 0.7;
+        // Anchor the folder tag at the rail head (the abacus layout sets
+        // cluster.center to the left of the first bead on the rail's y), so each
+        // tag reads as that rail's folder name at its left edge.
         return (
           <Html
             key={`cluster-${c.key}`}
-            position={[c.center.x, c.center.y - drop, c.center.z]}
+            position={[c.center.x, c.center.y, c.center.z]}
             center
             zIndexRange={[6, 0]}
             style={{ pointerEvents: 'none' } as CSSProperties}
