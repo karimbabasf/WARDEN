@@ -270,7 +270,6 @@ function SceneShell({
   focusBounds,
   homeSignal,
   sceneBounds,
-  flyMode,
   overrides,
   onMoveNode,
   scaleRef,
@@ -293,8 +292,6 @@ function SceneShell({
   homeSignal: number;
   /** Bounding sphere of the active forest; scales the camera's zoom + framing. */
   sceneBounds: Bounds | null;
-  /** When true, the shared CameraRig switches to free-fly (WASD) navigation. */
-  flyMode: boolean;
   /** Sticky user position overrides for dragged nodes. */
   overrides: PositionOverrides;
   /** Commit a dragged node's new position. */
@@ -341,7 +338,8 @@ function SceneShell({
         focusBounds={focusBounds}
         homeSignal={homeSignal}
         sceneBounds={sceneBounds}
-        flyMode={flyMode}
+        // Radar board locks the rig (no rotate/pan, straight-on); Habits stays uncaged.
+        locked={displayTab === 'radar'}
       />
 
       {/* The ONLY thing that swaps on a tab change — folded to nothing at the swap
@@ -509,28 +507,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
       ),
     [activeLayout],
   );
-
-  // Free-fly toggle: `F` flips the shared camera between uncaged orbit and a 6DOF
-  // fly camera; `Esc` exits fly. Guarded so it never fires while typing in the ask
-  // bar (or any input / contenteditable).
-  const [flyMode, setFlyMode] = useState(false);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const el = document.activeElement as HTMLElement | null;
-      const typing =
-        !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
-      if (typing) return;
-      if (e.key === 'f' || e.key === 'F') {
-        e.preventDefault();
-        setFlyMode((v) => !v);
-      } else if (e.key === 'Escape') {
-        setFlyMode((v) => (v ? false : v));
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
 
   // Roster (left sidebar) content for the constellation on screen: radar agents
   // grouped by harness with subagents nested, or the habit orbs grouped by harness.
@@ -882,7 +858,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           focusBounds={focusBounds}
           homeSignal={homeSignal}
           sceneBounds={sceneBounds}
-          flyMode={flyMode}
           overrides={overrides}
           onMoveNode={onMoveNode}
           scaleRef={foldScale}
@@ -892,31 +867,6 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           onClear={onClear}
         />
       </Canvas>
-
-      {flyMode && (
-        <div
-          role="status"
-          style={{
-            position: 'fixed',
-            bottom: 18,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 20,
-            padding: '6px 14px',
-            borderRadius: 6,
-            background: 'rgba(2,4,3,0.82)',
-            border: '1px solid #1b6f3a',
-            color: '#76ff9d',
-            font: '11px/1 "SF Mono", Menlo, monospace',
-            letterSpacing: '0.12em',
-            textTransform: 'uppercase',
-            pointerEvents: 'none',
-            boxShadow: '0 0 18px rgba(118,255,157,0.18)',
-          }}
-        >
-          ✈ free fly · W A S D move · Q / E roll · R / F up·down · drag to look · F or Esc to exit
-        </div>
-      )}
 
       <NavBar
         tab={tab}

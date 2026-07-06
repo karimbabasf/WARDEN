@@ -1,4 +1,5 @@
-// CameraRig.tsx — uncaged orbit (scaled to the forest) + cinematic focus + free fly.
+// CameraRig.tsx — orbit (scaled to the forest) + cinematic focus, with a tab-aware
+// locked mode for the radar board.
 //
 // HISTORY: the first rig was a deliberately *caged* turntable — pan off, a fixed
 // maxDistance of 24, the pivot pinned to origin, tilt clamped. That was right for
@@ -11,11 +12,11 @@
 //     "home"/overview frames the whole thing — so you can always pull back to see
 //     every agent, however many there are.
 //   • PAN + ZOOM-TO-CURSOR + FREE ROTATION. Right-drag pans the pivot across the
-//     forest, the wheel dollies toward the cursor, and tilt is (almost) unclamped
-//     — so distant agents are reachable and you can turn freely.
-//   • FREE-FLY MODE (`flyMode`). Swaps OrbitControls for a 6DOF fly camera
-//     (WASD/QE + drag-look) for soaring through a big forest; on exit it re-pivots
-//     the orbit onto whatever you were looking at, so the handoff is seamless.
+//     forest, the wheel dollies toward the cursor, and tilt is (almost) unclamped,
+//     so distant agents are reachable and you can turn freely.
+//   • LOCKED MODE (`locked`). The radar board passes this: rotate + pan are off and
+//     the overview looks straight on (+Z), so the abacus rails stay horizontal. The
+//     wheel still dollies toward the cursor. Habits leaves it false (uncaged).
 //
 // The cinematic moves are unchanged: selecting an orb glides the target onto it
 // (preserving your viewing angle) and remembers the dive-from pose to restore on
@@ -24,7 +25,7 @@
 
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, FlyControls } from '@react-three/drei';
+import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode } from '@/viz/shared/types/orbTypes';
 import { frameDistance, type Bounds } from './cameraFraming';
@@ -49,6 +50,9 @@ const FLY_MS = 700;
 const dir = new THREE.Vector3();
 // A pleasant 3/4 overview angle the home/reset pose is framed along.
 const OVERVIEW_DIR = new THREE.Vector3(0.35, 0.28, 1).normalize();
+// Locked-board direction: dead-on the +Z axis so the abacus rails read horizontal
+// with no perspective tilt between rails (up stays +Y).
+const STRAIGHT_ON_DIR = new THREE.Vector3(0, 0, 1);
 
 function easeInOutExpo(t: number): number {
   if (t <= 0) return 0;
@@ -63,15 +67,15 @@ export function CameraRig({
   focusBounds = null,
   homeSignal = 0,
   sceneBounds = null,
-  flyMode = false,
+  locked = false,
 }: {
   selected: LayoutNode | null;
   focusBounds?: Bounds | null;
   homeSignal?: number;
   /** Bounding sphere of the whole active forest; scales zoom range + framing. */
   sceneBounds?: Bounds | null;
-  /** When true, swap OrbitControls for the free-fly camera. */
-  flyMode?: boolean;
+  /** Radar board: lock rotate + pan, keep zoom-to-cursor, look straight on. */
+  locked?: boolean;
 }) {
   const { camera } = useThree();
   const controls = useRef<any>(null);
@@ -88,7 +92,6 @@ export function CameraRig({
   const flyFromPos = useRef(new THREE.Vector3());
   const lastFocusKey = useRef<string | null>(null);
   const lastHomeSignal = useRef(homeSignal);
-  const wasFly = useRef(false);
 
   // Derive the scaled limits from the forest bounds. overviewDist frames the whole
   // forest at ~50% fill (breathing room); maxDist gives headroom beyond that; far
@@ -131,11 +134,15 @@ export function CameraRig({
     }
   }, [camera, fit.far]);
 
-  // Bounds-framed overview/home pose (replaces the old static one).
+  // Bounds-framed overview/home pose (replaces the old static one). When locked (the
+  // radar board) the camera sits straight on the +Z axis looking at board centre (up
+  // +Y), so the rails read horizontal with no perspective tilt; otherwise it frames
+  // along the pleasant 3/4 hero angle.
   function writeOverviewPose(target: THREE.Vector3, pos: THREE.Vector3) {
     const f = fitRef.current;
+    const overviewDir = locked ? STRAIGHT_ON_DIR : OVERVIEW_DIR;
     target.copy(f.center);
-    pos.copy(f.center).addScaledVector(OVERVIEW_DIR, f.overviewDist);
+    pos.copy(f.center).addScaledVector(overviewDir, f.overviewDist);
   }
 
   function beginFly() {
@@ -245,45 +252,9 @@ export function CameraRig({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [homeSignal]);
 
-  // --- Fly-mode handoff. Entering fly: stop orbit animation and reset the lens
-  // (FlyControls takes the camera). Exiting fly: OrbitControls has just remounted —
-  // re-pivot it onto whatever the camera is looking at so orbiting resumes around
-  // your current focus rather than snapping back to the old centre. ---
-  useEffect(() => {
-    if (flyMode) {
-      animating.current = false;
-      flyActive.current = false;
-      const cam = camera as THREE.PerspectiveCamera;
-      if (cam.fov !== FOV_FAR) {
-        cam.fov = FOV_FAR;
-        cam.updateProjectionMatrix();
-      }
-      wasFly.current = true;
-    } else if (wasFly.current) {
-      wasFly.current = false;
-      const c = controls.current;
-      const fwd = camera.getWorldDirection(dir).clone();
-      const pivotDist = THREE.MathUtils.clamp(
-        fitRef.current.radius > 0 ? fitRef.current.radius * 0.4 : 8,
-        MIN_DIST,
-        fitRef.current.maxDist,
-      );
-      const tgt = camera.position.clone().addScaledVector(fwd, pivotDist);
-      if (c) {
-        c.target.copy(tgt);
-        c.update();
-      }
-      targetGoal.current.copy(tgt);
-      posGoal.current.copy(camera.position);
-      animating.current = false;
-      flyActive.current = false;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flyMode]);
-
   useFrame((_, dtRaw) => {
     const c = controls.current;
-    if (!c) return; // fly mode (OrbitControls unmounted) — FlyControls drives the camera.
+    if (!c) return; // controls not mounted yet on the very first frame.
     const dt = Math.min(dtRaw, 0.05);
 
     if (animating.current) {
@@ -327,13 +298,6 @@ export function CameraRig({
     c.update();
   });
 
-  // Free-fly: a 6DOF camera (WASD move, Q/E roll, R/F up·down, drag to look). Speed
-  // scales to the forest so you can cross a big one in a few seconds.
-  if (flyMode) {
-    const speed = Math.max(6, fit.radius * 0.6);
-    return <FlyControls movementSpeed={speed} rollSpeed={0.25} dragToLook />;
-  }
-
   return (
     <OrbitControls
       ref={controls}
@@ -342,17 +306,18 @@ export function CameraRig({
       dampingFactor={0.15}
       rotateSpeed={0.95}
       zoomSpeed={1.0}
-      // UNCAGED: pan is on (right-drag slides the pivot across the forest), zoom
-      // dollies toward the cursor (fly toward the agent you're looking at), and the
-      // dolly range scales to the forest so you can always pull back to see it all.
-      enablePan
-      screenSpacePanning
+      // Board is locked: no rotate, no pan; the wheel still dollies toward the
+      // cursor. Habits keeps the uncaged rig (rotate + pan).
+      enableRotate={!locked}
+      enablePan={!locked}
+      screenSpacePanning={!locked}
       zoomToCursor
       minDistance={MIN_DIST}
       maxDistance={fit.maxDist}
-      // Near-full vertical freedom (a hair off the poles to avoid the gimbal flip).
-      minPolarAngle={0.01}
-      maxPolarAngle={Math.PI - 0.01}
+      minPolarAngle={locked ? Math.PI / 2 : 0.01}
+      maxPolarAngle={locked ? Math.PI / 2 : Math.PI - 0.01}
+      minAzimuthAngle={locked ? 0 : -Infinity}
+      maxAzimuthAngle={locked ? 0 : Infinity}
     />
   );
 }
