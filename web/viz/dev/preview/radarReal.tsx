@@ -15,7 +15,7 @@ import { radarHarness } from '@/viz/modules/radar/radarTheme';
 import type { LayoutNode } from '@/viz/shared/types/orbTypes';
 import type { RadarAgent } from '@/viz/shared/types/radarTypes';
 import RAW from './realRadar.json';
-import '../../style.css';
+import '@/style.css';
 
 const FOREST = normalizeRadarState(RAW as unknown);
 const DEFAULT_SELECTED = FOREST.agents[0]?.id ?? null;

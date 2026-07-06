@@ -13,7 +13,7 @@ import { createRoot } from 'react-dom/client';
 import { createBridge } from '@/viz/shared/state/bridge';
 import { WarRoom } from '@/viz/views/war-room/WarRoom';
 import REAL_RADAR from './preview/realRadar.json';
-import './../style.css';
+import '@/style.css';
 
 // listen is unused here (we drive ingest directly) — pass a no-op.
 const noopListen = (async () => () => {}) as unknown as Parameters<typeof createBridge>[0];

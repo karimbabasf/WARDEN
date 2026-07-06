@@ -28,7 +28,7 @@ import { isFlatAgent } from '@/viz/modules/radar/radarLayout';
 import { radarHarness } from '@/viz/modules/radar/radarTheme';
 import type { LayoutNode } from '@/viz/shared/types/orbTypes';
 import type { RadarAgent } from '@/viz/shared/types/radarTypes';
-import '../../style.css';
+import '@/style.css';
 
 // ── the mock forest, as a RAW contract payload (camelCase, exactly what Rust emits)
 // run through `normalizeRadarState` so the harness data is production-shaped. Times
