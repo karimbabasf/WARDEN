@@ -279,6 +279,14 @@ export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
     return parentX;
   }
 
+  // Deepest subtree depth (relative to the rail) among a rail's members.
+  const relDepth = (a: RadarAgent): number => {
+    const kids = childrenOf.get(a.id);
+    if (!kids || kids.length === 0) return 0;
+    return 1 + Math.max(...kids.map(relDepth));
+  };
+  const railDepth = (members: RadarAgent[]): number => Math.max(0, ...members.map(relDepth));
+
   const clusters: RadarCluster[] = [];
   let railY = 0;
   for (const k of railOrder) {
@@ -296,7 +304,7 @@ export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
       center: { x: -BEAD_GAP, y: railY, z: 0 },
       radius: 1,
     });
-    railY -= RAIL_GAP;
+    railY -= RAIL_GAP + railDepth(members) * ROW_STEP;
   }
 
   return { nodes, links, clusters };

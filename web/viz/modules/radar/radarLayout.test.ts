@@ -324,6 +324,27 @@ describe('layoutRadarScene abacus board', () => {
     const subtreeRight = Math.max(a1c.position.x, a1gc.position.x);
     expect(a2.position.x).toBeGreaterThan(subtreeRight);
   });
+
+  it('leaves more vertical room below a rail that has a deep subtree', () => {
+    // rail "alpha" has depth-2; rail "beta" is flat. Measure the gap under each.
+    const model: RadarSceneModel = {
+      generatedAt: 'T0',
+      agents: [
+        agent({ id: 'a', depth: 0, parentId: null, cwd: 'alpha', childCount: 1 }),
+        agent({ id: 'a-c', depth: 1, parentId: 'a', cwd: 'alpha', childCount: 1 }),
+        agent({ id: 'a-gc', depth: 2, parentId: 'a-c', cwd: 'alpha' }),
+        agent({ id: 'b', depth: 0, parentId: null, cwd: 'beta' }),
+        agent({ id: 'c', depth: 0, parentId: null, cwd: 'gamma' }),
+      ],
+    };
+    const layout = layoutRadarScene(model);
+    const yAlpha = layout.nodes.find((n) => n.id === 'a')!.position.y;
+    const yBeta = layout.nodes.find((n) => n.id === 'b')!.position.y;
+    const yGamma = layout.nodes.find((n) => n.id === 'c')!.position.y;
+    const gapUnderAlpha = yAlpha - yBeta; // alpha has depth 2
+    const gapUnderBeta = yBeta - yGamma; // beta is flat
+    expect(gapUnderAlpha).toBeGreaterThan(gapUnderBeta);
+  });
 });
 
 describe('layoutRadarScene — frozen output contract (every node carries id + position + radius)', () => {
