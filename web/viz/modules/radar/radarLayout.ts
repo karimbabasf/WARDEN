@@ -233,20 +233,50 @@ export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
     railMembers.get(k)!.push(r);
   }
 
-  // Subtree: place each child one ROW_STEP below its parent, siblings fanned
-  // horizontally and centred on the parent's x. (Task 2 makes this width-aware.)
-  function placeSubtree(parent: RadarAgent, px: number, py: number) {
+  // Width a subtree needs on the board: a leaf takes its own bead footprint; an
+  // internal node takes the max of its own footprint and the summed width of its
+  // children (plus sibling gaps). Bottom-up, memoised per agent.
+  const widthCache = new Map<string, number>();
+  function subtreeWidth(a: RadarAgent): number {
+    const cached = widthCache.get(a.id);
+    if (cached !== undefined) return cached;
+    const own = 2 * radarRadius(a.contextTokens, a.depth) + SIB_GAP;
+    const kids = childrenOf.get(a.id);
+    let w = own;
+    if (kids && kids.length > 0) {
+      const childrenW = kids.reduce((s, k) => s + subtreeWidth(k), 0);
+      w = Math.max(own, childrenW);
+    }
+    widthCache.set(a.id, w);
+    return w;
+  }
+
+  // Place a subtree whose block spans [left, left + subtreeWidth(parent)] at row
+  // `py`; the parent is centred over its children (or over its own block if leaf).
+  function placeSubtree(parent: RadarAgent, left: number, py: number): number {
+    const w = subtreeWidth(parent);
     const kids = childrenOf.get(parent.id);
-    if (!kids || kids.length === 0) return;
-    const cy = py - ROW_STEP;
-    const span = (kids.length - 1) * SIB_GAP;
-    kids.forEach((kid, i) => {
-      const cx = px - span / 2 + i * SIB_GAP;
-      const node = makeNode(kid, { x: cx, y: cy, z: 0 });
-      nodes.push(node);
-      links.push({ source: parent.id, target: kid.id, kind: 'agent_issue' });
-      placeSubtree(kid, cx, cy);
-    });
+    let parentX: number;
+    if (!kids || kids.length === 0) {
+      parentX = left + w / 2;
+    } else {
+      let cursor = left;
+      const cy = py - ROW_STEP;
+      const centres: number[] = [];
+      for (const kid of kids) {
+        const cx = placeSubtree(kid, cursor, cy);
+        centres.push(cx);
+        cursor += subtreeWidth(kid);
+      }
+      parentX = centres.reduce((s, c) => s + c, 0) / centres.length;
+    }
+    const node = makeNode(parent, { x: parentX, y: py, z: 0 });
+    nodes.push(node);
+    const pid = parent.parentId;
+    if (pid && childrenOf.has(pid) && childrenOf.get(pid)!.some((k) => k.id === parent.id)) {
+      links.push({ source: pid, target: parent.id, kind: 'agent_issue' });
+    }
+    return parentX;
   }
 
   const clusters: RadarCluster[] = [];
@@ -255,10 +285,8 @@ export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
     const members = railMembers.get(k)!;
     let x = 0;
     for (const root of members) {
-      const rootNode = makeNode(root, { x, y: railY, z: 0 });
-      nodes.push(rootNode);
       placeSubtree(root, x, railY);
-      x += 2 * rootNode.radius + BEAD_GAP;
+      x += subtreeWidth(root) + BEAD_GAP;
     }
     // Folder tag sits at the rail head, just left of the first bead.
     clusters.push({

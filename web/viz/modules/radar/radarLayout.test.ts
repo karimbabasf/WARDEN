@@ -290,6 +290,40 @@ describe('layoutRadarScene abacus board', () => {
     // equal steps per level
     expect(a1.position.y - c.position.y).toBeCloseTo(c.position.y - gc.position.y, 5);
   });
+
+  it('centres a single child under its parent', () => {
+    const layout = layoutRadarScene(twoFolders());
+    const c = layout.nodes.find((n) => n.id === 'a1-c')!;
+    const a1 = layout.nodes.find((n) => n.id === 'a1')!;
+    expect(c.position.x).toBeCloseTo(a1.position.x, 5);
+  });
+
+  it('centres multiple children on the mean of their parent x', () => {
+    const model: RadarSceneModel = {
+      generatedAt: 'T0',
+      agents: [
+        agent({ id: 'p', depth: 0, parentId: null, cwd: 'alpha', childCount: 2 }),
+        agent({ id: 'p-c1', depth: 1, parentId: 'p', cwd: 'alpha' }),
+        agent({ id: 'p-c2', depth: 1, parentId: 'p', cwd: 'alpha' }),
+      ],
+    };
+    const layout = layoutRadarScene(model);
+    const p = layout.nodes.find((n) => n.id === 'p')!;
+    const c1 = layout.nodes.find((n) => n.id === 'p-c1')!;
+    const c2 = layout.nodes.find((n) => n.id === 'p-c2')!;
+    expect((c1.position.x + c2.position.x) / 2).toBeCloseTo(p.position.x, 5);
+    expect(c1.position.x).not.toBeCloseTo(c2.position.x, 1); // spread apart
+  });
+
+  it('spaces a root with a wide subtree clear of the next root bead', () => {
+    // a1 has a subtree; a2 is a bare root. a2 must sit right of a1's subtree.
+    const layout = layoutRadarScene(twoFolders());
+    const a1c = layout.nodes.find((n) => n.id === 'a1-c')!;
+    const a1gc = layout.nodes.find((n) => n.id === 'a1-gc')!;
+    const a2 = layout.nodes.find((n) => n.id === 'a2')!;
+    const subtreeRight = Math.max(a1c.position.x, a1gc.position.x);
+    expect(a2.position.x).toBeGreaterThan(subtreeRight);
+  });
 });
 
 describe('layoutRadarScene — frozen output contract (every node carries id + position + radius)', () => {
