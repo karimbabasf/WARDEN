@@ -13,20 +13,12 @@
 
 import type { CSSProperties } from 'react';
 import type { RadarAgent, RadarContextRow } from '@/viz/shared/types/radarTypes';
-import { radarSubtitle } from '@/viz/shared/types/radarTypes';
+import { radarSubtitle, formatTokens as tokens } from '@/viz/shared/types/radarTypes';
 import { radarHarness } from './radarTheme';
 
 // ── small pure formatters ──────────────────────────────────────────────────────
 function pct(fill: number): string {
   return `${Math.round(fill * 100)}%`;
-}
-
-/** Compact token magnitude: 172000 → "172k", 940 → "940". */
-function tokens(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '0';
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`;
-  return String(Math.round(n));
 }
 
 function rowPct(p: number): string {

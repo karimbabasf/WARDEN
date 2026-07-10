@@ -12,8 +12,6 @@
 // The pure tab model (`TABS`, `navItemProps`) is unit-tested in node; the rendered
 // bar (a11y `aria-current`, keyboard focus, the sweep) is verified live.
 
-import { Fragment } from 'react';
-
 export type ConstellationTab = 'habits' | 'radar';
 
 export const PRIMARY_CONSTELLATION_TAB: ConstellationTab = 'radar';
@@ -44,29 +42,23 @@ export function NavBar({
 }) {
   return (
     <nav className="wd-nav" aria-label="Constellation">
-      <span className="wd-nav-mark" aria-hidden>
-        ✦
-      </span>
-      {TABS.map((t, i) => {
+      {TABS.map((t) => {
         const props = navItemProps(t.id, tab);
         const n = counts?.[t.id];
         return (
-          <Fragment key={t.id}>
-            {i > 0 && <span className="wd-nav-div" aria-hidden />}
-            <button
-              type="button"
-              className={`wd-nav-tab${props.active ? ' is-active' : ''}`}
-              aria-current={props['aria-current']}
-              title={t.hint}
-              onClick={() => onTab(t.id)}
-            >
-              <span className="wd-nav-label">{t.label}</span>
-              {typeof n === 'number' && (
-                <span className={`wd-nav-count${n === 0 ? ' is-zero' : ''}`}>{n}</span>
-              )}
-              <span className="wd-nav-sweep" aria-hidden />
-            </button>
-          </Fragment>
+          <button
+            key={t.id}
+            type="button"
+            className={`wd-nav-tab${props.active ? ' is-active' : ''}`}
+            aria-current={props['aria-current']}
+            title={t.hint}
+            onClick={() => onTab(t.id)}
+          >
+            <span className="wd-nav-label">{t.label}</span>
+            {typeof n === 'number' && (
+              <span className={`wd-nav-count${n === 0 ? ' is-zero' : ''}`}>{n}</span>
+            )}
+          </button>
         );
       })}
     </nav>

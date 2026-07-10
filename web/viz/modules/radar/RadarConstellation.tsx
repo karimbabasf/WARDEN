@@ -140,7 +140,7 @@ function seedOf(id: string): number {
   return h / 1000;
 }
 
-// soft round sprite (cached) — the gem halo + the travelling link dots.
+// soft round sprite (cached): the gem halo + the globe lattice nodes.
 function radialTexture(size: number, stops: Array<[number, number]>): THREE.Texture {
   const c = document.createElement('canvas');
   c.width = c.height = size;
@@ -489,52 +489,35 @@ function RadarLinks({
   const byId = useMemo(() => new Map(layout.nodes.map((n) => [n.id, n])), [layout]);
   const links = useMemo(() => layout.links.filter((l) => byId.has(l.source) && byId.has(l.target)), [layout, byId]);
 
-  // Immutable full-brightness colour bases. The live color attributes are these
-  // scaled by each link's endpoint lifecycle factor per frame (multiplying the
-  // attribute in place would compound; the base never changes after layout).
+  // Immutable full-brightness colour base. The live colour attribute is this scaled
+  // by each link's endpoint lifecycle factor per frame (scaling the attribute in
+  // place would compound; the base never changes after layout).
   const baseLineColors = useRef<Float32Array>(new Float32Array(0));
-  const baseDotColors = useRef<Float32Array>(new Float32Array(0));
 
-  // One bowed bezier per parent→child edge, sampled into a gradient polyline — the
-  // SAME constellation treatment Habits gives its tethers (curved volume, not flat
-  // spokes), so every agent + its subagents read as one drawn figure. Tinted by each
-  // endpoint's radar heat colour and brightest at the parent, the constellation's anchor.
-  const SEG = 22;
-  const { lineGeo, dotGeo, curves, meta } = useMemo(() => {
-    const UP = new THREE.Vector3(0, 1, 0);
-    const curves: THREE.QuadraticBezierCurve3[] = [];
+  // One STRAIGHT parent→child strand per edge, sampled into a short gradient polyline:
+  // brightest at the parent anchor and easing toward the child, so the tether reads as
+  // a clean, direct "this spawned that" line (no bowed cable, no travelling mote).
+  const SEG = 6;
+  const { lineGeo, meta } = useMemo(() => {
     const linePos = new Float32Array(links.length * SEG * 6);
     const lineCol = new Float32Array(links.length * SEG * 6);
-    const dotPos = new Float32Array(links.length * 3);
-    const dotCol = new Float32Array(links.length * 3);
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
     const meta = links.map((link, idx) => {
       const parent = byId.get(link.source)!;
       const child = byId.get(link.target)!;
       const h = new THREE.Vector3(parent.position.x, parent.position.y, parent.position.z);
       const c = new THREE.Vector3(child.position.x, child.position.y, child.position.z);
-      const dir = new THREE.Vector3().subVectors(c, h);
-      const len = dir.length() || 1;
-      const mid = new THREE.Vector3().addVectors(h, c).multiplyScalar(0.5);
-      // bow the cable off the straight line (perpendicular + a little lift) so the
-      // constellation has real 3D depth instead of collapsing onto flat spokes.
-      const perp = new THREE.Vector3().crossVectors(dir, UP);
-      if (perp.lengthSq() < 1e-4) perp.set(1, 0, 0);
-      perp.normalize();
-      const ctrl = mid.clone().add(perp.multiplyScalar(len * 0.16)).add(UP.clone().multiplyScalar(len * 0.06));
-      const curve = new THREE.QuadraticBezierCurve3(h, ctrl, c);
-      curves.push(curve);
 
       const cParent = new THREE.Color(radarNodeColor(parent.radarAgent!));
       const cChild = new THREE.Color(radarNodeColor(child.radarAgent!));
-      const pts = curve.getPoints(SEG);
       const base = idx * SEG * 6;
       for (let s = 0; s < SEG; s++) {
         const ta = s / SEG;
         const tb = (s + 1) / SEG;
-        const a = pts[s];
-        const b = pts[s + 1];
-        // brightest at the parent anchor, easing toward the child globe. Kept punchy
-        // so the parent→child strand reads as a real drawn tether (the Habits look).
+        a.copy(h).lerp(c, ta);
+        b.copy(h).lerp(c, tb);
+        // brightest at the parent anchor, easing toward the child globe.
         const ca = cParent.clone().lerp(cChild, ta).multiplyScalar(0.92 - 0.3 * ta);
         const cb = cParent.clone().lerp(cChild, tb).multiplyScalar(0.92 - 0.3 * tb);
         const o = base + s * 6;
@@ -543,45 +526,30 @@ function RadarLinks({
         lineCol[o] = ca.r; lineCol[o + 1] = ca.g; lineCol[o + 2] = ca.b;
         lineCol[o + 3] = cb.r; lineCol[o + 4] = cb.g; lineCol[o + 5] = cb.b;
       }
-      dotCol[idx * 3] = cParent.r; dotCol[idx * 3 + 1] = cParent.g; dotCol[idx * 3 + 2] = cParent.b;
-      return { sourceId: link.source, targetId: link.target, phase: (idx * 0.37) % 1 };
+      return { sourceId: link.source, targetId: link.target };
     });
 
     baseLineColors.current = lineCol.slice();
-    baseDotColors.current = dotCol.slice();
     const lineGeo = new THREE.BufferGeometry();
     lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
     lineGeo.setAttribute('color', new THREE.BufferAttribute(lineCol, 3));
-    const dotGeo = new THREE.BufferGeometry();
-    dotGeo.setAttribute('position', new THREE.BufferAttribute(dotPos, 3));
-    dotGeo.setAttribute('color', new THREE.BufferAttribute(dotCol, 3));
-    return { lineGeo, dotGeo, curves, meta };
+    return { lineGeo, meta };
   }, [links, byId]);
 
   const lineMat = useRef<THREE.LineBasicMaterial>(null);
-  const dotTex = useMemo(() => dotTexture(), []);
-  const tmp = useMemo(() => new THREE.Vector3(), []);
 
-  useEffect(() => () => { lineGeo.dispose(); dotGeo.dispose(); }, [lineGeo, dotGeo]);
+  useEffect(() => () => { lineGeo.dispose(); }, [lineGeo]);
 
   useFrame((state) => {
     const t = state.clock.elapsedTime;
     const lc = lifecycleRef.current;
-    const dotPosAttr = dotGeo.getAttribute('position') as THREE.BufferAttribute;
     const lineColAttr = lineGeo.getAttribute('color') as THREE.BufferAttribute;
-    const dotColAttr = dotGeo.getAttribute('color') as THREE.BufferAttribute;
     const baseLine = baseLineColors.current;
-    const baseDot = baseDotColors.current;
     const lineArr = lineColAttr.array as Float32Array;
-    const dotArr = dotColAttr.array as Float32Array;
     const stride = SEG * 6;
 
     for (let i = 0; i < meta.length; i++) {
       const m = meta[i];
-      const tt = (t * 0.4 + m.phase) % 1; // mote travels parent → child (subagent spawned outward)
-      curves[i].getPoint(tt, tmp);
-      dotPosAttr.setXYZ(i, tmp.x, tmp.y, tmp.z);
-
       // fade a link out in lockstep with whichever endpoint globe is shrinking
       // (imploding/gone). Live link (both endpoints alive) → factor 1 → unchanged.
       const factor = radarLinkFadeFactor(
@@ -590,104 +558,17 @@ function RadarLinks({
       );
       const l = i * stride;
       for (let k = 0; k < stride; k++) lineArr[l + k] = baseLine[l + k] * factor;
-      const d = i * 3;
-      for (let k = 0; k < 3; k++) dotArr[d + k] = baseDot[d + k] * factor;
     }
-    dotPosAttr.needsUpdate = true;
     lineColAttr.needsUpdate = true;
-    dotColAttr.needsUpdate = true;
-    if (lineMat.current) lineMat.current.opacity = 0.52 + Math.sin(t * 1.3) * 0.1;
+    if (lineMat.current) lineMat.current.opacity = 0.4 + Math.sin(t * 1.3) * 0.07;
   });
 
   if (links.length === 0) return null;
   return (
     <group>
       <lineSegments geometry={lineGeo}>
-        <lineBasicMaterial ref={lineMat} vertexColors transparent opacity={0.55} depthWrite={false} toneMapped={false} blending={THREE.AdditiveBlending} />
+        <lineBasicMaterial ref={lineMat} vertexColors transparent opacity={0.42} depthWrite={false} toneMapped={false} blending={THREE.AdditiveBlending} />
       </lineSegments>
-      <points geometry={dotGeo}>
-        <pointsMaterial
-          vertexColors
-          size={0.18}
-          map={dotTex}
-          transparent
-          opacity={0.95}
-          sizeAttenuation
-          depthWrite={false}
-          blending={THREE.AdditiveBlending}
-          toneMapped={false}
-        />
-      </points>
-    </group>
-  );
-}
-
-// The abacus RAIL RODS: one glowing horizontal filament per folder, so a
-// single-root folder reads as a rail the bead sits on, not a floating globe. Each
-// rail runs at its cluster's y from the folder-tag head (cluster.center.x) to the
-// right edge of that rail's rightmost ROOT bead. Mirrors RadarLinks' additive-glow
-// look (harness-tinted, additive, no depth write) but is deliberately subtle: a
-// bright thin CORE line over a wider fainter UNDERLAY strip, rendered UNDER the
-// beads so the globes stay dominant. xEnd is computed here from `nodes` (the layout
-// and the RadarCluster type are untouched).
-function RadarRails({ clusters, nodes }: { clusters: RadarCluster[]; nodes: LayoutNode[] }) {
-  const PAD = 0.3; // clearance past the rightmost root bead's surface
-  const rails = useMemo(() => {
-    const out: { key: string; color: string; y: number; xStart: number; xEnd: number }[] = [];
-    for (const c of clusters) {
-      const railY = c.center.y;
-      // This rail's root beads: depth 0 AND on this rail's y (the layout parks a
-      // root's own subtree below railY, so the y test isolates this rail's roots).
-      let xEnd = -Infinity;
-      for (const n of nodes) {
-        if (n.depth === 0 && Math.abs(n.position.y - railY) < 0.01) {
-          xEnd = Math.max(xEnd, n.position.x + n.radius);
-        }
-      }
-      if (!Number.isFinite(xEnd)) continue; // no root bead on this rail, so no rod
-      out.push({ key: c.key, color: radarHarness(c.harness).color, y: railY, xStart: c.center.x, xEnd: xEnd + PAD });
-    }
-    return out;
-  }, [clusters, nodes]);
-
-  if (rails.length === 0) return null;
-  return (
-    <group renderOrder={-1}>
-      {rails.map((r) => {
-        const len = Math.max(0.001, r.xEnd - r.xStart);
-        const mid = (r.xStart + r.xEnd) / 2;
-        return (
-          <group key={`rail-${r.key}`} position={[mid, r.y, 0]}>
-            {/* wider fainter underlay glow: a thin additive strip that gives the
-                rod visible width without a fat line (WebGL ignores line width). */}
-            <mesh renderOrder={-2}>
-              <planeGeometry args={[len, 0.16]} />
-              <meshBasicMaterial
-                color={r.color}
-                transparent
-                opacity={0.12}
-                depthWrite={false}
-                toneMapped={false}
-                blending={THREE.AdditiveBlending}
-                side={THREE.DoubleSide}
-              />
-            </mesh>
-            {/* bright thin core: the crisp centre line of the rail. */}
-            <mesh renderOrder={-1}>
-              <planeGeometry args={[len, 0.03]} />
-              <meshBasicMaterial
-                color={r.color}
-                transparent
-                opacity={0.5}
-                depthWrite={false}
-                toneMapped={false}
-                blending={THREE.AdditiveBlending}
-                side={THREE.DoubleSide}
-              />
-            </mesh>
-          </group>
-        );
-      })}
     </group>
   );
 }
@@ -791,37 +672,39 @@ function RadarHoverLayer({ node, suppressed }: { node: LayoutNode | null; suppre
   );
 }
 
-// Per-FOLDER constellation labels — the explicit "this is the WARDEN folder / the JB
-// Hunting folder" pinned under each cluster, mirroring the Habits hub labels. Colour
-// + glyph come from the cluster's dominant harness (color-blind a11y); the text is the
-// project folder. pointer-events off so it never steals the orbit camera or a globe click.
+// Per-FOLDER rail titles: a well-set title at each rail head naming the project that
+// rail belongs to. Right-aligned (via CSS) so the title ENDS just left of the first
+// bead and never stabs through the beads. A path label is split into a dim parent
+// prefix + a bright basename so the project name reads as the title; the harness glyph
+// is a small colour accent (colour + glyph + text = color-blind a11y). Click frames
+// the rail (onPick); the Html wrapper stays pass-through so it never eats a globe click.
 function RadarClusterLabels({ clusters, onPick }: { clusters: RadarCluster[]; onPick?: (key: string) => void }) {
   return (
     <>
       {clusters.map((c) => {
         const t = radarHarness(c.harness);
-        // Anchor the folder tag at the rail head (the abacus layout sets
-        // cluster.center to the left of the first bead on the rail's y), so each
-        // tag reads as that rail's folder name at its left edge. The tag itself is
-        // clickable (pointer-events on the inner pill only) and frames that rail via
-        // onPick; the Html wrapper stays pass-through so it never eats a globe click.
+        const parts = c.label.split('/').filter(Boolean);
+        const name = parts.length ? parts[parts.length - 1] : c.label;
+        const prefix = parts.length > 1 ? parts.slice(0, -1).join('/') + '/' : '';
         return (
           <Html
             key={`cluster-${c.key}`}
             position={[c.center.x, c.center.y, c.center.z]}
-            center
             zIndexRange={[6, 0]}
             style={{ pointerEvents: 'none' } as CSSProperties}
           >
             <div
-              className="wd-hub-label wd-folder-label"
+              className="wd-rail-title"
               style={{ '--harness': t.color, pointerEvents: onPick ? 'auto' : 'none', cursor: onPick ? 'pointer' : 'default' } as CSSProperties}
               onClick={onPick ? () => onPick(c.key) : undefined}
               role={onPick ? 'button' : undefined}
               title={onPick ? `Focus ${c.label}` : undefined}
             >
-              <span className="wd-hub-label-glyph" aria-hidden="true">{t.glyph}</span>
-              {c.label}
+              <span className="wd-rail-title-glyph" aria-hidden="true">{t.glyph}</span>
+              <span className="wd-rail-title-text">
+                {prefix ? <span className="wd-rail-title-prefix">{prefix}</span> : null}
+                <span className="wd-rail-title-name">{name}</span>
+              </span>
             </div>
           </Html>
         );
@@ -911,8 +794,7 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
       {/* The whole forest folds as one on a tab swap (Transition.tsx). */}
       <FoldGroup scaleRef={sref}>
         <group onPointerMissed={onClear}>
-          {/* rail rods under everything: the beads sit ON these filaments */}
-          <RadarRails clusters={layout.clusters} nodes={layout.nodes} />
+          {/* the ONLY linking cue: a subtle parent -> child tether per subagent */}
           <RadarLinks layout={layout} lifecycleRef={lifecycleRef} goneIdsRef={goneIdsRef} />
           {renderNodes.map((node) => (
             <RadarGlobe

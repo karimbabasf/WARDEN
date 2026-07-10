@@ -67,6 +67,7 @@ describe('RadarHoverCard — quick-glance fields', () => {
     expect(text).toContain('Curie'); // label
     expect(text).toContain('gpt-5-codex'); // model
     expect(text).toContain('72%'); // fillPct → percent
+    expect(text).toContain('144k / 200k'); // live token occupancy of the window, not just the %
     expect(text).toContain('2 children'); // childCount, pluralised
     expect(text).toMatch(/working/i); // status
     expect(text).toContain('▣'); // codex harness glyph (radarTheme)
@@ -90,5 +91,11 @@ describe('RadarHoverCard — quick-glance fields', () => {
     expect(text).toContain('0%');
     // no-children agents must not fabricate a roster line; child line omitted.
     expect(text).not.toContain('children');
+  });
+
+  it('shows the raw token count when the model window is unknown', () => {
+    const el = render(<RadarHoverCard agent={agentFixture({ maxTokens: 0, fillPct: 0 })} />);
+    const text = el.textContent ?? '';
+    expect(text).toContain('144k tokens'); // honest occupancy even with no window to take a % of
   });
 });

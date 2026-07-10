@@ -35,13 +35,15 @@ export type RadarCluster = {
 /** `OrbLayout` plus the per-folder cluster metadata the radar label layer reads. */
 export type RadarLayout = OrbLayout & { clusters: RadarCluster[] };
 
-// Depth boost: a main planet is biggest; each level down is meaningfully smaller.
+// Hierarchy is read as SIZE: a main planet is biggest, and every level down is a
+// FIXED FRACTION of it, so a subagent can never masquerade as a root (its load can
+// grow it within its own tier, never past its parent's tier).
 // (Index past the table clamps to the last, deepest value.)
-const DEPTH_BOOST = [0.62, 0.3, 0.16, 0.1];
+const DEPTH_SCALE = [1, 0.55, 0.4, 0.3];
 
-function depthBoost(depth: number): number {
+function depthScale(depth: number): number {
   const d = Math.max(0, Math.floor(depth));
-  return DEPTH_BOOST[Math.min(d, DEPTH_BOOST.length - 1)];
+  return DEPTH_SCALE[Math.min(d, DEPTH_SCALE.length - 1)];
 }
 
 /**
@@ -70,9 +72,11 @@ export function isFlatAgent(agent: RadarAgent): boolean {
  */
 export function radarRadius(contextTokens: number, depth: number): number {
   const tokens = Math.max(0, Number.isFinite(contextTokens) ? contextTokens : 0);
-  // √-scaled occupancy term, capped. √200k ≈ 447, so /900 keeps the cap reachable.
-  const occupancy = Math.min(0.6, Math.sqrt(tokens) / 900);
-  return 0.34 + occupancy + depthBoost(depth);
+  // √-scaled occupancy term, capped. √200k ≈ 447, so /1000 keeps the cap reachable.
+  // The whole radius is then scaled DOWN per depth, so a subagent reads as a clear
+  // fraction of its parent regardless of how much context it is carrying.
+  const occupancy = Math.min(0.5, Math.sqrt(tokens) / 1000);
+  return (0.4 + occupancy) * depthScale(depth);
 }
 
 function makeNode(agent: RadarAgent, position: Vec3): LayoutNode {
@@ -132,10 +136,10 @@ export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
   const links: OrbLink[] = [];
 
   // abacus rails: one horizontal rail per folder, stacked top to bottom
-  const RAIL_GAP = 3.2; // base vertical space below a rail (before depth adjust)
-  const ROW_STEP = 1.5; // vertical drop per subagent depth level
-  const BEAD_GAP = 1.6; // min horizontal space after a root bead
-  const SIB_GAP = 1.0; // min horizontal space between sibling subagents
+  const RAIL_GAP = 4.2; // generous vertical air between rails (before depth adjust)
+  const ROW_STEP = 2.3; // vertical drop per subagent level: clears parent + child radii
+  const BEAD_GAP = 2.0; // horizontal room after a root bead / before the rail title
+  const SIB_GAP = 1.1; // min horizontal space between sibling subagents
 
   const folderKey = (r: RadarAgent): string => {
     const dir = r.cwd?.trim();

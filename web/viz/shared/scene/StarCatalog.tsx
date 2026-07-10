@@ -39,10 +39,17 @@ const COLOR_CORAL = new THREE.Color('#ff7d50'); // Claude tint (rare)
 const COLOR_TEAL = new THREE.Color('#2de2c0'); // Codex tint (rare)
 const _scratch = new THREE.Color();
 
+// Hard cap on a star's on-screen size (CSS px, before DPR). The 1/z size law below
+// balloons any star that drifts near the camera into a big soft blob (the "falling
+// snowflakes"); clamp it so the sky always reads as fine dust. Far/mid stars already
+// rasterize well under this, so the tiny twinkling field is left untouched.
+const MAX_STAR_PX = 2.2;
+
 const STAR_VERT = /* glsl */ `
   uniform float uTime;
   uniform float uPixelRatio;
   uniform float uSizeScale;
+  uniform float uMaxSize;
   uniform float uTwinkleAmp;
   attribute float aSize;
   attribute float aPhase;
@@ -56,8 +63,9 @@ const STAR_VERT = /* glsl */ `
     float tw = 1.0 - uTwinkleAmp + uTwinkleAmp * (0.5 + 0.5 * sin(uTime * aTwinkle + aPhase));
     vAlpha = tw;
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    // distance attenuation so far shells stay genuinely tiny
-    gl_PointSize = aSize * uSizeScale * uPixelRatio * (1.0 / -mv.z);
+    // distance attenuation so far shells stay genuinely tiny, then a hard cap so a
+    // star drifting close to the camera can never balloon into a big soft blob.
+    gl_PointSize = min(aSize * uSizeScale * uPixelRatio * (1.0 / -mv.z), uMaxSize);
     gl_Position = projectionMatrix * mv;
   }
 `;
@@ -154,6 +162,7 @@ function StarLayer({ spec, motion }: { spec: LayerSpec; motion: boolean }) {
           uTime: { value: 0 },
           uPixelRatio: { value: pixelRatio },
           uSizeScale: { value: spec.sizeScale },
+          uMaxSize: { value: MAX_STAR_PX * pixelRatio },
           uOpacity: { value: spec.opacity },
           uTwinkleAmp: { value: motion ? 0.45 : 0.12 },
         },

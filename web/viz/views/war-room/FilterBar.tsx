@@ -49,10 +49,8 @@ export function FilterBar({
 
   return (
     <div className="wd-filterbar" role="group" aria-label="Emphasis filter">
-      <span className="wd-legend-key wd-filterbar-lead">filter</span>
       {tab === 'habits' && (
-        <div className="wd-legend-group" aria-label="severity">
-          <span className="wd-legend-key">severity</span>
+        <>
           {SEVERITY_CHIPS.map((c) => {
             const active = isSeverityActive(filter, c.bucket);
             const next: EmphasisFilter = active ? null : { kind: 'severity', bucket: c.bucket };
@@ -63,42 +61,38 @@ export function FilterBar({
                 className={`wd-chip wd-chip-sev${active ? ' is-active' : ''}`}
                 aria-pressed={active}
                 aria-label={`${active ? 'Clear' : 'Show only'} ${c.label} severity habits`}
-                title={`${c.label} severity${active ? ' (active — click to clear)' : ''}`}
+                title={`${c.label} severity${active ? ' (active, click to clear)' : ''}`}
                 onClick={() => onFilter(next)}
                 style={{ '--chip': severityColor(c.sev) } as CSSProperties}
               >
-                <span className="wd-chip-swatch" aria-hidden="true" />
                 <span className="wd-chip-glyph" aria-hidden="true">{c.glyph}</span>
                 <span className="wd-chip-label">{c.label}</span>
               </button>
             );
           })}
-        </div>
+          <span className="wd-filter-div" aria-hidden="true" />
+        </>
       )}
-      <div className="wd-legend-group" aria-label="harness">
-        <span className="wd-legend-key">harness</span>
-        {harnesses.map((a) => {
-          const t = harnessTheme(a.harness);
-          const active = isHarnessActive(filter, a.harness);
-          const next: EmphasisFilter = active ? null : { kind: 'harness', harness: a.harness };
-          return (
-            <button
-              type="button"
-              key={a.harness}
-              className={`wd-chip wd-chip-harness${active ? ' is-active' : ''}`}
-              aria-pressed={active}
-              aria-label={`${active ? 'Clear' : 'Show only'} ${t.label} agents`}
-              title={`${t.label}${active ? ' (active — click to clear)' : ''}`}
-              onClick={() => onFilter(next)}
-              style={{ '--chip': t.color } as CSSProperties}
-            >
-              <span className="wd-chip-swatch" aria-hidden="true" />
-              <span className="wd-chip-glyph" aria-hidden="true">{t.glyph}</span>
-              <span className="wd-chip-label">{t.label}</span>
-            </button>
-          );
-        })}
-      </div>
+      {harnesses.map((a) => {
+        const t = harnessTheme(a.harness);
+        const active = isHarnessActive(filter, a.harness);
+        const next: EmphasisFilter = active ? null : { kind: 'harness', harness: a.harness };
+        return (
+          <button
+            type="button"
+            key={a.harness}
+            className={`wd-chip wd-chip-harness${active ? ' is-active' : ''}`}
+            aria-pressed={active}
+            aria-label={`${active ? 'Clear' : 'Show only'} ${t.label} agents`}
+            title={`${t.label}${active ? ' (active, click to clear)' : ''}`}
+            onClick={() => onFilter(next)}
+            style={{ '--chip': t.color } as CSSProperties}
+          >
+            <span className="wd-chip-glyph" aria-hidden="true">{t.glyph}</span>
+            <span className="wd-chip-label">{t.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -312,30 +312,30 @@ html, body {
   -webkit-box-orient: vertical;
 }
 
-/* ── filter bar (bottom-centre — replaces the removed StatusDeck) ───────────*/
+/* ── filter bar (dead-centre bottom — a modern segmented dock) ──────────────*/
 .wd-filterbar {
   position: absolute;
   left: 50%;
-  bottom: 18px;
+  bottom: 22px;
   transform: translateX(-50%);
   z-index: var(--z-deck);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 6px 14px;
+  gap: 4px;
   max-width: min(92vw, 900px);
-  padding: 8px 16px;
-  border-radius: 12px;
+  padding: 6px;
+  border-radius: 15px;
   background: var(--panel-strong);
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(118, 255, 157, 0.05);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  border: 1px solid var(--hair);
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(118, 255, 157, 0.05);
+  backdrop-filter: blur(16px) saturate(1.1);
+  -webkit-backdrop-filter: blur(16px) saturate(1.1);
   color: var(--ink-soft);
-  animation: wd-fade-up 600ms ease both;
+  animation: wd-fade-up 500ms ease both;
 }
-.wd-filterbar-lead { color: var(--ink-faint); letter-spacing: 0.18em; }
+.wd-filter-div { width: 1px; align-self: stretch; margin: 3px 4px; background: var(--hair); }
 .wd-legend-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .wd-legend-item { display: inline-flex; align-items: center; gap: 6px; }
 .wd-legend-glyph { font-size: 13px; line-height: 1; filter: drop-shadow(0 0 6px currentColor); }
@@ -360,6 +360,41 @@ html, body {
   user-select: none;
 }
 .wd-hub-label-glyph { filter: drop-shadow(0 0 6px var(--harness, var(--green))); }
+
+/* ── rail title (3D-anchored at each folder rail head, radar board) ─────────
+   A properly-set title, not a tiny tag: bright basename, dim path prefix, a small
+   harness-hue glyph. Right-aligned to the anchor so it ends just left of the first
+   bead and never runs through the beads (drei <Html> is NOT `center`-anchored). */
+.wd-rail-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 9px;
+  transform: translate(-100%, -50%);
+  white-space: nowrap;
+  font-family: var(--mono);
+  user-select: none;
+}
+.wd-rail-title-glyph {
+  font-size: 12px;
+  color: var(--harness, var(--green));
+  filter: drop-shadow(0 0 7px var(--harness, var(--green)));
+  transform: translateY(-1px);
+}
+.wd-rail-title-text { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; }
+.wd-rail-title-prefix {
+  font-size: 11px;
+  letter-spacing: 0.01em;
+  color: var(--ink-faint);
+  opacity: 0.75;
+}
+.wd-rail-title-name {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--harness, var(--green)) 28%, transparent), 0 0 3px rgba(0, 0, 0, 0.9);
+}
+.wd-rail-title[role="button"]:hover .wd-rail-title-name { color: #ffffff; }
 
 /* ── inspector (right dock): hover preview + selected detail ───────────────*/
 .wd-inspector {
@@ -738,30 +773,6 @@ html, body {
   box-shadow: 0 0 9px rgba(184, 255, 107, 0.5);
 }
 
-/* radar fit-to-overview chip: bottom-right pill (sits where the ledger toggle is
-   on Habits; the ledger is hidden on the radar tab so they never overlap). */
-.wd-fit-chip {
-  position: absolute;
-  right: var(--side-margin);
-  bottom: 18px;
-  z-index: var(--z-deck);
-  pointer-events: auto;
-  padding: 6px 12px;
-  border-radius: 10px;
-  background: var(--panel-strong);
-  border: 1px solid var(--hair);
-  color: var(--ink-soft);
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  cursor: pointer;
-  backdrop-filter: blur(11px);
-  -webkit-backdrop-filter: blur(11px);
-  transition: color 160ms ease, border-color 160ms ease;
-}
-.wd-fit-chip:hover { color: var(--green); border-color: var(--hair-bright); }
-
 .wd-ledger-dock {
   position: absolute;
   right: var(--side-margin);
@@ -865,6 +876,7 @@ html, body {
   margin: 10px 0 0;
 }
 .wd-radar-card-stats > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wd-radar-card-stats > .wd-radar-card-context { grid-column: 1 / -1; }
 .wd-radar-card-stats dt {
   font-size: 9px;
   letter-spacing: 0.14em;
@@ -1198,9 +1210,8 @@ html, body {
     gap: 4px 8px;
     max-width: calc(100vw - 24px);
   }
-  .wd-legend-group { gap: 4px 8px; }
   /* chips go smaller */
-  .wd-chip { font-size: 9px; padding: 2px 6px 2px 4px; }
+  .wd-chip { font-size: 10px; padding: 5px 10px; }
   .wd-console { width: calc(100vw - 24px); bottom: 12px; }
   /* ledger toggle steps above the filter bar; the dock goes full-width */
   .wd-ledger-toggle { bottom: 52px; padding: 6px 10px; }
@@ -1210,65 +1221,49 @@ html, body {
   /* window controls remain fixed size — no change needed */
 }
 
-/* Very small — if width drops below 540px, collapse legend entirely */
+/* Very small — if width drops below 540px, collapse the filter entirely */
 @media (max-width: 540px) {
   .wd-filterbar { display: none; }
-  .wd-nav-mark { display: none; } /* hide the WARDEN sigil in the nav to save space */
 }
 
 /* ── Top constellation switcher (Habits | Radar) ──────────────────────────────
-   A flight-deck instrument, not a toggle: dim siblings, the active view lit
-   acid-green with a scanning radar-sweep underline + a live count chip. */
+   A clean segmented toggle: two calm tabs, the active one lifted into a soft
+   phosphor pill with a muted live-count chip. No sweep, no shouting. */
 .wd-nav {
   position: fixed;
-  top: 16px;
+  top: 18px;
   left: 50%;
   transform: translateX(-50%);
   z-index: var(--z-nav);
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 5px 8px 5px 12px;
-  border-radius: 13px;
-  background: var(--panel);
+  gap: 4px;
+  padding: 5px;
+  border-radius: 15px;
+  background: var(--panel-strong);
   border: 1px solid var(--hair);
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(118, 255, 157, 0.06);
-  backdrop-filter: blur(11px) saturate(1.1);
-  -webkit-backdrop-filter: blur(11px) saturate(1.1);
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(118, 255, 157, 0.05);
+  backdrop-filter: blur(16px) saturate(1.1);
+  -webkit-backdrop-filter: blur(16px) saturate(1.1);
   font-family: var(--mono);
-}
-.wd-nav-mark {
-  color: var(--acid);
-  font-size: 11px;
-  opacity: 0.7;
-  margin-right: 4px;
-  text-shadow: 0 0 10px rgba(184, 255, 107, 0.5);
-}
-.wd-nav-div {
-  width: 1px;
-  height: 16px;
-  background: var(--hair);
-  margin: 0 2px;
 }
 .wd-nav-tab {
   position: relative;
   appearance: none;
   cursor: pointer;
-  border: none;
+  border: 1px solid transparent;
   background: transparent;
-  border-radius: 9px;
-  padding: 8px 18px 10px;
+  border-radius: 11px;
+  padding: 8px 18px;
   display: inline-flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 9px;
   font-family: inherit;
-  font-size: 11px;
-  letter-spacing: 0.26em;
-  text-transform: uppercase;
-  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  font-weight: 500;
   color: var(--ink-faint);
-  transition: color 200ms ease, background 200ms ease;
-  overflow: hidden;
+  transition: color 180ms ease, background 180ms ease, border-color 180ms ease;
 }
 .wd-nav-tab:hover {
   color: var(--ink-soft);
@@ -1279,56 +1274,27 @@ html, body {
   outline-offset: 2px;
 }
 .wd-nav-tab.is-active {
-  color: var(--acid);
-  text-shadow: 0 0 13px rgba(184, 255, 107, 0.55);
+  color: var(--ink);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+  border-color: color-mix(in srgb, var(--green) 32%, transparent);
 }
 .wd-nav-count {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  padding: 1px 6px 0;
+  letter-spacing: 0;
+  min-width: 18px;
+  text-align: center;
+  padding: 1px 6px;
   border-radius: 999px;
-  color: var(--ink-soft);
-  background: rgba(118, 255, 157, 0.1);
-  border: 1px solid var(--hair);
-  transform: translateY(-1px);
+  color: var(--ink-faint);
+  background: rgba(118, 255, 157, 0.08);
 }
 .wd-nav-tab.is-active .wd-nav-count {
-  color: var(--bg);
-  background: var(--acid);
-  border-color: transparent;
-  box-shadow: 0 0 11px rgba(184, 255, 107, 0.5);
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 20%, transparent);
 }
 .wd-nav-count.is-zero {
-  opacity: 0.45;
-}
-/* radar-sweep underline — a scanning band that traces the active tab */
-.wd-nav-sweep {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 4px;
-  height: 1.5px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, transparent 0%, var(--acid) 50%, transparent 100%);
-  background-size: 55% 100%;
-  background-repeat: no-repeat;
-  opacity: 0;
-}
-.wd-nav-tab.is-active .wd-nav-sweep {
-  opacity: 0.9;
-  animation: wd-nav-sweep 2.8s ease-in-out infinite;
-}
-@keyframes wd-nav-sweep {
-  0% { background-position: -30% 0; }
-  100% { background-position: 130% 0; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .wd-nav-tab.is-active .wd-nav-sweep {
-    animation: none;
-    opacity: 0.6;
-    background-position: 50% 0;
-  }
+  opacity: 0.4;
 }
 
 /* ── radar empty state — live, watching, nothing running yet ─────────────────── */
@@ -1384,59 +1350,45 @@ html, body {
 .wd-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 8px 3px 5px;
-  border-radius: 999px;
-  border: 1px solid var(--hair);
-  background: rgba(118, 255, 157, 0.04);
-  color: var(--ink-soft);
+  gap: 7px;
+  padding: 6px 13px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-faint);
   font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.10em;
-  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.02em;
   cursor: pointer;
   user-select: none;
-  opacity: 0.72;
-  transition: background 160ms ease, border-color 160ms ease, opacity 160ms ease, box-shadow 160ms ease;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
 }
 .wd-chip:hover {
-  opacity: 1;
-  background: color-mix(in srgb, var(--chip, var(--green)) 10%, transparent);
-  border-color: color-mix(in srgb, var(--chip, var(--green)) 42%, transparent);
+  color: var(--ink);
+  background: rgba(118, 255, 157, 0.05);
 }
 .wd-chip:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--hair-bright);
 }
 .wd-chip.is-active {
-  opacity: 1;
-  background: color-mix(in srgb, var(--chip, var(--green)) 14%, transparent);
-  border-color: color-mix(in srgb, var(--chip, var(--green)) 60%, transparent);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--chip, var(--green)) 25%, transparent);
   color: var(--ink);
+  background: color-mix(in srgb, var(--chip, var(--green)) 16%, transparent);
+  border-color: color-mix(in srgb, var(--chip, var(--green)) 42%, transparent);
 }
 .wd-chip.is-active:focus-visible {
-  box-shadow: 0 0 0 2px var(--hair-bright),
-              0 0 10px color-mix(in srgb, var(--chip, var(--green)) 25%, transparent);
+  box-shadow: 0 0 0 2px var(--hair-bright);
 }
 
-/* severity-chip accent — red → amber → warn → acid → green gradient mapped via --chip */
+/* severity/harness chips carry their accent purely via the inline --chip colour */
 .wd-chip-sev { /* no extra rules needed; inherits .wd-chip with --chip set inline */ }
 .wd-chip-harness { /* likewise */ }
 
-.wd-chip-swatch {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  background: var(--chip, var(--green));
-  box-shadow: 0 0 6px color-mix(in srgb, var(--chip, var(--green)) 55%, transparent);
-  flex: none;
-}
 .wd-chip-glyph {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
   color: var(--chip, var(--green));
-  filter: drop-shadow(0 0 5px var(--chip, var(--green)));
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--chip, var(--green)) 70%, transparent));
   flex: none;
 }
 .wd-chip-label {

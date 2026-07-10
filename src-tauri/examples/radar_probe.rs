@@ -5,6 +5,7 @@
 //!   cp ~/.warden/warden.db /tmp/warden_probe.db
 //!   WARDEN_DB_PATH=/tmp/warden_probe.db cargo run --example radar_probe
 
+use std::path::PathBuf;
 use warden_lib::radar::liveness::{pid_alive, read_claude_registry};
 use warden_lib::radar::recompute_radar_state;
 use warden_lib::store::Store;
@@ -37,9 +38,16 @@ fn main() {
     // Dump the EXACT bytes the `get_radar_state` IPC command returns, so a throwaway
     // browser harness can render the real forest through the real normalize seam.
     let json = serde_json::to_string_pretty(&state).expect("serialize radar state");
-    let out = "/Users/karimbaba/WARDEN/src/viz/preview/realRadar.json";
-    std::fs::write(out, &json).expect("write realRadar.json");
-    eprintln!("wrote {} ({} bytes)", out, json.len());
+    let out = std::env::var_os("WARDEN_RADAR_PROBE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/viz/dev/preview/realRadar.json")
+        });
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).expect("create realRadar.json parent");
+    }
+    std::fs::write(&out, &json).expect("write realRadar.json");
+    eprintln!("wrote {} ({} bytes)", out.display(), json.len());
 
     println!("\ngenerated_at = {}", state.generated_at);
     println!("RADAR AGENTS (globes) = {}", state.agents.len());

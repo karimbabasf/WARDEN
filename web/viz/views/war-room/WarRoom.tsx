@@ -885,19 +885,10 @@ export function WarRoom({ bridge, forceIntro }: { bridge: Bridge; forceIntro?: b
           dock now — it replaced the removed StatusDeck). */}
       <FilterBar tab={tab} model={chromeModel} filter={emphasisFilter} onFilter={onFilter} />
 
-      {/* Radar fit-to-overview chip (bottom-right, where the ledger used to sit).
-          Eases the locked camera back to the whole-board overview. Same gesture as
-          Escape and clicking empty space. */}
-      {displayTab === 'radar' ? (
-        <button
-          type="button"
-          className="wd-fit-chip"
-          title="Fit to overview"
-          onClick={() => setHomeSignal((s) => s + 1)}
-        >
-          ⤢ fit
-        </button>
-      ) : null}
+      {/* No fit control: the radar board auto-fits. CameraRig re-frames the whole
+          board whenever its bounds change materially (agents arriving/leaving), so
+          everything stays in view without a button. Escape / empty-click still nudge
+          it home for a manual reset. */}
 
       {/* Chrome is the Habits inspector (keys off node.issue/agent). On the radar
           tab the live selection flows to RadarSceneBody via selectedId; the radar

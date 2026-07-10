@@ -13,7 +13,7 @@
 
 import type { CSSProperties } from 'react';
 import type { RadarAgent } from '@/viz/shared/types/radarTypes';
-import { radarSubtitle } from '@/viz/shared/types/radarTypes';
+import { radarSubtitle, formatTokens } from '@/viz/shared/types/radarTypes';
 import { radarHarness } from './radarTheme';
 
 /** Human status words (the `working|idle|closed|terminated` enum is terse; spell it for glance). */
@@ -39,6 +39,12 @@ export function RadarHoverCard({ agent }: { agent: RadarAgent }) {
   const label = agent.label || agent.nickname || agent.id;
   const subtitle = radarSubtitle(agent);
   const children = childLine(agent.childCount);
+  // Show the live token occupancy, not just the percent: "128k / 200k (64%)" when the
+  // model window is known, else the raw count ("128k tokens") when it isn't.
+  const context =
+    agent.maxTokens > 0
+      ? `${formatTokens(agent.contextTokens)} / ${formatTokens(agent.maxTokens)} (${pct(agent.fillPct)})`
+      : `${formatTokens(agent.contextTokens)} tokens`;
 
   return (
     <div
@@ -58,13 +64,13 @@ export function RadarHoverCard({ agent }: { agent: RadarAgent }) {
       {subtitle ? <div className="wd-card-sub">{subtitle}</div> : null}
 
       <dl className="wd-radar-card-stats">
+        <div className="wd-radar-card-context">
+          <dt>Context</dt>
+          <dd>{context}</dd>
+        </div>
         <div>
           <dt>Model</dt>
           <dd>{agent.model ?? '—'}</dd>
-        </div>
-        <div>
-          <dt>Context</dt>
-          <dd>{pct(agent.fillPct)}</dd>
         </div>
         <div>
           <dt>Status</dt>

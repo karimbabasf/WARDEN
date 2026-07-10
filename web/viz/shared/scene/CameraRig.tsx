@@ -37,6 +37,11 @@ const MAX_DIST_BASE = 24; // floor — small scenes keep the original cosy range
 const DEFAULT_FAR = 140;
 const FOV_FALLBACK = 46; // matches the <Canvas camera> fov in WarRoom.
 
+// Overview framing fill: how much of the frame the whole forest fills at rest. The
+// locked radar board frames a touch tighter than Habits so the beads read larger.
+const OVERVIEW_FILL = 0.5;
+const LOCKED_OVERVIEW_FILL = 0.72;
+
 // FOV taper (orbit only): ease the lens from FOV_FAR toward FOV_NEAR on close
 // approach to counteract wide-angle fisheye.
 const FOV_FAR = 46;
@@ -108,7 +113,7 @@ export function CameraRig({
       };
     }
     const r = sceneBounds.radius;
-    const overviewDist = frameDistance(r, FOV_FALLBACK, 0.5);
+    const overviewDist = frameDistance(r, FOV_FALLBACK, locked ? LOCKED_OVERVIEW_FILL : OVERVIEW_FILL);
     const maxDist = Math.min(1400, Math.max(MAX_DIST_BASE, overviewDist * 1.35));
     const far = Math.min(4000, Math.max(DEFAULT_FAR, (maxDist + r) * 1.3));
     return {
@@ -118,7 +123,7 @@ export function CameraRig({
       maxDist,
       far,
     };
-  }, [sceneBounds]);
+  }, [sceneBounds, locked]);
   // Latest-value ref so the [selected]/[focusBounds]/[homeSignal] effects and the
   // frame loop read current limits WITHOUT taking sceneBounds as a dependency
   // (which would re-fire the cinematic moves on every layout tick).
@@ -252,6 +257,26 @@ export function CameraRig({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [homeSignal]);
 
+  // --- Auto-fit (locked radar board only): keep the whole board framed as agents
+  // arrive and leave. Fires ONLY when the framed bounds change MATERIALLY (a rounded
+  // signature of centre + radius), so a steady scene never fights the user's wheel
+  // dolly, but a new agent that grows or shrinks the board eases the overview back to
+  // fit. Skipped while a bead is selected or a subtree is focused so it never yanks
+  // the view mid-inspection; on back-out the deselect path reframes to the fresh board.
+  const lastFitSig = useRef<string | null>(null);
+  useEffect(() => {
+    if (!locked || selected || focusBounds) return;
+    const f = fitRef.current;
+    const sig = `${f.center.x.toFixed(1)},${f.center.y.toFixed(1)},${f.center.z.toFixed(1)}:${f.radius.toFixed(1)}`;
+    if (sig === lastFitSig.current) return;
+    lastFitSig.current = sig;
+    writeOverviewPose(targetGoal.current, posGoal.current);
+    homeTarget.current.copy(targetGoal.current);
+    homePos.current = new THREE.Vector3().copy(posGoal.current);
+    beginFly();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fit, locked, selected, focusBounds]);
+
   useFrame((_, dtRaw) => {
     const c = controls.current;
     if (!c) return; // controls not mounted yet on the very first frame.
@@ -305,7 +330,9 @@ export function CameraRig({
       enableDamping
       dampingFactor={0.15}
       rotateSpeed={0.95}
-      zoomSpeed={1.0}
+      // Wheel/trackpad dolly was too twitchy at the default 1.0; calm it so a scroll
+      // nudges the zoom rather than lurching it.
+      zoomSpeed={0.6}
       // Board is locked: no rotate, no pan; the wheel still dollies toward the
       // cursor. Habits keeps the uncaged rig (rotate + pan).
       enableRotate={!locked}

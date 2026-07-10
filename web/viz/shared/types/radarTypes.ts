@@ -96,6 +96,14 @@ export function shortModel(m: string | null): string | null {
   return m;
 }
 
+/** Compact token magnitude for glance UIs: 172000 → "172k", 9_400_000 → "9.4M", 940 → "940". */
+export function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+  return String(Math.round(n));
+}
+
 /**
  * The secondary "folder · model" identity line shown under an agent's name. Only
  * meaningful when the folder ADDS information beyond the label — i.e. the label is
