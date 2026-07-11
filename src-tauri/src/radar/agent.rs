@@ -184,13 +184,21 @@ pub(crate) fn recent_activity(
     });
     for (_, e) in ordered {
         let (kind, label) = match &e.event {
-            // The "what is it doing" signal: name the file touched / command run, not
-            // just the bare tool name.
-            Event::ToolCall { tool, input, .. } => ("tool", tool_activity_label(tool, input)),
+            // The "what is it doing" signal: name the file touched / command run, and
+            // classify it (read / write / search / run) so the feed is not a wall of
+            // identical "tool" rows.
+            Event::ToolCall { tool, input, .. } => match tool_activity(tool, input) {
+                Some(kl) => kl,
+                // Deduped: a Codex apply_patch is shown as its FileSnapshot write below.
+                None => continue,
+            },
+            // File writes: Codex `patch_apply_end` and Claude edits arrive here as real
+            // paths. Previously dropped (no "writing files" ever showed on the radar).
+            Event::FileSnapshot { files } => ("write", file_snapshot_label(files)),
             Event::AssistantText { text } => ("message", crate::util::truncate_chars(text, 80)),
             Event::UserPrompt { text, .. } => ("message", crate::util::truncate_chars(text, 80)),
             Event::Thinking { .. } => ("thinking", "thinking".to_string()),
-            // ToolResult (and the rest) is not a distinct action — its bare
+            // ToolResult (and the rest) is not a distinct action; its bare
             // `result <call_id>` row was pure noise, so it is dropped here.
             _ => continue,
         };
@@ -203,12 +211,99 @@ pub(crate) fn recent_activity(
     out
 }
 
-/// A target-rich activity label for a tool call: the file it touches or the command
-/// it runs, prefixed by a compact tool name — e.g. `Read orbLayout.ts`,
-/// `Bash cargo test`, `exec_command cargo build`. Falls back to the tool name alone
-/// when the input carries no obvious target. Mirrors the real `Event::ToolCall.input`
-/// shapes for Claude (`file_path`/`command`/`pattern`) and Codex (`cmd`).
-fn tool_activity_label(tool: &str, input: &serde_json::Value) -> String {
+/// Classify a tool call into `(kind, label)`. Codex funnels every action through the
+/// `exec` meta-tool, so the real action lives in the normalized input (`cmd` for a shell
+/// command, `codex_tool` for an inner tool like `web__run`); a named tool (Claude
+/// built-ins, MCP) classifies by its name. Returns `None` to drop a row another event
+/// already represents (a Codex `apply_patch`, surfaced by its `FileSnapshot`).
+fn tool_activity(tool: &str, input: &serde_json::Value) -> Option<(&'static str, String)> {
+    if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
+        return classify_shell_command(cmd);
+    }
+    if let Some(inner) = input.get("codex_tool").and_then(|v| v.as_str()) {
+        return classify_codex_inner_tool(inner);
+    }
+    Some(classify_named_tool(tool, input))
+}
+
+/// Classify a shell command (Codex `exec`) by its leading program into a read / search /
+/// write / run kind, keeping the literal command as the label so the feed shows exactly
+/// what ran. Returns `None` for `apply_patch` (its write is surfaced by the FileSnapshot).
+fn classify_shell_command(cmd: &str) -> Option<(&'static str, String)> {
+    let cmd = cmd.trim();
+    let verb = shell_verb(cmd);
+    if verb == "apply_patch" {
+        return None;
+    }
+    let kind = match verb.as_str() {
+        "cat" | "bat" | "head" | "tail" | "less" | "more" | "nl" | "view" => "read",
+        "sed" if !cmd.contains(" -i") => "read",
+        "grep" | "rg" | "ag" | "ack" | "find" | "fd" | "ls" | "tree" => "search",
+        "tee" | "touch" | "mkdir" | "mv" | "cp" | "rm" | "chmod" | "dd" => "write",
+        _ => "run",
+    };
+    Some((kind, crate::util::truncate_chars(cmd, 72)))
+}
+
+/// The invoked program of a shell command: skip leading `NAME=value` env assignments and
+/// common wrappers (`sudo`, `env`, `time`, `command`), then take the program and strip any
+/// directory prefix.
+fn shell_verb(cmd: &str) -> String {
+    for tok in cmd.split_whitespace() {
+        if tok == "sudo" || tok == "env" || tok == "time" || tok == "command" {
+            continue;
+        }
+        if tok.contains('=') && !tok.starts_with('-') && !tok.contains('/') {
+            continue; // FOO=bar env assignment
+        }
+        return tok.rsplit('/').next().unwrap_or(tok).to_string();
+    }
+    String::new()
+}
+
+/// Classify a Codex inner tool (the JS `tools.<name>(...)` behind an `exec`). `apply_patch`
+/// returns `None`: its write is surfaced by the FileSnapshot, so the row would be a dup.
+/// Web browsing is a search, a bare `exec_command` (dynamic command) is a run, and any
+/// other inner tool (MCP, playwright, update_plan) is a generic tool named after it.
+fn classify_codex_inner_tool(inner: &str) -> Option<(&'static str, String)> {
+    match inner {
+        "apply_patch" => None,
+        "web__run" | "web_search" => Some(("search", "web search".to_string())),
+        "exec_command" => Some(("run", "exec_command".to_string())),
+        other => Some(("tool", short_tool_name(other))),
+    }
+}
+
+/// Classify a named tool call (Claude built-ins, MCP) by tool name, with a target-rich
+/// label (the file it touches or the command it runs).
+fn classify_named_tool(tool: &str, input: &serde_json::Value) -> (&'static str, String) {
+    let kind = match tool {
+        "Read" | "NotebookRead" => "read",
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "write",
+        "Grep" | "Glob" | "LS" => "search",
+        "Bash" | "BashOutput" => "run",
+        _ => "tool",
+    };
+    (kind, tool_target_label(tool, input))
+}
+
+/// A short label for a file-write snapshot: the edited file, plus a count when several
+/// files changed in one apply.
+fn file_snapshot_label(files: &[crate::ir::FileEdit]) -> String {
+    match files {
+        [] => "edit files".to_string(),
+        [one] => format!("Edit {}", path_basename(&one.path)),
+        [first, rest @ ..] => {
+            format!("Edit {} (+{} more)", path_basename(&first.path), rest.len())
+        }
+    }
+}
+
+/// A target-rich label for a named tool call: the file it touches or the command it runs,
+/// prefixed by a compact tool name (e.g. `Read orbLayout.ts`, `Bash cargo test`). Falls
+/// back to the tool name alone when the input carries no obvious target. Mirrors the real
+/// `Event::ToolCall.input` shapes for Claude (`file_path`/`command`/`pattern`).
+fn tool_target_label(tool: &str, input: &serde_json::Value) -> String {
     let s = |k: &str| input.get(k).and_then(|v| v.as_str());
     let short = short_tool_name(tool);
     let target = if let Some(f) = s("file_path")
@@ -218,7 +313,9 @@ fn tool_activity_label(tool: &str, input: &serde_json::Value) -> String {
         Some(path_basename(f))
     } else if let Some(c) = s("command").or_else(|| s("cmd")) {
         Some(crate::util::truncate_chars(c.trim(), 64))
-    } else { s("pattern").map(|p| crate::util::truncate_chars(p, 48)) };
+    } else {
+        s("pattern").map(|p| crate::util::truncate_chars(p, 48))
+    };
     match target {
         Some(t) if !t.is_empty() => format!("{short} {t}"),
         _ => short,
@@ -238,4 +335,140 @@ fn path_basename(p: &str) -> String {
         .find(|s| !s.is_empty())
         .unwrap_or(p)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{EventRecord, FileEdit, RawRef, Role, ToolKind, Turn};
+    use chrono::Utc;
+    use std::path::PathBuf;
+
+    #[test]
+    fn shell_verb_skips_env_and_wrappers() {
+        assert_eq!(shell_verb("FOO=bar npm test"), "npm");
+        assert_eq!(shell_verb("sudo rm -rf x"), "rm");
+        assert_eq!(shell_verb("/usr/bin/sed -n '1,5p' f"), "sed");
+        assert_eq!(shell_verb("cargo build"), "cargo");
+    }
+
+    #[test]
+    fn classify_shell_command_buckets_actions() {
+        let kind = |c: &str| classify_shell_command(c).map(|(k, _)| k);
+        assert_eq!(kind("sed -n '1,240p' foo.md"), Some("read"));
+        assert_eq!(kind("cat notes.txt"), Some("read"));
+        assert_eq!(kind("nl file"), Some("read"));
+        assert_eq!(kind("rg pattern src/"), Some("search"));
+        assert_eq!(kind("grep -n foo bar"), Some("search"));
+        assert_eq!(kind("find . -name '*.rs'"), Some("search"));
+        assert_eq!(kind("npm test"), Some("run"));
+        assert_eq!(kind("git status"), Some("run"));
+        assert_eq!(kind("mv a b"), Some("write"));
+        // The literal command is kept as the label so the feed shows exactly what ran.
+        assert_eq!(classify_shell_command("cat notes.txt").unwrap().1, "cat notes.txt");
+        // apply_patch is deduped: its write is surfaced by the FileSnapshot.
+        assert!(classify_shell_command("apply_patch <<'EOF'\n*** Begin").is_none());
+    }
+
+    #[test]
+    fn classify_named_tool_maps_claude_builtins() {
+        let jf = |k: &str, v: &str| serde_json::json!({ k: v });
+        assert_eq!(
+            classify_named_tool("Read", &jf("file_path", "/a/b/orb.ts")),
+            ("read", "Read orb.ts".to_string())
+        );
+        assert_eq!(classify_named_tool("Edit", &jf("file_path", "/a/x.rs")).0, "write");
+        assert_eq!(classify_named_tool("Grep", &jf("pattern", "todo")).0, "search");
+        assert_eq!(
+            classify_named_tool("Bash", &jf("command", "cargo test")),
+            ("run", "Bash cargo test".to_string())
+        );
+        assert_eq!(classify_named_tool("mcp__x__y", &serde_json::Value::Null).0, "tool");
+    }
+
+    #[test]
+    fn tool_activity_reads_codex_normalized_input() {
+        let cmd = serde_json::json!({ "cmd": "rg TODO src/" });
+        assert_eq!(
+            tool_activity("exec", &cmd),
+            Some(("search", "rg TODO src/".to_string()))
+        );
+        let web = serde_json::json!({ "codex_tool": "web__run" });
+        assert_eq!(
+            tool_activity("exec", &web),
+            Some(("search", "web search".to_string()))
+        );
+        // apply_patch is deduped: the write is surfaced by its FileSnapshot instead.
+        let patch = serde_json::json!({ "codex_tool": "apply_patch" });
+        assert_eq!(tool_activity("exec", &patch), None);
+    }
+
+    fn ev(offset: u64, event: Event) -> (Turn, EventRecord) {
+        let now = Utc::now();
+        let turn = Turn {
+            id: "t1".into(),
+            session_id: "s".into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let rec = EventRecord {
+            id: format!("e{offset}"),
+            turn_id: "t1".into(),
+            session_id: "s".into(),
+            ts: now + chrono::Duration::milliseconds(offset as i64),
+            event,
+            raw_ref: RawRef {
+                source_path: PathBuf::from("/x.jsonl"),
+                offset,
+                line: offset as u32,
+            },
+        };
+        (turn, rec)
+    }
+
+    #[test]
+    fn recent_activity_surfaces_writes_reads_and_runs() {
+        let events = vec![
+            ev(1, Event::Thinking { tokens: 10 }),
+            ev(
+                2,
+                Event::ToolCall {
+                    tool: "exec".into(),
+                    input: serde_json::json!({ "cmd": "sed -n '1,20p' foo.md" }),
+                    call_id: "c1".into(),
+                    kind: ToolKind::Unknown,
+                },
+            ),
+            ev(
+                3,
+                Event::FileSnapshot {
+                    files: vec![FileEdit {
+                        path: "/a/b/notes.md".into(),
+                        old_hash: None,
+                        new_hash: None,
+                        lines_changed: None,
+                    }],
+                },
+            ),
+            ev(
+                4,
+                Event::ToolCall {
+                    tool: "exec".into(),
+                    input: serde_json::json!({ "cmd": "npm test" }),
+                    call_id: "c2".into(),
+                    kind: ToolKind::Unknown,
+                },
+            ),
+        ];
+        let feed = recent_activity(&events);
+        // Newest-first: run, write, read, thinking (was previously all "tool" + no write).
+        let kinds: Vec<&str> = feed.iter().map(|a| a.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["run", "write", "read", "thinking"]);
+        assert!(feed.iter().any(|a| a.kind == "write" && a.label == "Edit notes.md"));
+        assert!(feed.iter().any(|a| a.kind == "read" && a.label.contains("sed -n")));
+    }
 }

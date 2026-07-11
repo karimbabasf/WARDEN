@@ -183,6 +183,117 @@ fn parse_file(path: &Path, bytes: &[u8], raw_hash: u64) -> Result<SessionBatch> 
     parse_slice(path, bytes, 0, raw_hash, None)
 }
 
+/// Resolve a Codex tool call's input into a structured value the activity feed can read.
+///
+/// `function_call` tools (spawn_agent, wait_agent, and friends) carry a JSON-encoded
+/// `arguments` string. The `exec` meta-tool (a `custom_tool_call`) instead carries JS in
+/// `input` that drives an inner tool: `tools.exec_command({cmd:"..."})` for a shell
+/// command, `tools.web__run({...})` for web. Reading only `arguments` (the old behaviour)
+/// left every `exec` with a Null input, so the radar could not tell reading from running
+/// from writing: it only ever showed a bare "exec". Normalize to `{cmd}` for a shell
+/// exec, `{codex_tool}` for another inner tool, or the parsed/raw value otherwise. Never
+/// Null when the record carried an input.
+fn codex_tool_call_input(payload: &Value) -> Value {
+    if let Some(args) = payload.get("arguments") {
+        return args
+            .as_str()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .unwrap_or_else(|| args.clone());
+    }
+    match payload.get("input") {
+        Some(Value::String(js)) => normalize_codex_exec_js(js),
+        Some(other) => other.clone(),
+        None => Value::Null,
+    }
+}
+
+/// Extract the real action from the `exec` meta-tool's JS wrapper: the shell `cmd`, else
+/// the inner `tools.<name>(` being invoked, else the raw JS (so the label is at least the
+/// literal action, never empty).
+fn normalize_codex_exec_js(js: &str) -> Value {
+    if let Some(cmd) = js_string_arg(js, "cmd") {
+        return json!({ "cmd": cmd });
+    }
+    // `exec_command` whose command is built dynamically (an array of commands + a loop,
+    // so there is no literal `cmd:"..."`): use the first quoted string as a representative
+    // command, so the feed still shows a real run instead of a bare "exec".
+    if js.contains("exec_command") {
+        if let Some(first) = first_quoted_string(js) {
+            return json!({ "cmd": first });
+        }
+        return json!({ "codex_tool": "exec_command" });
+    }
+    if let Some(inner) = inner_tool_name(js) {
+        return json!({ "codex_tool": inner });
+    }
+    Value::String(js.to_string())
+}
+
+/// Read a JS string argument value for `key`, e.g. `cmd` in `{cmd:"echo hi"}`,
+/// `{cmd: 'echo hi'}`, or a backtick-quoted `{cmd:` value. Accepts `key:` and `"key":`,
+/// optional whitespace, and `"` / `'` / backtick quoting. Honors backslash escapes.
+fn js_string_arg(js: &str, key: &str) -> Option<String> {
+    for pat in [format!("{key}:"), format!("\"{key}\":")] {
+        let mut from = 0;
+        while let Some(rel) = js[from..].find(&pat) {
+            let after = from + rel + pat.len();
+            if let Some(v) = read_js_quoted(&js[after..]) {
+                return Some(v);
+            }
+            from = after;
+        }
+    }
+    None
+}
+
+/// If `s` (after leading whitespace) begins with a `"`/`'`/backtick-quoted string, return
+/// its unescaped contents up to the closing quote.
+fn read_js_quoted(s: &str) -> Option<String> {
+    let mut chars = s.trim_start().chars();
+    let quote = chars.next()?;
+    if !matches!(quote, '"' | '\'' | '`') {
+        return None;
+    }
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            c if c == quote => return Some(out),
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// The first `"`/`'`/backtick-quoted string literal in the JS, unescaped, skipping empty
+/// ones. Names a representative command when `exec_command` builds it dynamically.
+fn first_quoted_string(js: &str) -> Option<String> {
+    for (i, c) in js.char_indices() {
+        if matches!(c, '"' | '\'' | '`') {
+            if let Some(v) = read_js_quoted(&js[i..]) {
+                if !v.trim().is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The inner tool name in `... tools.<name>( ...`, e.g. `web__run`, `exec_command`.
+fn inner_tool_name(js: &str) -> Option<String> {
+    let i = js.find("tools.")? + "tools.".len();
+    let name: String = js[i..]
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
 /// RADAR (Task 5): resolve Codex Desktop `parent_thread_id` links over every
 /// persisted Codex session and record them via `Store::link_child_session`.
 ///
@@ -576,13 +687,7 @@ fn parse_slice(
                     } else {
                         ToolKind::Unknown
                     };
-                    // `arguments` is a JSON-encoded *string*; parse it back to a value.
-                    let input = payload
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .or_else(|| payload.get("arguments").cloned())
-                        .unwrap_or(Value::Null);
+                    let input = codex_tool_call_input(&payload);
                     let call_id = payload
                         .get("call_id")
                         .and_then(Value::as_str)
@@ -1301,5 +1406,42 @@ mod tests {
         let adapter = CodexAdapter::with_root(PathBuf::from("/a"), PathBuf::from("/b"), store);
         let roots = adapter.roots();
         assert_eq!(roots, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
+
+    /// A Codex `exec` custom_tool_call carries JS in `input` (not `arguments`); the shell
+    /// command must be recovered so the activity feed can name what ran (was Null before).
+    #[test]
+    fn codex_exec_input_extracts_shell_cmd() {
+        let payload = serde_json::json!({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "const r = await tools.exec_command({cmd:\"rg TODO src/\",\"workdir\":\"/p\"}); text(r.output);"
+        });
+        let v = codex_tool_call_input(&payload);
+        assert_eq!(v.get("cmd").and_then(Value::as_str), Some("rg TODO src/"));
+    }
+
+    /// A non-shell `exec` (web browsing) falls back to the inner tool name.
+    #[test]
+    fn codex_exec_input_falls_back_to_inner_tool() {
+        let payload = serde_json::json!({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "const r = await tools.web__run({search_query:[{q:\"bitemporal\"}]}); text(r.output);"
+        });
+        let v = codex_tool_call_input(&payload);
+        assert_eq!(v.get("codex_tool").and_then(Value::as_str), Some("web__run"));
+    }
+
+    /// A `function_call` tool still parses its JSON-encoded `arguments`.
+    #[test]
+    fn codex_function_call_input_parses_arguments_json() {
+        let payload = serde_json::json!({
+            "type": "function_call",
+            "name": "spawn_agent",
+            "arguments": "{\"task_name\":\"x\"}"
+        });
+        let v = codex_tool_call_input(&payload);
+        assert_eq!(v.get("task_name").and_then(Value::as_str), Some("x"));
     }
 }

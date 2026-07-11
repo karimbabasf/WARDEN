@@ -1716,18 +1716,18 @@ mod tests {
         );
         assert!(
             acts.iter()
-                .any(|a| a.kind == "tool" && a.label.contains("orbLayout.ts")),
-            "a Read must name the file it touches, got {acts:?}"
+                .any(|a| a.kind == "read" && a.label.contains("orbLayout.ts")),
+            "a Read must be classified `read` and name the file it touches, got {acts:?}"
         );
         assert!(
             acts.iter()
-                .any(|a| a.kind == "tool" && a.label.contains("cargo test radar")),
-            "a Bash must name the command it runs, got {acts:?}"
+                .any(|a| a.kind == "run" && a.label.contains("cargo test radar")),
+            "a Bash must be classified `run` and name the command, got {acts:?}"
         );
         assert!(
             acts.iter()
-                .any(|a| a.kind == "tool" && a.label.contains("cargo build")),
-            "a Codex exec_command must name the command it runs, got {acts:?}"
+                .any(|a| a.kind == "run" && a.label.contains("cargo build")),
+            "a Codex exec must be classified `run` and name the command, got {acts:?}"
         );
     }
 

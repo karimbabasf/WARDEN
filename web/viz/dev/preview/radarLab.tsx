@@ -60,8 +60,12 @@ const RAW_FOREST = {
         estimated: { preamble: 42000, conversation: 88000, toolOutput: 46000, thinking: 12000 },
       },
       recentActivity: [
-        { ts: iso(2), kind: 'tool', label: 'Edit src/viz/RadarConstellation.tsx' },
+        { ts: iso(2), kind: 'write', label: 'Edit RadarConstellation.tsx' },
+        { ts: iso(8), kind: 'run', label: 'cargo test radar' },
+        { ts: iso(14), kind: 'read', label: "sed -n '1,80p' assemble.rs" },
         { ts: iso(18), kind: 'thinking', label: 'Planning the cross-fade wiring' },
+        { ts: iso(30), kind: 'search', label: 'rg "recentActivity" web/viz' },
+        { ts: iso(48), kind: 'tool', label: 'browser_take_screenshot' },
         { ts: iso(55), kind: 'message', label: 'Wire the Habits↔Radar tab cross-fade' },
       ],
       childCount: 1,

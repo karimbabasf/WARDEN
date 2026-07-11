@@ -75,6 +75,10 @@ function cost(usd: number | null): string {
 
 /** Per-kind glyph + readable word (colour is never the only signal). */
 const ACTIVITY_KIND: Record<string, { glyph: string; label: string }> = {
+  read: { glyph: '▤', label: 'Read' },
+  write: { glyph: '◆', label: 'Write' },
+  search: { glyph: '⌕', label: 'Search' },
+  run: { glyph: '❯', label: 'Run' },
   tool: { glyph: '⚙', label: 'Tool' },
   message: { glyph: '✎', label: 'Message' },
   thinking: { glyph: '✶', label: 'Thinking' },

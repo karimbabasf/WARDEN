@@ -536,6 +536,10 @@ html, body {
 .wd-radar-feed-row:first-child { border-top: none; }
 .wd-radar-feed-glyph { flex: none; width: 14px; text-align: center; filter: drop-shadow(0 0 6px currentColor); }
 .wd-radar-feed-glyph.is-tool { color: var(--acid); }
+.wd-radar-feed-glyph.is-run { color: var(--acid); }
+.wd-radar-feed-glyph.is-read { color: #7fd7ff; }
+.wd-radar-feed-glyph.is-write { color: #ffcf7a; }
+.wd-radar-feed-glyph.is-search { color: #8bffb0; }
 .wd-radar-feed-glyph.is-message { color: var(--ink-soft); }
 .wd-radar-feed-glyph.is-thinking { color: #b98cff; }
 .wd-radar-feed-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
