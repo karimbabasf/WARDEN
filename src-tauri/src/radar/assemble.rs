@@ -133,11 +133,22 @@ pub fn assemble(
     }
 
     // ── subagent termination ─────────────────────────────────────────────────────
-    // A subagent has no PID, so liveness can't see it finish. Derive it: the parent
-    // logged a tool-result for the subagent's call (permanent ⇒ idempotent), or the
-    // subagent fell silent past the backstop. Within a grace window we EMIT it as
-    // `terminated` (the FACE implodes it); past the window we DROP it from the forest
-    // so it never lingers as idle and never resurrects.
+    // A subagent has no PID, so liveness can't see it finish. How we derive "finished"
+    // is harness-specific:
+    //  * Claude: the parent logged a tool-result for the subagent's call (permanent, so
+    //    idempotent), or the subagent fell silent past the 90s file backstop.
+    //  * Codex Desktop: a subagent has NO tool_use_id, and it legitimately goes quiet
+    //    for long stretches (minutes) while its orchestrator parent keeps running (it
+    //    finished a step, or is waiting to be read). Its real lifecycle signal is the
+    //    Codex openness policy (rollout present under ~/.codex/sessions/, not archived,
+    //    and fresh), the SAME signal roots use. Applying the Claude file-silence
+    //    backstop here wrongly imploded every idle subagent, so a parent orchestrating
+    //    N subagents rendered with zero children. A Codex subagent is "finished" only
+    //    when its own rollout stops being open (Codex archived it, or it went stale
+    //    past the Codex window).
+    // Within a grace window we EMIT the finished subagent as `terminated` (the FACE
+    // implodes it); past the window we DROP it from the forest so it never lingers as
+    // idle and never resurrects.
     let terminate_ms = crate::util::radar_subagent_terminate_ms();
     let grace_ms = crate::util::radar_terminate_grace_ms();
     let mut terminated_now: HashSet<String> = HashSet::new();
@@ -149,11 +160,20 @@ pub fn assemble(
         let Some(child) = by_id.get(id.as_str()) else {
             continue;
         };
-        let tid = child.meta.get("toolUseId").and_then(|v| v.as_str());
-        let parent_events = store.session_events(parent).unwrap_or_default();
+        // The child's last transcript write (file mtime), used as the termination
+        // timestamp that drives the grace/implode window.
         let last = mtime_secs_ago(&child.external_id)
             .map(|secs| now - chrono::Duration::seconds(secs as i64));
-        if let Some(ts) = subagent_terminated_at(tid, &parent_events, last, now, terminate_ms) {
+        let terminated_at = if matches!(child.harness, Harness::Codex) {
+            // Finished only when its own rollout is no longer open. Never the file
+            // backstop: an idle-but-live subagent stays present under its open root.
+            (!directly_open(child)).then(|| last.unwrap_or(now))
+        } else {
+            let tid = child.meta.get("toolUseId").and_then(|v| v.as_str());
+            let parent_events = store.session_events(parent).unwrap_or_default();
+            subagent_terminated_at(tid, &parent_events, last, now, terminate_ms)
+        };
+        if let Some(ts) = terminated_at {
             let age_ms = now.signed_duration_since(ts).num_milliseconds().max(0) as u64;
             if age_ms <= grace_ms {
                 terminated_now.insert(id.clone());
@@ -1020,6 +1040,160 @@ mod tests {
         assert_eq!(child.depth, 1, "child renders nested, not flat");
         let parent = state.agents.iter().find(|a| a.id == "cx-parent").unwrap();
         assert_eq!(parent.child_count, 1, "parent shows one child");
+    }
+
+    /// Set a file's mtime to `secs_ago` seconds in the past via `touch -t` (local
+    /// time), so `transcript_mtime_secs_ago` sees a genuinely silent transcript. Used
+    /// to arm the file-silence backstop in the Codex subagent regression tests.
+    fn set_old_mtime(path: &std::path::Path, secs_ago: i64) {
+        let t = chrono::Local::now() - chrono::Duration::seconds(secs_ago);
+        let stamp = t.format("%Y%m%d%H%M.%S").to_string();
+        let ok = std::process::Command::new("touch")
+            .args(["-t", &stamp])
+            .arg(path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "touch -t must set the fixture's old mtime");
+    }
+
+    /// Regression: a Codex Desktop subagent silent far longer than the Claude 90s file
+    /// backstop, but whose own rollout is still open (present, not archived, fresh),
+    /// must stay nested under its parent instead of being imploded. This is the real
+    /// 4-subagent Codex Desktop case: the orchestrator parent keeps running while each
+    /// spawned subagent goes quiet between steps. Before the harness-aware termination
+    /// fix, every such subagent was dropped and the parent rendered with zero children.
+    /// Uses a REAL hour-old transcript file so the silence backstop is genuinely armed.
+    #[test]
+    fn codex_idle_but_open_subagent_stays_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let child_path = dir.path().join("rollout-child.jsonl");
+        std::fs::write(&child_path, "{}\n").unwrap();
+        set_old_mtime(&child_path, 3600);
+
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let parent = Session {
+            id: "cx-parent".into(),
+            harness: Harness::Codex,
+            external_id: "thread-parent".into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: dir.path().join("rollout-parent.jsonl"),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({ "originator": "Codex Desktop" }),
+        };
+        let child = Session {
+            id: "cx-child".into(),
+            harness: Harness::Codex,
+            external_id: "thread-child".into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: child_path,
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({
+                "thread_source": "subagent",
+                "parent_thread_id": "thread-parent",
+                "agent_nickname": "Dirac",
+                "originator": "Codex Desktop",
+            }),
+        };
+        store.upsert_session_batch(&parent, &[], &[], 0).unwrap();
+        store.upsert_session_batch(&child, &[], &[], 0).unwrap();
+        relink_store_subagents(&store);
+
+        // Both rollouts are open (present, not archived, fresh) in the Codex sense.
+        let open = ["thread-parent", "thread-child"];
+        let is_codex_open = |s: &Session| open.contains(&s.external_id.as_str());
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, now);
+
+        let child = state
+            .agents
+            .iter()
+            .find(|a| a.id == "cx-child")
+            .expect("idle-but-open Codex subagent must stay in the forest");
+        assert_eq!(child.parent_id.as_deref(), Some("cx-parent"));
+        assert_eq!(child.depth, 1, "renders nested, not dropped");
+        assert_eq!(child.nickname.as_deref(), Some("Dirac"));
+        let parent = state.agents.iter().find(|a| a.id == "cx-parent").unwrap();
+        assert_eq!(parent.child_count, 1, "parent shows its live subagent");
+    }
+
+    /// Honest counterpart: a Codex subagent whose own rollout is NO LONGER open (Codex
+    /// archived it, or it went stale past the Codex window) is finished, so it is
+    /// retired from the forest even though its parent stays open. Proves the fix does
+    /// not make subagents immortal: openness-of-own-rollout, not mere membership under
+    /// an open root, is what keeps a Codex subagent alive.
+    #[test]
+    fn codex_closed_subagent_is_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let child_path = dir.path().join("rollout-child.jsonl");
+        std::fs::write(&child_path, "{}\n").unwrap();
+        set_old_mtime(&child_path, 3600); // silent an hour → past the 5s implode grace
+
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let mk = |id: &str, ext: &str, path: std::path::PathBuf, meta: serde_json::Value| Session {
+            id: id.into(),
+            harness: Harness::Codex,
+            external_id: ext.into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: path,
+            raw_hash: 0,
+            ingested_at: now,
+            meta,
+        };
+        store
+            .upsert_session_batch(
+                &mk(
+                    "cx-parent",
+                    "thread-parent",
+                    dir.path().join("rollout-parent.jsonl"),
+                    serde_json::json!({ "originator": "Codex Desktop" }),
+                ),
+                &[],
+                &[],
+                0,
+            )
+            .unwrap();
+        store
+            .upsert_session_batch(
+                &mk(
+                    "cx-child",
+                    "thread-child",
+                    child_path,
+                    serde_json::json!({
+                        "thread_source": "subagent",
+                        "parent_thread_id": "thread-parent",
+                        "originator": "Codex Desktop",
+                    }),
+                ),
+                &[],
+                &[],
+                0,
+            )
+            .unwrap();
+        relink_store_subagents(&store);
+
+        // Parent open; child's own rollout CLOSED (archived or stale).
+        let is_codex_open = |s: &Session| s.external_id == "thread-parent";
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, now);
+
+        assert!(
+            state.agents.iter().all(|a| a.id != "cx-child"),
+            "a closed (archived/stale) Codex subagent must be retired from the forest"
+        );
+        let parent = state.agents.iter().find(|a| a.id == "cx-parent").unwrap();
+        assert_eq!(parent.child_count, 0);
     }
 
     #[test]
