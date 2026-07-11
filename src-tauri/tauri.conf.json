@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WARDEN",
+  "version": "0.1.0",
+  "identifier": "com.warden.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [{
+      "title": "WARDEN",
+      "label": "overlay",
+      "width": 960,
+      "height": 640,
+      "minWidth": 760,
+      "minHeight": 560,
+      "transparent": false,
+      "decorations": true,
+      "alwaysOnTop": false,
+      "skipTaskbar": false,
+      "focus": true,
+      "visible": true,
+      "resizable": true,
+      "maximizable": true,
+      "minimizable": true,
+      "closable": true,
+      "shadow": true,
+      "center": true
+    }],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "app",
+    "category": "DeveloperTool",
+    "shortDescription": "The agent that watches your agents",
+    "longDescription": "WARDEN is a live radar for your local coding agents. It tails your Claude Code and Codex transcripts and renders every active and idle agent as a real-time constellation.",
+    "macOS": {
+      "infoPlist": "Info.plist"
+    }
+  }
+}

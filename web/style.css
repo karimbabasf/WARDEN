@@ -1,0 +1,793 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   WARDEN war-room — the glass cockpit.
+   The 3D orb mind-map is the hero; the chrome is disciplined hairline glass at
+   the edges. Phosphor-CRT heritage, elevated to a mission console. Colour is
+   ALWAYS paired with a glyph + label (color-blind a11y) — never a lone signal.
+   ───────────────────────────────────────────────────────────────────────── */
+
+@font-face {
+  font-family: WardenMono;
+  src: local("SF Mono"), local("Menlo");
+  font-display: swap;
+}
+
+:root {
+  --bg: #020403;
+  --green: #76ff9d;
+  --dim: #1b6f3a;
+  --acid: #b8ff6b;
+  --warn: #ffd166;
+  --red: #ff5470;
+  --amber: #ff5a37;
+
+  --ink: #e7fff0;        /* primary readable text on glass */
+  --ink-soft: #9fd9b6;   /* secondary text */
+  --ink-faint: #5f8a6f;  /* labels / captions */
+
+  --panel: rgba(4, 18, 11, 0.66);
+  --panel-strong: rgba(3, 14, 9, 0.86);
+  --hair: rgba(118, 255, 157, 0.20);
+  --hair-bright: rgba(118, 255, 157, 0.42);
+  --glow: 0 0 18px rgba(118, 255, 157, 0.45), 0 0 60px rgba(118, 255, 157, 0.14);
+
+  --mono: WardenMono, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ── layout tokens ── */
+  --top-safe: 64px;           /* nav bar height + clearance margin */
+  --side-margin: 16px;
+  --panel-w: clamp(300px, 32vw, 380px);
+
+  /* ── z-index scale ── */
+  --z-canvas: 0;
+  --z-chrome: 10;
+  --z-panel: 20;
+  --z-deck: 30;
+  --z-nav: 40;
+  --z-controls: 50;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: #020403;
+  color: var(--green);
+  font-family: var(--mono);
+  overflow: hidden;
+}
+
+/* The island owns the whole webview. The canvas paints its own opaque space,
+   so the chrome floats over it; pointer events fall through the chrome's empty
+   regions to the canvas and are captured only by real controls. Window drag/zoom
+   stays native in the macOS title bar, outside React. */
+#war-room-root,
+.viz-root {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+}
+
+.viz-root canvas { display: block; touch-action: none; }
+
+/* ── chrome layer ──────────────────────────────────────────────────────────*/
+/* Faint scanline texture over the whole board, like a console CRT, kept very low so
+   it never fights legibility. */
+.wd-radar-root::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-chrome);
+  background: repeating-linear-gradient(0deg, rgba(118, 255, 157, 0.04) 0 1px, transparent 1px 3px);
+  mix-blend-mode: screen;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* The 3D canvas owns pointer interaction (orbit + globe clicks). The DOM chrome
+   floats over it: container overlays pass drags through to the canvas, and only the
+   visible panels and their controls capture the pointer, so you cannot accidentally
+   orbit the scene while reading a panel. */
+.wd-brand,
+.wd-breadcrumb,
+.wd-inspector,
+.wd-radar-empty { pointer-events: none; }
+.wd-inspector > *,
+.wd-filterbar,
+.wd-breadcrumb button { pointer-events: auto; }
+
+/* ── glass panel base (shared look) ───────────────────────────────────────── */
+.wd-detail,
+.wd-filterbar {
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  backdrop-filter: blur(11px);
+  -webkit-backdrop-filter: blur(11px);
+}
+
+/* ── brand mark (top-left, static chrome) ────────────────────────────────────
+   Wordmark, tagline, live-agent count: purely informational, never interactive.
+   Pointer-events stay off so it can float over the canvas without intercepting
+   the orbit drag. */
+.wd-brand {
+  position: fixed;
+  top: 20px;
+  left: 22px;
+  z-index: var(--z-chrome);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  pointer-events: none;
+  font-family: var(--mono);
+  user-select: none;
+}
+.wd-brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.4em;
+  text-transform: uppercase;
+  color: var(--green);
+  text-shadow: var(--glow);
+}
+.wd-brand-tag {
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  color: var(--ink-faint);
+}
+.wd-brand-count {
+  margin-top: 5px;
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--hair);
+  background: rgba(118, 255, 157, 0.06);
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── filter bar (dead-centre bottom — a modern segmented dock) ──────────────*/
+.wd-filterbar {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  z-index: var(--z-deck);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  max-width: min(92vw, 900px);
+  padding: 6px;
+  border-radius: 15px;
+  background: var(--panel-strong);
+  border: 1px solid var(--hair);
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(118, 255, 157, 0.05);
+  backdrop-filter: blur(16px) saturate(1.1);
+  -webkit-backdrop-filter: blur(16px) saturate(1.1);
+  color: var(--ink-soft);
+  animation: wd-fade-up 500ms ease both;
+}
+.wd-filter-div { width: 1px; align-self: stretch; margin: 3px 4px; background: var(--hair); }
+.wd-legend-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.wd-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.wd-legend-glyph { font-size: 13px; line-height: 1; filter: drop-shadow(0 0 6px currentColor); }
+.wd-legend-key { color: var(--ink-faint); }
+.wd-ramp-step { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-faint); }
+.wd-ramp-swatch { width: 11px; height: 11px; border-radius: 2px; box-shadow: 0 0 8px currentColor; }
+
+/* ── rail title (3D-anchored at each folder rail head, radar board) ─────────
+   A properly-set title, not a tiny tag: bright basename, dim path prefix, a small
+   harness-hue glyph. Right-aligned to the anchor so it ends just left of the first
+   bead and never runs through the beads (drei <Html> is NOT `center`-anchored). */
+.wd-rail-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 9px;
+  transform: translate(-100%, -50%);
+  white-space: nowrap;
+  font-family: var(--mono);
+  user-select: none;
+}
+.wd-rail-title-glyph {
+  font-size: 12px;
+  color: var(--harness, var(--green));
+  filter: drop-shadow(0 0 7px var(--harness, var(--green)));
+  transform: translateY(-1px);
+}
+.wd-rail-title-text { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; }
+.wd-rail-title-prefix {
+  font-size: 11px;
+  letter-spacing: 0.01em;
+  color: var(--ink-faint);
+  opacity: 0.75;
+}
+.wd-rail-title-name {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--harness, var(--green)) 28%, transparent), 0 0 3px rgba(0, 0, 0, 0.9);
+}
+.wd-rail-title[role="button"]:hover .wd-rail-title-name { color: #ffffff; }
+
+/* ── inspector (right dock): hover preview + selected detail ───────────────*/
+.wd-inspector {
+  position: absolute;
+  top: var(--top-safe);
+  right: var(--side-margin);
+  width: var(--panel-w);
+  max-height: calc(100vh - var(--top-safe) - 16px);
+  display: flex;
+  justify-content: flex-end;
+  z-index: var(--z-panel);
+  opacity: 0;
+  transform: translateX(16px);
+  transition: opacity 220ms ease, transform 220ms ease;
+}
+.wd-inspector.is-open { opacity: 1; transform: translateX(0); }
+
+.wd-card-kicker {
+  color: var(--harness, var(--green));
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.wd-card-glyph { margin-right: 7px; filter: drop-shadow(0 0 7px currentColor); }
+.wd-card-main { margin-top: 7px; font-size: 13px; line-height: 1.4; color: var(--ink); }
+.wd-card-note { margin-top: 8px; font-size: 11px; line-height: 1.45; color: var(--ink-soft); }
+.wd-card-hint { margin-top: 9px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); }
+
+/* selected detail */
+.wd-detail {
+  width: 100%;
+  max-height: calc(100vh - 200px);
+  overflow: auto;
+  padding: 16px;
+  border-color: color-mix(in srgb, var(--severity, var(--harness, var(--green))) 48%, transparent);
+  background: linear-gradient(180deg, rgba(2, 16, 9, 0.92), rgba(1, 7, 4, 0.9));
+  box-shadow: 0 0 36px color-mix(in srgb, var(--severity, var(--harness, var(--green))) 20%, transparent),
+    inset 0 0 42px rgba(118, 255, 157, 0.04);
+  color: var(--ink);
+  animation: wd-bloom 220ms cubic-bezier(.2, .9, .2, 1) both;
+}
+
+.wd-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.wd-detail-title { margin: 6px 0 0; font-size: 17px; line-height: 1.15; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink); }
+.wd-detail-sub { margin: 4px 0 0; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
+.wd-detail-close {
+  flex: none;
+  width: 26px; height: 26px;
+  border: 1px solid var(--hair);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+.wd-detail-close:hover { background: rgba(255, 90, 55, 0.12); color: var(--amber); border-color: rgba(255, 90, 55, 0.5); }
+
+.wd-detail p { margin: 12px 0; font-size: 12px; line-height: 1.55; color: var(--ink-soft); }
+
+.wd-detail-ledger { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.wd-detail-ledger span {
+  border: 1px solid var(--hair);
+  background: rgba(118, 255, 157, 0.05);
+  color: var(--ink-soft);
+  padding: 5px 8px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.wd-detail-where { margin-top: 12px; font-size: 11px; line-height: 1.5; color: var(--ink-soft); }
+.wd-detail-where > div:last-child { margin-top: 4px; color: var(--ink-faint); word-break: break-all; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   RADAR — live agent forest overlays (Phase 3). Hover quick-glance card +
+   detail panel. Tinted by the RADAR palette via a per-instance `--harness` var
+   (Claude orange / Codex violet), colour ALWAYS paired with a glyph + label.
+   Self-contained glass (no `wd-preview` reuse) so the hover card can stay fully
+   pointer-transparent — it floats over the globe and must never capture events.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* hover quick-glance card — node-anchored via drei <Html>, constant pixel size */
+.wd-radar-card {
+  pointer-events: none;
+  user-select: none;
+  width: 208px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--harness, var(--green)) 50%, transparent);
+  background: linear-gradient(150deg, color-mix(in srgb, var(--harness, var(--green)) 13%, transparent), rgba(2, 9, 6, 0.9));
+  box-shadow: 0 0 26px color-mix(in srgb, var(--harness, var(--green)) 22%, transparent);
+  backdrop-filter: blur(11px);
+  -webkit-backdrop-filter: blur(11px);
+  color: var(--ink);
+  animation: wd-bloom 150ms ease-out both;
+}
+.wd-radar-card-role { color: var(--ink-faint); text-transform: none; letter-spacing: 0; }
+.wd-radar-card .wd-card-main { font-size: 14px; letter-spacing: 0.02em; }
+.wd-card-sub { margin-top: 3px; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-faint); }
+
+.wd-radar-card-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  margin: 10px 0 0;
+}
+.wd-radar-card-stats > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wd-radar-card-stats > .wd-radar-card-context { grid-column: 1 / -1; }
+.wd-radar-card-stats dt {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.wd-radar-card-stats dd {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wd-radar-status.is-working { color: var(--acid); }
+.wd-radar-status.is-idle { color: var(--ink-faint); }
+.wd-radar-status.is-closed { color: var(--amber); }
+
+/* ── radar detail panel (right dock; reuses the wd-detail glass) ─────────────*/
+/* The dock sits OUTSIDE .wd-chrome, so make the container itself pass-through
+   (orbit-drag must work over its empty region); the .wd-detail panel re-enables
+   its own pointer events via the shared glass rule. */
+.wd-radar-dock {
+  pointer-events: none;
+  z-index: var(--z-panel);
+  position: absolute;
+  top: var(--top-safe);
+  right: var(--side-margin);
+  width: var(--panel-w);
+  max-height: calc(100vh - var(--top-safe) - 16px);
+}
+.wd-radar-detail {
+  border-color: color-mix(in srgb, var(--heat, var(--harness, var(--green))) 48%, transparent);
+  box-shadow: 0 0 36px color-mix(in srgb, var(--heat, var(--harness, var(--green))) 22%, transparent),
+    inset 0 0 42px rgba(118, 255, 157, 0.04);
+}
+.wd-radar-section { margin-top: 16px; }
+.wd-radar-section + .wd-radar-section { border-top: 1px solid var(--hair); padding-top: 14px; }
+
+/* context window — static live readout, shaped like the Claude context panel */
+.wd-context-window {
+  --row-fill: var(--heat, var(--green));
+  font-variant-numeric: tabular-nums;
+}
+.wd-context-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 12px;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--heat, var(--green)) 66%, transparent);
+  background: rgba(14, 21, 18, 0.84);
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--heat, var(--green)) 48%, transparent);
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1;
+}
+.wd-context-head-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wd-context-head-value {
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.wd-context-head-caret {
+  color: var(--ink-faint);
+  text-align: right;
+  font-size: 10px;
+}
+.wd-context-track {
+  height: 3px;
+  margin: 0 2px 8px;
+  background: rgba(112, 124, 117, 0.28);
+  overflow: hidden;
+}
+.wd-context-fill {
+  height: 100%;
+  background: var(--heat, var(--green));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--heat, var(--green)) 70%, transparent);
+  transition: width 180ms linear;
+}
+.wd-context-rows {
+  list-style: none;
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+}
+.wd-context-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) 54px 48px 24px;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 16px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.wd-context-row.is-muted {
+  color: var(--ink-faint);
+}
+.wd-context-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--row-fill);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--row-fill) 58%, transparent);
+}
+.wd-context-row.is-muted .wd-context-dot {
+  opacity: 0.45;
+}
+.wd-context-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wd-context-tokens,
+.wd-context-percent,
+.wd-context-count {
+  color: var(--ink-faint);
+  text-align: right;
+  white-space: nowrap;
+}
+.wd-context-percent {
+  color: var(--ink-soft);
+}
+.wd-context-source {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  border-top: 1px solid var(--hair);
+  padding-top: 7px;
+  color: var(--ink-faint);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* context gauge — heat-matched to the globe (--heat) */
+.wd-radar-gauge { margin: 12px 0 4px; }
+.wd-radar-gauge-track {
+  position: relative;
+  height: 12px;
+  border: 1px solid var(--hair);
+  background: rgba(118, 255, 157, 0.05);
+  overflow: hidden;
+}
+.wd-radar-gauge-fill {
+  height: 100%;
+  background: var(--heat, var(--green));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--heat, var(--green)) 70%, transparent);
+  transition: width 320ms cubic-bezier(.2, .9, .2, 1);
+}
+.wd-radar-gauge-meta { display: flex; justify-content: space-between; align-items: baseline; margin-top: 6px; }
+.wd-radar-gauge-pct { font-size: 18px; color: var(--ink); letter-spacing: 0.04em; }
+.wd-radar-gauge-abs { font-size: 11px; color: var(--ink-faint); }
+
+/* composition lenses (exact / estimated) */
+.wd-radar-comp { margin-top: 14px; }
+.wd-radar-comp-head { display: flex; align-items: baseline; gap: 8px; }
+.wd-radar-comp-note { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); }
+.wd-radar-est {
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  padding: 1px 5px;
+}
+
+.wd-radar-bar {
+  display: flex;
+  height: 9px;
+  margin: 7px 0 0;
+  border: 1px solid var(--hair);
+  background: rgba(2, 9, 6, 0.6);
+  overflow: hidden;
+}
+.wd-radar-bar-seg {
+  height: 100%;
+  background: var(--seg, var(--green));
+  box-shadow: inset 0 0 8px color-mix(in srgb, var(--seg, var(--green)) 35%, transparent);
+  transition: width 320ms cubic-bezier(.2, .9, .2, 1);
+}
+.wd-radar-bar-seg + .wd-radar-bar-seg { border-left: 1px solid rgba(2, 9, 6, 0.8); }
+
+.wd-radar-legend { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 0 0; padding: 0; }
+.wd-radar-legend li { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-soft); }
+.wd-radar-legend-dot { width: 9px; height: 9px; border-radius: 2px; background: var(--seg, var(--green)); box-shadow: 0 0 7px var(--seg, var(--green)); flex: none; }
+.wd-radar-legend-label { color: var(--ink-faint); letter-spacing: 0.04em; }
+.wd-radar-legend-val { color: var(--ink-soft); }
+
+.wd-radar-empty { margin-top: 7px; color: var(--ink-faint); font-size: 13px; letter-spacing: 0.1em; }
+.wd-radar-feed-empty { padding: 8px 0; font-size: 11px; letter-spacing: 0.06em; }
+
+/* live activity feed (newest-first) — ~10 rows visible, scroll back to the oldest */
+.wd-radar-feed {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0 6px 0 0;
+  max-height: 290px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.wd-radar-feed-row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 6px 0;
+  border-top: 1px solid var(--hair);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.wd-radar-feed-row:first-child { border-top: none; }
+.wd-radar-feed-glyph { flex: none; width: 14px; text-align: center; filter: drop-shadow(0 0 6px currentColor); }
+.wd-radar-feed-glyph.is-tool { color: var(--acid); }
+.wd-radar-feed-glyph.is-message { color: var(--ink-soft); }
+.wd-radar-feed-glyph.is-thinking { color: #b98cff; }
+.wd-radar-feed-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wd-radar-feed-kind {
+  margin-right: 7px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.wd-radar-feed-time { flex: none; font-size: 10px; color: var(--ink-faint); }
+
+/* children roster — each row flies the camera to that globe */
+.wd-radar-roster-count { color: var(--ink-faint); }
+.wd-radar-roster-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.wd-radar-roster-row + .wd-radar-roster-row { margin-top: 4px; }
+.wd-radar-roster-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--hair);
+  background: rgba(118, 255, 157, 0.04);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.wd-radar-roster-btn:hover {
+  background: color-mix(in srgb, var(--harness, var(--green)) 12%, transparent);
+  border-color: color-mix(in srgb, var(--harness, var(--green)) 45%, transparent);
+}
+.wd-radar-roster-glyph { flex: none; color: var(--harness, var(--green)); filter: drop-shadow(0 0 6px currentColor); }
+.wd-radar-roster-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.wd-radar-roster-fill { flex: none; color: var(--ink-faint); font-size: 11px; }
+.wd-radar-roster-row .wd-radar-status { flex: none; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* identity + cost grid */
+.wd-radar-id-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 14px; margin: 10px 0 0; }
+.wd-radar-id-grid > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.wd-radar-id-grid dt { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); }
+.wd-radar-id-grid dd { margin: 0; font-size: 12px; color: var(--ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── motion ────────────────────────────────────────────────────────────────*/
+@keyframes wd-bloom { from { opacity: 0; transform: scale(0.94); filter: blur(2px); } to { opacity: 1; transform: scale(1); filter: blur(0); } }
+@keyframes wd-fade-up { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ── responsive ────────────────────────────────────────────────────────────*/
+
+/* Medium — window narrower than 900px: tighten the panel */
+@media (max-width: 900px) {
+  :root { --panel-w: clamp(280px, 40vw, 340px); }
+}
+
+/* Small — near minimum window size (760px × 560px) */
+@media (max-width: 760px) {
+  :root {
+    --top-safe: 56px;   /* nav bar is slightly shorter at small sizes */
+    --side-margin: 10px;
+    --panel-w: calc(100vw - 20px); /* panel goes full-width at small sizes */
+  }
+  /* inspector/radar-dock slide down below the nav; full-width */
+  .wd-inspector {
+    top: var(--top-safe);
+    right: var(--side-margin);
+    left: var(--side-margin);
+    width: auto;
+    max-height: 46vh;
+  }
+  .wd-radar-dock {
+    top: var(--top-safe);
+    right: var(--side-margin);
+    left: var(--side-margin);
+    width: auto;
+    max-height: 46vh;
+  }
+  /* filter bar stays centred; wrap tighter and shrink on small widths */
+  .wd-filterbar {
+    bottom: 14px;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    max-width: calc(100vw - 24px);
+  }
+  /* chips go smaller */
+  .wd-chip { font-size: 10px; padding: 5px 10px; }
+  /* breadcrumb compresses */
+  .wd-breadcrumb { font-size: 9px; }
+  /* window controls remain fixed size — no change needed */
+}
+
+/* Very small — if width drops below 540px, collapse the filter entirely */
+@media (max-width: 540px) {
+  .wd-filterbar { display: none; }
+}
+
+/* ── radar empty state — live, watching, nothing running yet ─────────────────── */
+.wd-radar-empty {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  text-align: center;
+  pointer-events: none;
+  font-family: var(--mono);
+  user-select: none;
+}
+.wd-radar-empty-pulse {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 12px var(--green), 0 0 30px rgba(118, 255, 157, 0.3);
+  animation: wd-radar-ping 2.2s ease-in-out infinite;
+}
+.wd-radar-empty-title {
+  font-size: 12px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  text-shadow: 0 0 12px rgba(118, 255, 157, 0.3);
+}
+.wd-radar-empty-sub {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+@keyframes wd-radar-ping {
+  0%, 100% { transform: scale(0.82); opacity: 0.55; }
+  50% { transform: scale(1.12); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wd-radar-empty-pulse { animation: none; opacity: 0.85; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   LEGEND CHIPS — task 10 introduced these; task 11 styles them.
+   Pills in the green-phosphor CRT theme: swatch · glyph · label inline.
+   --chip sets the accent colour per-chip (set inline by the component).
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.wd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 13px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  user-select: none;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+.wd-chip:hover {
+  color: var(--ink);
+  background: rgba(118, 255, 157, 0.05);
+}
+.wd-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--hair-bright);
+}
+.wd-chip.is-active {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--chip, var(--green)) 16%, transparent);
+  border-color: color-mix(in srgb, var(--chip, var(--green)) 42%, transparent);
+}
+.wd-chip.is-active:focus-visible {
+  box-shadow: 0 0 0 2px var(--hair-bright);
+}
+
+/* harness chips carry their accent purely via the inline --chip colour */
+.wd-chip-harness { /* no extra rules needed; inherits .wd-chip with --chip set inline */ }
+
+.wd-chip-glyph {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--chip, var(--green));
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--chip, var(--green)) 70%, transparent));
+  flex: none;
+}
+.wd-chip-label {
+  color: inherit;
+  letter-spacing: inherit;
+}
+
+/* ── breadcrumb nav ────────────────────────────────────────────────────────*/
+.wd-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  flex-wrap: wrap;
+}
+.wd-crumb {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  transition: background 140ms ease, color 140ms ease;
+}
+.wd-crumb:hover {
+  background: rgba(118, 255, 157, 0.07);
+  color: var(--ink);
+}
+.wd-crumb:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--hair-bright);
+}
+.wd-crumb-root {
+  color: var(--acid);
+  opacity: 0.8;
+}
+.wd-crumb-root:hover {
+  opacity: 1;
+  background: rgba(184, 255, 107, 0.07);
+  color: var(--acid);
+}
+.wd-crumb-sep {
+  color: var(--dim);
+  padding: 0 1px;
+  user-select: none;
+  pointer-events: none;
+}
+.wd-crumb.is-current {
+  color: var(--ink);
+  font-weight: 600;
+  cursor: default;
+  background: transparent;
+}
+.wd-crumb.is-current:hover { background: transparent; }

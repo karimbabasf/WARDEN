@@ -1,0 +1,10 @@
+# Pin the Rust toolchain so the build is reproducible and edition2024 transitive
+# dependencies (e.g. getrandom >= 0.4) resolve. Minimum required: 1.85, when
+# edition2024 was stabilized. Resolved stable at time of pinning: 1.96.0 (2026-05-25).
+#
+# `channel = "stable"` tracks the installed stable toolchain (kept current via
+# `rustup update stable`). For hard cross-machine/CI reproducibility, replace with
+# an exact version, e.g. channel = "1.96.0".
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]
