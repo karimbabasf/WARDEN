@@ -395,6 +395,23 @@ fn parse_slice(
                     open_turn!(ts, Role::Assistant, "turn");
                 }
                 "task_complete" => {
+                    // Emit a completion marker so the radar can tell that a session's
+                    // (or spawned subagent's) task actually FINISHED, not merely paused.
+                    // SystemNotice is bookkeeping, so it never disturbs the working/idle
+                    // liveness rule; the RADAR termination pass reads it to retire a
+                    // finished Codex subagent. Attach it to the turn it closes.
+                    let tid = current_or_open(&mut cur_turn, &mut turns, &mut idx, &sid, ts);
+                    events.push(EventRecord {
+                        id: stable_id(&[&tid, "task_complete"]),
+                        turn_id: tid,
+                        session_id: sid.clone(),
+                        ts,
+                        event: Event::SystemNotice {
+                            subtype: "codex_task_complete".to_string(),
+                            data: Value::Null,
+                        },
+                        raw_ref: raw,
+                    });
                     cur_turn = None;
                 }
                 "turn_aborted" => {
@@ -886,12 +903,15 @@ mod tests {
             "redundant response_item/message must not duplicate the user prompt"
         );
 
-        // The unknown record produced a SystemNotice with the right subtype.
+        // The unknown record produced a schema-drift SystemNotice with the right
+        // subtype (skip the `codex_task_complete` marker, which is also a SystemNotice).
         let notice = b
             .events
             .iter()
             .find_map(|e| match &e.event {
-                Event::SystemNotice { subtype, .. } => Some(subtype.clone()),
+                Event::SystemNotice { subtype, .. } if subtype != "codex_task_complete" => {
+                    Some(subtype.clone())
+                }
                 _ => None,
             })
             .expect("unknown record must produce a SystemNotice");
@@ -899,6 +919,16 @@ mod tests {
             notice,
             expected["system_notice_subtype"].as_str().unwrap(),
             "SystemNotice subtype must be '{{type}}/{{payload.type}}'"
+        );
+
+        // The `task_complete` record produced the completion marker the RADAR reads to
+        // retire a finished Codex subagent.
+        assert!(
+            b.events.iter().any(|e| matches!(
+                &e.event,
+                Event::SystemNotice { subtype, .. } if subtype == "codex_task_complete"
+            )),
+            "task_complete must emit a codex_task_complete SystemNotice marker"
         );
 
         // The `turn_aborted` record maps to Event::Error{source:"codex",message:"turn_aborted"}.

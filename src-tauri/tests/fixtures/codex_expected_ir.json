@@ -12,6 +12,7 @@
     "token_usage",
     "file_snapshot",
     "system_notice",
+    "system_notice",
     "error"
   ],
   "token_usage": {

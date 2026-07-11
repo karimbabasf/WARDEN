@@ -7,7 +7,10 @@ use super::agent::build_agent;
 use super::identity::{display_label, subagent_terminated_at};
 use super::liveness::{partition_claude, read_claude_registry, AgentStatus};
 use super::model::RadarState;
-use super::status::{agent_status, claude_conversation_status, transcript_mtime_secs_ago};
+use super::status::{
+    agent_status, claude_conversation_status, codex_subagent_completed_at,
+    transcript_mtime_secs_ago,
+};
 use crate::ir::{Harness, Session};
 use crate::store::Store;
 use chrono::{DateTime, Utc};
@@ -165,9 +168,17 @@ pub fn assemble(
         let last = mtime_secs_ago(&child.external_id)
             .map(|secs| now - chrono::Duration::seconds(secs as i64));
         let terminated_at = if matches!(child.harness, Harness::Codex) {
-            // Finished only when its own rollout is no longer open. Never the file
-            // backstop: an idle-but-live subagent stays present under its open root.
-            (!directly_open(child)).then(|| last.unwrap_or(now))
+            if !directly_open(child) {
+                // Definitive close: Codex archived the rollout, or it went stale past
+                // the Codex window. Retire it at its last write.
+                Some(last.unwrap_or(now))
+            } else {
+                // Still open: retire only when its OWN transcript reports the spawned
+                // task actually completed (a real `task_complete`, not a mid-task pause
+                // or a between-turns idle). An idle-but-not-complete subagent stays
+                // nested under its live parent. Never the file-silence backstop.
+                codex_subagent_completed_at(&store.session_events(id).unwrap_or_default())
+            }
         } else {
             let tid = child.meta.get("toolUseId").and_then(|v| v.as_str());
             let parent_events = store.session_events(parent).unwrap_or_default();
@@ -1194,6 +1205,149 @@ mod tests {
         );
         let parent = state.agents.iter().find(|a| a.id == "cx-parent").unwrap();
         assert_eq!(parent.child_count, 0);
+    }
+
+    /// Build a Codex subagent (child of `thread-parent`) whose transcript is `events`,
+    /// under a single closed turn `t1`, with both parent and child sessions in `store`.
+    /// Returns nothing; the caller assembles and inspects.
+    fn seed_codex_subagent_with_events(store: &Store, now: DateTime<Utc>, events: Vec<EventRecord>) {
+        let mk = |id: &str, ext: &str, meta: serde_json::Value| Session {
+            id: id.into(),
+            harness: Harness::Codex,
+            external_id: ext.into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: PathBuf::from(format!("/tmp/{id}.jsonl")),
+            raw_hash: 0,
+            ingested_at: now,
+            meta,
+        };
+        let turn = Turn {
+            id: "t1".into(),
+            session_id: "cx-child".into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        store
+            .upsert_session_batch(
+                &mk("cx-parent", "thread-parent", serde_json::json!({ "originator": "Codex Desktop" })),
+                &[],
+                &[],
+                0,
+            )
+            .unwrap();
+        store
+            .upsert_session_batch(
+                &mk(
+                    "cx-child",
+                    "thread-child",
+                    serde_json::json!({
+                        "thread_source": "subagent",
+                        "parent_thread_id": "thread-parent",
+                        "agent_nickname": "Dirac",
+                        "originator": "Codex Desktop",
+                    }),
+                ),
+                &[turn],
+                &events,
+                0,
+            )
+            .unwrap();
+        relink_store_subagents(store);
+    }
+
+    fn codex_child_event(offset: u64, ts: DateTime<Utc>, event: Event) -> EventRecord {
+        EventRecord {
+            id: format!("cx-child-e{offset}"),
+            turn_id: "t1".into(),
+            session_id: "cx-child".into(),
+            ts,
+            event,
+            raw_ref: RawRef {
+                source_path: PathBuf::from("/tmp/cx-child.jsonl"),
+                offset,
+                line: offset as u32,
+            },
+        }
+    }
+
+    /// A Codex subagent whose OWN transcript reported `task_complete` (its spawned task
+    /// is done) is retired from the forest even though its rollout is still present on
+    /// disk (is_codex_open = true) and its parent stays open. This is the "tell when a
+    /// subagent is completely finished" signal: it fires on the real task_complete
+    /// record, so the finished subagent implodes/retires instead of lingering as idle.
+    #[test]
+    fn codex_subagent_retires_on_task_complete_signal() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let done = now - chrono::Duration::minutes(30); // finished 30 min ago
+        let events = vec![
+            codex_child_event(10, done, Event::AssistantText { text: "final result".into() }),
+            codex_child_event(
+                20,
+                done,
+                Event::SystemNotice {
+                    subtype: "codex_task_complete".into(),
+                    data: serde_json::Value::Null,
+                },
+            ),
+        ];
+        seed_codex_subagent_with_events(&store, now, events);
+
+        // Both rollouts still present (open); the child reported task_complete.
+        let is_codex_open =
+            |s: &Session| ["thread-parent", "thread-child"].contains(&s.external_id.as_str());
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, now);
+
+        assert!(
+            state.agents.iter().all(|a| a.id != "cx-child"),
+            "a subagent that reported task_complete must retire even while its rollout is open"
+        );
+        let parent = state.agents.iter().find(|a| a.id == "cx-parent").unwrap();
+        assert_eq!(parent.child_count, 0, "finished subagent no longer counts");
+    }
+
+    /// A Codex subagent still mid-task (its newest event is a tool call, no trailing
+    /// task_complete) stays nested even if its file has been quiet, because the
+    /// completion signal has not fired. Guards against retiring a working subagent.
+    #[test]
+    fn codex_working_subagent_without_task_complete_stays_nested() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let quiet = now - chrono::Duration::minutes(30);
+        let events = vec![
+            codex_child_event(10, quiet, Event::AssistantText { text: "thinking out loud".into() }),
+            codex_child_event(
+                20,
+                quiet,
+                Event::ToolCall {
+                    tool: "exec".into(),
+                    input: serde_json::Value::Null,
+                    call_id: "c1".into(),
+                    kind: ToolKind::Unknown,
+                },
+            ),
+        ];
+        seed_codex_subagent_with_events(&store, now, events);
+
+        let is_codex_open =
+            |s: &Session| ["thread-parent", "thread-child"].contains(&s.external_id.as_str());
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, now);
+
+        let child = state
+            .agents
+            .iter()
+            .find(|a| a.id == "cx-child")
+            .expect("a mid-task Codex subagent (no task_complete) must stay nested");
+        assert_eq!(child.depth, 1);
+        let parent = state.agents.iter().find(|a| a.id == "cx-parent").unwrap();
+        assert_eq!(parent.child_count, 1);
     }
 
     #[test]

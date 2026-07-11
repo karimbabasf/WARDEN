@@ -77,6 +77,33 @@ fn codex_status_from_last_event(
     })
 }
 
+/// The timestamp at which a Codex session's task last COMPLETED, if that completion is
+/// its most recent activity. Returns `Some(ts)` only when the newest action-or-
+/// completion event is a `task_complete` marker (nothing ran after it). A later action
+/// (a new orchestrator message, a tool call, a follow-up turn) means the agent resumed,
+/// and this yields `None`. This is the honest "the task is done" signal: it fires on the
+/// real `task_complete` record, so it is not fooled by a mid-task commentary message
+/// (which is always followed by more action events before the task truly completes).
+/// The RADAR uses it to retire a finished Codex subagent instead of leaving it nested.
+pub(crate) fn codex_subagent_completed_at(
+    events: &[(crate::ir::Turn, EventRecord)],
+) -> Option<DateTime<Utc>> {
+    let newest = events
+        .iter()
+        .filter(|(_, e)| {
+            codex_liveness_priority(&e.event).is_some() || is_codex_task_complete(&e.event)
+        })
+        .max_by(|(_, a), (_, b)| a.ts.cmp(&b.ts).then(a.raw_ref.offset.cmp(&b.raw_ref.offset)))
+        .map(|(_, e)| e)?;
+    is_codex_task_complete(&newest.event).then_some(newest.ts)
+}
+
+/// The `task_complete` marker the Codex adapter emits when a task finishes (a bookkeeping
+/// `SystemNotice`, so it stays out of the working/idle rule).
+fn is_codex_task_complete(event: &Event) -> bool {
+    matches!(event, Event::SystemNotice { subtype, .. } if subtype == "codex_task_complete")
+}
+
 fn codex_liveness_event_is_fresh(event: &EventRecord, now: DateTime<Utc>, stale_secs: u64) -> bool {
     let age_secs = now.signed_duration_since(event.ts).num_seconds().max(0) as u64;
     age_secs <= stale_secs
