@@ -345,6 +345,12 @@ function ContextSection({ agent }: { agent: RadarAgent }) {
             <dt>Fresh input</dt>
             <dd>{tokens(exact.fresh)}</dd>
           </div>
+          {/* Cache writes cost MORE than fresh input, so they are worth seeing
+              separately rather than folded into it. */}
+          <div>
+            <dt>Cache write</dt>
+            <dd>{tokens(exact.cacheWrite)}</dd>
+          </div>
           <div>
             <dt>Output</dt>
             <dd>{tokens(exact.output)}</dd>

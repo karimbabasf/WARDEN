@@ -953,7 +953,10 @@ mod tests {
             "345007 / 1M Opus window ≈ 0.345 (not clamped against the old 200k)"
         );
         assert_eq!(root.composition.exact.cache_read, 331_244);
-        assert_eq!(root.composition.exact.fresh, 2 + 13_761);
+        // fresh and cache_write are reported separately: they bill at different
+        // rates, so merging them made the cache-write premium unapplyable.
+        assert_eq!(root.composition.exact.fresh, 2);
+        assert_eq!(root.composition.exact.cache_write, 13_761);
         assert_eq!(root.composition.exact.output, 2_620);
         assert!(
             root.composition.estimated.is_some(),
@@ -1940,6 +1943,7 @@ mod tests {
         let cache_only = composition::ExactComposition {
             cache_read: 1_000_000,
             fresh: 0,
+            cache_write: 0,
             output: 0,
         };
         let cost = est_cost_usd(&model, &cache_only).expect("opus -> a cost");
@@ -1952,6 +1956,7 @@ mod tests {
         let fresh_only = composition::ExactComposition {
             cache_read: 0,
             fresh: 1_000_000,
+            cache_write: 0,
             output: 0,
         };
         let fresh_cost = est_cost_usd(&model, &fresh_only).expect("opus -> a cost");

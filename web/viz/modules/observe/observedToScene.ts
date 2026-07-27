@@ -121,7 +121,7 @@ function toAgent(agent: ObservedAgent, frameIso: string): RadarAgent {
     },
     // Composition is an exact API-anchored split locally. A peer sends no such
     // split, so it stays zeroed rather than being reconstructed from fill.
-    composition: { exact: { cacheRead: 0, fresh: 0, output: 0 }, estimated: null },
+    composition: { exact: { cacheRead: 0, fresh: 0, cacheWrite: 0, output: 0 }, estimated: null },
     recentActivity: toActivity(agent, frameIso),
     childCount: agent.childCount,
     startedAt: stampBefore(frameIso, agent.ageSecs),

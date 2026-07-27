@@ -63,6 +63,7 @@ pub(crate) fn build_agent(
             composition::ExactComposition {
                 cache_read: 0,
                 fresh: 0,
+                cache_write: 0,
                 output: 0,
             },
         ),
@@ -120,6 +121,7 @@ pub(crate) fn build_agent(
             exact: RadarExact {
                 cache_read: exact.cache_read,
                 fresh: exact.fresh,
+                cache_write: exact.cache_write,
                 output: exact.output,
             },
             estimated,

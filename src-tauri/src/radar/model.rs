@@ -50,7 +50,12 @@ pub struct RadarAgent {
 #[serde(rename_all = "camelCase")]
 pub struct RadarExact {
     pub cache_read: u64,
+    /// Genuinely new input tokens, billed at the plain input rate.
     pub fresh: u64,
+    /// `cache_creation` tokens, billed at a premium over the input rate. Split
+    /// out from `fresh` because the two bill differently; summing them made the
+    /// premium impossible to apply.
+    pub cache_write: u64,
     pub output: u64,
 }
 

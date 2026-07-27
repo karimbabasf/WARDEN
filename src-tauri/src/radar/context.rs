@@ -429,21 +429,18 @@ fn memory_file_count(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> u3
 /// than vanishing (see `pricing::price_for_model`'s fallback policy).
 pub(crate) fn est_cost_usd(model: &Option<String>, exact: &ExactComposition) -> Option<f64> {
     let model = model.as_deref()?;
-    let resident = exact.cache_read.saturating_add(exact.fresh);
-    let lookup = pricing::price_for_model(model, resident)?;
+    // Resident context decides which long-context price tier applies, so it must
+    // count cache writes too: they occupy the window exactly like the rest.
+    let lookup = pricing::price_for_model(model, exact.resident())?;
     let rate = lookup.pricing;
     let cache_read_rate = rate.input * pricing::CACHE_READ_MULTIPLIER;
+    // Writing a token into the cache costs MORE than sending it fresh, not less.
+    // The 5 minute TTL is the default, so that is the multiplier billed here.
+    let cache_write_rate = rate.input * pricing::CACHE_WRITE_MULTIPLIER_5M;
 
-    // `exact.fresh` merges genuinely new input tokens with cache-WRITE
-    // (`cache_creation`) tokens (see `ExactComposition` / `exact_composition` in
-    // composition.rs): the pipeline does not carry that split this far
-    // downstream, so cache-write tokens still bill at the plain input rate here,
-    // not the real 1.25x (5-minute TTL) premium `pricing.rs` now models.
-    // Fixing this needs a new field threaded from `agent.rs`'s
-    // `exact_composition` call site, outside this module's file ownership;
-    // reported rather than worked around here.
     let cost = (exact.cache_read as f64 / 1_000_000.0) * cache_read_rate
         + (exact.fresh as f64 / 1_000_000.0) * rate.input
+        + (exact.cache_write as f64 / 1_000_000.0) * cache_write_rate
         + (exact.output as f64 / 1_000_000.0) * rate.output;
     Some(cost)
 }
@@ -453,7 +450,34 @@ mod tests {
     use super::*;
 
     fn usage(cache_read: u64, fresh: u64, output: u64) -> ExactComposition {
-        ExactComposition { cache_read, fresh, output }
+        ExactComposition { cache_read, fresh, cache_write: 0, output }
+    }
+
+    /// Cache WRITES bill at a premium over fresh input, not at parity with it.
+    /// This is the regression guard for the gap that made the modelled premium
+    /// unreachable: the split used to be summed into `fresh` before it ever got
+    /// here, so a price table that knew the multiplier could never apply it.
+    #[test]
+    fn cache_writes_bill_above_fresh_input() {
+        let model = Some("claude-opus-4-8".to_string());
+        let one_m = 1_000_000u64;
+
+        let fresh_only = ExactComposition { cache_read: 0, fresh: one_m, cache_write: 0, output: 0 };
+        let write_only = ExactComposition { cache_read: 0, fresh: 0, cache_write: one_m, output: 0 };
+
+        let fresh_cost = est_cost_usd(&model, &fresh_only).expect("opus -> a cost");
+        let write_cost = est_cost_usd(&model, &write_only).expect("opus -> a cost");
+
+        assert!(
+            (fresh_cost - 5.0).abs() < 1e-6,
+            "1M fresh tokens bill at the input rate ($5.00), got {fresh_cost}"
+        );
+        assert!(
+            (write_cost / fresh_cost - pricing::CACHE_WRITE_MULTIPLIER_5M).abs() < 1e-6,
+            "cache writes must bill at exactly {}x input, got {}",
+            pricing::CACHE_WRITE_MULTIPLIER_5M,
+            write_cost / fresh_cost
+        );
     }
 
     /// The corrected Opus rate ($5.00 / $25.00, not the retired $15.00 / $75.00

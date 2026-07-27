@@ -55,10 +55,17 @@ export type RadarTeam = {
   isLead: boolean;
 };
 
-/** API-anchored token split (always present, from the transcript). */
+/**
+ * API-anchored token split (always present, from the transcript).
+ *
+ * `fresh` and `cacheWrite` are separate because they bill at different rates:
+ * writing a token into the cache costs a premium over sending it fresh. They
+ * used to be summed, which made the premium impossible to apply.
+ */
 export type RadarExactComposition = {
   cacheRead: number;
   fresh: number;
+  cacheWrite: number;
   output: number;
 };
 
@@ -209,6 +216,7 @@ function normalizeExact(v: any): RadarExactComposition {
   return {
     cacheRead: num(v?.cacheRead ?? v?.cache_read),
     fresh: num(v?.fresh),
+    cacheWrite: num(v?.cacheWrite ?? v?.cache_write),
     output: num(v?.output),
   };
 }

@@ -392,6 +392,7 @@ mod tests {
                 exact: RadarExact {
                     cache_read: 1,
                     fresh: 2,
+                    cache_write: 4,
                     output: 3,
                 },
                 estimated: None,

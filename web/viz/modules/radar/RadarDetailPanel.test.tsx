@@ -48,7 +48,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(()
 
 function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
   const composition: RadarComposition = {
-    exact: { cacheRead: 120_000, fresh: 40_000, output: 12_000 },
+    exact: { cacheRead: 120_000, fresh: 40_000, cacheWrite: 0, output: 12_000 },
     estimated: { preamble: 8_000, conversation: 90_000, toolOutput: 60_000, thinking: 14_000 },
   };
   return {

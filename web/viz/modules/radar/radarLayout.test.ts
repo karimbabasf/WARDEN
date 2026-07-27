@@ -17,7 +17,7 @@ function agent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id'>): RadarAgen
     contextTokens: 1000,
     maxTokens: 200000,
     fillPct: 0.5,
-    composition: { exact: { cacheRead: 0, fresh: 0, output: 0 }, estimated: null },
+    composition: { exact: { cacheRead: 0, fresh: 0, cacheWrite: 0, output: 0 }, estimated: null },
     recentActivity: [],
     childCount: 0,
     startedAt: '',

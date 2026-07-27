@@ -33,7 +33,7 @@ function agent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id' | 'harness' 
     status: 'working',
     contextTokens: 0,
     maxTokens: 0,
-    composition: { exact: { cacheRead: 0, fresh: 0, output: 0 }, estimated: null },
+    composition: { exact: { cacheRead: 0, fresh: 0, cacheWrite: 0, output: 0 }, estimated: null },
     recentActivity: [],
     childCount: 0,
     startedAt: '',

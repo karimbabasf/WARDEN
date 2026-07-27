@@ -27,11 +27,32 @@ pub struct ContextSize {
 }
 
 /// API-anchored split of the resident context (exact, from the transcript usage).
+///
+/// `fresh` and `cache_write` are separate because they bill at DIFFERENT rates:
+/// writing a token into the cache costs 1.25x the input rate (5 minute TTL, the
+/// default), while genuinely new input costs 1x. They used to be summed into
+/// `fresh`, which made the premium unreachable no matter what the price table
+/// said. Both are resident context, so anything measuring OCCUPANCY must still
+/// count them together (see `resident()`); only the COST path cares which is
+/// which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExactComposition {
     pub cache_read: u64,
+    /// Genuinely new input tokens, billed at the plain input rate.
     pub fresh: u64,
+    /// `cache_creation` tokens, billed at a premium over the input rate.
+    pub cache_write: u64,
     pub output: u64,
+}
+
+impl ExactComposition {
+    /// Everything occupying the context window this turn. Output is excluded: it
+    /// is generated, not resident input.
+    pub fn resident(&self) -> u64 {
+        self.cache_read
+            .saturating_add(self.fresh)
+            .saturating_add(self.cache_write)
+    }
 }
 
 /// Clamp `tokens / max` to `[0, 1]`; `0.0` when `max == 0` (unknown window).
@@ -84,8 +105,8 @@ pub fn codex_context_size(input_tokens: u64, model_context_window: u64) -> Conte
 }
 
 /// Exact composition from a `TokenUsage` event: `cache_read` (cache-stable),
-/// `fresh = input + cache_creation` (written this turn), and `output`. A
-/// non-`TokenUsage` event yields all zeros.
+/// `fresh` (genuinely new input), `cache_write` (`cache_creation`, written this
+/// turn at a premium rate), and `output`. A non-`TokenUsage` event yields zeros.
 pub fn exact_composition(last_usage: &Event) -> ExactComposition {
     match last_usage {
         Event::TokenUsage {
@@ -96,12 +117,14 @@ pub fn exact_composition(last_usage: &Event) -> ExactComposition {
             ..
         } => ExactComposition {
             cache_read: *cache_read as u64,
-            fresh: *input as u64 + *cache_creation as u64,
+            fresh: *input as u64,
+            cache_write: *cache_creation as u64,
             output: *output as u64,
         },
         _ => ExactComposition {
             cache_read: 0,
             fresh: 0,
+            cache_write: 0,
             output: 0,
         },
     }
@@ -335,15 +358,23 @@ mod tests {
         );
     }
 
-    /// Exact composition splits the resident context: cache_read, fresh
-    /// (=input+cache_creation), output.
+    /// Exact composition splits the resident context four ways: cache_read,
+    /// fresh (genuinely new input), cache_write (`cache_creation`), and output.
+    ///
+    /// `fresh` and `cache_write` used to be summed. They are separated because
+    /// they bill at different rates, and this asserts the split explicitly so a
+    /// future merge back into one field fails loudly instead of silently
+    /// under-billing every cached turn.
     #[test]
     fn exact_composition_splits_cache_fresh_output() {
         let u = usage(2, 13761, 331244, 2620, "claude-opus-4-8");
         let c = exact_composition(&u);
         assert_eq!(c.cache_read, 331_244);
-        assert_eq!(c.fresh, 2 + 13_761);
+        assert_eq!(c.fresh, 2, "genuinely new input only");
+        assert_eq!(c.cache_write, 13_761, "cache_creation, billed at a premium");
         assert_eq!(c.output, 2_620);
+        // Occupancy is unchanged by the split: all three still sit in the window.
+        assert_eq!(c.resident(), 331_244 + 2 + 13_761);
     }
 
     /// Codex size uses input_tokens against the task_started window; ~0.57 fill.
@@ -508,6 +539,9 @@ mod tests {
         };
         let size = claude_context_size(&e, "claude-opus-4-8");
         assert_eq!(size.context_tokens, 0);
-        assert_eq!(exact_composition(&e), ExactComposition { cache_read: 0, fresh: 0, output: 0 });
+        assert_eq!(
+            exact_composition(&e),
+            ExactComposition { cache_read: 0, fresh: 0, cache_write: 0, output: 0 }
+        );
     }
 }

@@ -55,18 +55,23 @@ pub(crate) struct ModelPricing {
 /// constant, not a per-row column.
 pub(crate) const CACHE_READ_MULTIPLIER: f64 = 0.1;
 
-// Cache WRITE tokens (`cache_creation`) bill at 1.25x the resolved input rate
-// under the 5 minute TTL, the default, and 2.0x under the 1 hour TTL. Verified
-// against every current Anthropic and GPT-5.6-family row on the vendors' own
-// pricing pages (2026-07-27 fetch). `est_cost_usd` cannot apply this yet:
-// `ExactComposition::fresh` merges genuinely new input with `cache_creation`
-// before it reaches this module (see the note on `est_cost_usd`), so there is
-// no live production call site for these two multipliers today; WARDEN's
-// transcript data also carries no per-event TTL signal to pick 5-minute vs
-// 1-hour even if there were. They are exercised by this module's own test
-// (`cache_read_and_cache_write_multipliers_match_the_verified_constants`,
-// where they are declared locally) so the formula is proven correct and ready
-// for the day the `cache_creation` split is threaded through from `agent.rs`.
+/// Cache WRITE tokens (`cache_creation`) bill at 1.25x the resolved input rate
+/// under the 5 minute TTL, and 2.0x under the 1 hour TTL. Verified against every
+/// current Anthropic and GPT-5.6-family row on the vendors' own pricing pages
+/// (2026-07-27 fetch).
+///
+/// The 5 minute rate is the one billed, because it is the default TTL and a
+/// transcript carries no per-event signal to tell the two apart. That makes this
+/// a floor on the cache-write cost, never an overstatement: a session actually
+/// using the 1 hour TTL is being under-billed here rather than over-billed, which
+/// is the right direction for an estimate to err.
+pub(crate) const CACHE_WRITE_MULTIPLIER_5M: f64 = 1.25;
+
+/// The 1 hour TTL rate. Not billed (see above: a transcript carries no per-event
+/// TTL signal), kept as the documented counterpart and asserted by this module's
+/// tests so the pair cannot drift apart silently.
+#[cfg(test)]
+const CACHE_WRITE_MULTIPLIER_1H: f64 = 2.0;
 
 /// The GPT-5.6/5.5/5.4 family reprices the WHOLE request (every token, not just
 /// the tokens past the threshold) once resident context exceeds this many
@@ -462,10 +467,12 @@ mod tests {
     /// they are declared locally here rather than as unused top-level consts.
     #[test]
     fn cache_read_and_cache_write_multipliers_match_the_verified_constants() {
-        const CACHE_WRITE_MULTIPLIER_5M: f64 = 1.25;
-        const CACHE_WRITE_MULTIPLIER_1H: f64 = 2.0;
-
+        // Asserts the MODULE constants, not local copies. They used to be
+        // redeclared here, which meant the test passed even if the real
+        // constants drifted: it was checking itself, not the code.
         assert!((CACHE_READ_MULTIPLIER - 0.1).abs() < 1e-12);
+        assert!((CACHE_WRITE_MULTIPLIER_5M - 1.25).abs() < 1e-12);
+        assert!((CACHE_WRITE_MULTIPLIER_1H - 2.0).abs() < 1e-12);
 
         let opus = price("claude-opus-5");
         assert!((opus.input * CACHE_READ_MULTIPLIER - 0.50).abs() < 1e-9);

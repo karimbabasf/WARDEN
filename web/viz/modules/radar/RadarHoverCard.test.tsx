@@ -31,7 +31,7 @@ function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
     contextTokens: 144_000,
     maxTokens: 200_000,
     fillPct: 0.72,
-    composition: { exact: { cacheRead: 0, fresh: 0, output: 0 }, estimated: null },
+    composition: { exact: { cacheRead: 0, fresh: 0, cacheWrite: 0, output: 0 }, estimated: null },
     recentActivity: [],
     childCount: 2,
     startedAt: '2026-06-23T22:00:00Z',
