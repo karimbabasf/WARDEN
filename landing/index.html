@@ -5,7 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WARDEN &middot; the agent that watches your agents</title>
 <meta name="description" content="A macOS radar for every Claude Code and Codex session running on your Mac. Local first, no API keys, no socket until you ask for one.">
-<link rel="preload" as="font" type="font/woff2" href="fonts/technor-variable.woff2" crossorigin>
+<!-- No font preload on purpose. CSS font fetches are CORS mode, so a preload needs
+     crossorigin, and over file:// that makes the origin null and the request is
+     blocked. This page is meant to open as a file. If it is ever served over http,
+     add back: <link rel="preload" as="font" type="font/woff2" href="..." crossorigin> -->
 <style>
 /* ── type ─────────────────────────────────────────────────────────────────
    Display is Technor (Fontshare, variable 200-900, 24KB): squared bowls and flat
@@ -33,8 +36,9 @@
   --void:#020403;          /* the app's own --bg */
   --surface:#070d0b;
   --ink:#e9f1ed;
-  --ink-2:#a3b3ad;
-  --ink-3:#7d908a;
+  --ink-2:#a3b3ad;         /* 9.4:1  */
+  --ink-3:#7d908a;         /* 6.1:1  */
+  --ink-4:#6e7c76;         /* 4.7:1, the dimmest step that still clears AA */
   --rule:#16211d;
   --rule-2:#101a17;
   --claude:#ff8636;        /* harnessColors.ts, verbatim */
@@ -90,8 +94,8 @@ a{color:inherit}
 /* The canvases overhang the stage box top and bottom. The ring is taller than
    the wordmark's band, and clipping it at the box edge sliced globes in half. */
 .orbit canvas{
-  position:absolute;left:0;right:0;top:-170px;bottom:-170px;
-  width:100%;height:calc(100% + 340px);display:block;
+  position:absolute;left:0;right:0;top:-168px;bottom:-168px;
+  width:100%;height:calc(100% + 336px);display:block;
 }
 #ring-back{z-index:1}
 #ring-front{z-index:3;pointer-events:none}
@@ -115,12 +119,12 @@ a{color:inherit}
 }
 .lede em{font-style:normal;color:var(--ink)}
 
-.actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:34px;padding:0 32px}
+.actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:36px;padding:0 32px}
 
 /* Controls: layered depth, not a flat fill. Hard offset that collapses on press. */
 .btn{
   font-family:var(--display);font-size:14px;font-weight:600;letter-spacing:.03em;
-  padding:13px 24px 12px;border-radius:var(--r-ctl);
+  padding:12px 24px;border-radius:var(--r-ctl);
   cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px;
   transition:transform .12s var(--ease),box-shadow .12s var(--ease),background-color .12s var(--ease);
 }
@@ -136,16 +140,16 @@ a{color:inherit}
 }
 .btn-ghost:hover{background:#0c1512;border-color:#31423b}
 .btn-ghost:active{transform:translateY(2px);box-shadow:0 0 0 #0b120f,inset 0 1px 0 rgba(255,255,255,.06)}
-.note{margin-top:18px;text-align:center;color:var(--ink-3)}
+.note{margin-top:20px;text-align:center;color:var(--ink-3)}
 
 /* ── legend: what a globe is telling you ──────────────────────────────── */
 .legend{
   margin-top:88px;border-top:1px solid var(--rule);
   display:grid;grid-template-columns:repeat(3,1fr);
 }
-.legend li{list-style:none;padding:22px 28px 22px 0;border-right:1px solid var(--rule-2)}
+.legend li{list-style:none;padding:24px 28px 24px 0;border-right:1px solid var(--rule-2)}
 .legend li:last-child{border-right:0}
-.legend dt{color:var(--ink-3);margin-bottom:7px}
+.legend dt{color:var(--ink-3);margin-bottom:8px}
 .legend dd{color:var(--ink-2);font-size:15px;line-height:1.5;max-width:34ch}
 .legend dd b{color:var(--ink);font-weight:600}
 .g-claude{color:var(--claude)}.g-codex{color:var(--codex)}.g-slate{color:var(--slate)}
@@ -161,25 +165,25 @@ h2{font-family:var(--display);font-weight:800;font-size:clamp(2rem,4.4vw,3.4rem)
 .rows{border-top:1px solid var(--rule)}
 .row{
   display:grid;grid-template-columns:44px 5fr 7fr;gap:32px;
-  padding:30px 0;border-bottom:1px solid var(--rule-2);align-items:start;
+  padding:32px 0;border-bottom:1px solid var(--rule-2);align-items:start;
 }
-.row .idx{font-family:var(--mono);font-size:11px;color:#4a5a54;padding-top:5px;letter-spacing:.08em}
+.row .idx{font-family:var(--mono);font-size:11px;color:var(--ink-4);padding-top:4px;letter-spacing:.08em}
 .row h3{font-family:var(--display);font-weight:700;font-size:20px;letter-spacing:.005em;line-height:1.25}
 .row p{color:var(--ink-2);font-size:16px;max-width:64ch}
 .row p b{color:var(--ink);font-weight:600}
 
 .spec{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-2);margin-top:64px;border:1px solid var(--rule-2)}
-.spec div{background:var(--void);padding:20px 22px}
-.spec dt{color:#4a5a54;margin-bottom:8px}
+.spec div{background:var(--void);padding:20px 24px}
+.spec dt{color:var(--ink-4);margin-bottom:8px}
 .spec dd{font-size:15px;color:var(--ink);font-weight:500}
 
 /* ── close ────────────────────────────────────────────────────────────── */
-.close{padding:130px 0 100px;text-align:center}
-.close h2{max-width:16ch;margin:0 auto 26px}
-.close p{color:var(--ink-2);max-width:46ch;margin:0 auto 34px}
+.close{padding:128px 0 100px;text-align:center}
+.close h2{max-width:16ch;margin:0 auto 24px}
+.close p{color:var(--ink-2);max-width:46ch;margin:0 auto 32px}
 
-footer{border-top:1px solid var(--rule);padding:26px 0 40px}
-.foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:#4a5a54}
+footer{border-top:1px solid var(--rule);padding:24px 0 40px}
+.foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--ink-4)}
 
 @media (max-width:900px){
   .legend{grid-template-columns:1fr}
@@ -196,7 +200,7 @@ footer{border-top:1px solid var(--rule);padding:26px 0 40px}
   /* narrow: the stage collapses toward the wordmark so the ring stops sitting in
      a field of dead space, and the mark takes more of the width to stay dominant */
   .orbit{height:clamp(300px,42vh,400px)}
-  .orbit canvas{top:-105px;bottom:-105px;height:calc(100% + 210px)}
+  .orbit canvas{top:-104px;bottom:-104px;height:calc(100% + 208px)}
   .mark{font-size:clamp(3rem,15.5vw,5rem);letter-spacing:.03em;text-indent:.03em}
   .lede,.actions{padding:0 20px}
   .hero{padding-bottom:64px}
@@ -219,6 +223,7 @@ footer{border-top:1px solid var(--rule);padding:26px 0 40px}
   <span class="mono">v0.1 &middot; APPLE SILICON</span>
 </div>
 
+<main>
 <section class="hero">
   <div class="orbit" id="orbit">
     <canvas id="ring-back"></canvas>
@@ -305,6 +310,7 @@ footer{border-top:1px solid var(--rule);padding:26px 0 40px}
     </div>
   </div>
 </section>
+</main>
 
 <footer>
   <div class="wrap foot mono">

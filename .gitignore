@@ -33,3 +33,6 @@ status.sh
 # local scratch (design exploration, throwaway artifacts)
 /.scratch/
 /.warden-run/
+
+# design tool captures (look.mjs)
+landing/.design/
