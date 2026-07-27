@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod compact;
 pub mod ingest;
 pub mod ir;
 pub mod observe;
@@ -28,6 +29,11 @@ struct RadarWatcherGuard {
     #[allow(dead_code)]
     radar_signal: scheduler::RadarDirtySignal,
 }
+
+/// Parks the armed-compaction watcher for the app's lifetime. Its own type
+/// because Tauri keys managed state by type, and dropping it stops the worker
+/// thread.
+struct CompactWatcherGuard(#[allow(dead_code)] compact::CompactWatcher);
 
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
@@ -109,6 +115,32 @@ pub fn run() {
                 }
                 Err(e) => {
                     tracing::warn!(error=%format!("{e:#}"), "radar watchers failed to start")
+                }
+            }
+
+            // 2a) Armed-compaction watcher: fires `/compact` at agents the user
+            //     armed, once they go idle. Nothing here reaches an agent unless
+            //     the user explicitly armed it, and the armed set lives entirely
+            //     in WARDEN's own DB. Best-effort, same isolation as the others:
+            //     a watch failure means the button reports its state honestly and
+            //     never fires, rather than aborting startup.
+            {
+                let app_handle = app.handle().clone();
+                let sink: compact::StatusSink = std::sync::Arc::new(move || {
+                    let _ = app_handle.emit("compact_status", ());
+                });
+                match compact::spawn(
+                    state.store.clone(),
+                    util::default_claude_sessions_dir(),
+                    util::default_codex_sessions(),
+                    sink,
+                ) {
+                    Ok(watcher) => {
+                        app.manage(CompactWatcherGuard(watcher));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error=%format!("{e:#}"), "compact watcher failed to start")
+                    }
                 }
             }
 
@@ -277,6 +309,7 @@ pub fn run() {
             get_radar_state,
             rename_session,
             reveal_path,
+            preview_file,
             preview_observed_state,
             observe_start_sharing,
             observe_stop_sharing,
@@ -289,7 +322,11 @@ pub fn run() {
             observe_add_peer,
             observe_list_peers,
             observe_remove_peer,
-            observe_peer_state
+            observe_peer_state,
+            compact_arm,
+            compact_cancel,
+            compact_status,
+            compact_open_automation_settings
         ])
         .on_window_event(|window, event| {
             // The red traffic-light button (and ⌘W) asks the window to CLOSE. WARDEN

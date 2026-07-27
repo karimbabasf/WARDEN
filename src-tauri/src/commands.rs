@@ -294,6 +294,116 @@ pub async fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), Stri
         .map_err(|e| format!("reveal: {e}"))
 }
 
+/// A bounded peek at a file an agent is actually touching, for the detail panel's
+/// "show me what it is reading/writing" control.
+///
+/// SECURITY: this is deliberately NOT a general file-read primitive. The requested
+/// path must already appear as a target on the CURRENT radar state (an in-flight
+/// action's target, or a row in some agent's recent activity). Anything else is
+/// refused, so a compromised webview cannot turn this into arbitrary local file
+/// read. The allowlist is rebuilt per call from live state rather than cached, so
+/// revoking is automatic: once a path ages out of the feed it stops being readable.
+///
+/// It is also unreachable from the network by construction. Commands are invoked
+/// only by the local webview; a remote observer receives `ObservedState`, which
+/// carries no paths at all, so an observer has nothing to pass here in the first
+/// place.
+///
+/// Bounded on BOTH axes (bytes and lines) because the point is a glance, not a
+/// viewer, and because a multi-megabyte file would otherwise cross the IPC bridge.
+const PREVIEW_MAX_BYTES: usize = 64 * 1024;
+const PREVIEW_MAX_LINES: usize = 400;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreview {
+    /// Echoed back `~`-folded, so the caller never learns an absolute path.
+    pub path: String,
+    pub text: String,
+    /// True when the file was longer than the byte or line budget.
+    pub truncated: bool,
+    pub total_bytes: u64,
+    pub shown_lines: usize,
+    /// False when the bytes are not valid UTF-8 (a binary); `text` is then empty.
+    pub is_text: bool,
+}
+
+#[tauri::command]
+pub async fn preview_file(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<FilePreview, String> {
+    use std::io::Read;
+
+    let radar = fresh_radar_state_for_read(&state);
+    if !radar_mentions_path(&radar, &path) {
+        return Err("that path is not on the radar right now".into());
+    }
+
+    let expanded = crate::util::expand_tilde(&path);
+    let canonical = expanded
+        .canonicalize()
+        .map_err(|e| format!("no such path: {e}"))?;
+
+    let meta = std::fs::metadata(&canonical).map_err(|e| format!("stat: {e}"))?;
+    if meta.is_dir() {
+        return Err("that path is a directory".into());
+    }
+    let total_bytes = meta.len();
+
+    let mut file = std::fs::File::open(&canonical).map_err(|e| format!("open: {e}"))?;
+    let mut buf = vec![0u8; PREVIEW_MAX_BYTES];
+    let read = file.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+    buf.truncate(read);
+
+    let Ok(whole) = String::from_utf8(buf) else {
+        return Ok(FilePreview {
+            path,
+            text: String::new(),
+            truncated: total_bytes > read as u64,
+            total_bytes,
+            shown_lines: 0,
+            is_text: false,
+        });
+    };
+
+    let mut text = String::new();
+    let mut shown_lines = 0usize;
+    for line in whole.lines().take(PREVIEW_MAX_LINES) {
+        text.push_str(line);
+        text.push('\n');
+        shown_lines += 1;
+    }
+
+    Ok(FilePreview {
+        path,
+        truncated: total_bytes > read as u64 || whole.lines().count() > shown_lines,
+        text,
+        total_bytes,
+        shown_lines,
+        is_text: true,
+    })
+}
+
+/// Is this display path something the live radar is actually pointing at?
+///
+/// Compares against the exact strings the frontend was given, which is the whole
+/// point: the caller can only ask for what it was already shown.
+fn radar_mentions_path(radar: &RadarState, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    radar.agents.iter().any(|a| {
+        a.current_action
+            .as_ref()
+            .and_then(|act| act.target.as_deref())
+            == Some(path)
+            || a.recent_activity
+                .iter()
+                .any(|row| row.target.as_deref() == Some(path))
+    })
+}
+
 /// Exactly what a remote observer would see of this machine right now.
 ///
 /// Runs the live radar through the SAME [`crate::observe::project_state`] the wire uses.
@@ -534,6 +644,71 @@ pub async fn observe_peer_state(
 /// Unix seconds to rfc3339, the shape every timestamp crosses IPC in.
 fn stamp(ts: i64) -> String {
     crate::observe::peers::unix_to_rfc3339(ts).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Armed compaction: "compact this agent when it finishes".
+//
+// These four are a thin shell over `crate::compact`. Arming persists WARDEN-side
+// state and sends the agent nothing, so `compact_arm` is not the moment anything
+// reaches another process: the watcher thread is, once the agent goes idle.
+// ---------------------------------------------------------------------------
+
+/// Arm one agent. Returns the row exactly as `compact_status` would report it, so
+/// the meter can re-render without a second round trip.
+///
+/// Errors are meaningful and worth showing: a subagent shares its parent's
+/// context and cannot be compacted alone, and a session that has already exited
+/// has nothing to compact.
+#[tauri::command]
+pub async fn compact_arm(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+) -> Result<crate::compact::ArmedRow, String> {
+    crate::compact::arm_agent(
+        &state.store,
+        &default_claude_sessions_dir(),
+        &crate::util::default_codex_sessions(),
+        &agent_id,
+    )
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// Disarm one agent. `false` means nothing was armed.
+///
+/// Total by construction: the record is deleted and nothing was ever sent, so
+/// there is no request out in the world to chase.
+#[tauri::command]
+pub async fn compact_cancel(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+) -> Result<bool, String> {
+    crate::compact::cancel_agent(&state.store, &agent_id).map_err(|e| format!("{e:#}"))
+}
+
+/// The armed set plus the Automation permission state. Also pushed as the
+/// `compact_status` event whenever the watcher changes something.
+#[tauri::command]
+pub async fn compact_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::compact::CompactStatus, String> {
+    crate::compact::status(
+        &state.store,
+        &default_claude_sessions_dir(),
+        &crate::util::default_codex_sessions(),
+    )
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// Open System Settings at Privacy and Security, Automation.
+///
+/// The recovery path for a denied permission, which never re-prompts on its own.
+/// The frontend should offer this only when `automationRecoverableInSettings` is
+/// true.
+#[tauri::command]
+pub async fn compact_open_automation_settings() -> Result<(), String> {
+    crate::compact::reveal_automation_settings();
+    Ok(())
 }
 
 #[cfg(test)]
