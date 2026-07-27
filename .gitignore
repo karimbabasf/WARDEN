@@ -36,3 +36,5 @@ status.sh
 
 # design tool captures (look.mjs)
 landing/.design/
+# Browser-audit output (screenshots + audit.json) from the UI verification pass.
+/.design/
