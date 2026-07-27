@@ -11,25 +11,32 @@
      add back: <link rel="preload" as="font" type="font/woff2" href="..." crossorigin> -->
 <style>
 /* ── type ─────────────────────────────────────────────────────────────────
-   Display is Technor (Fontshare, variable 200-900, 24KB): squared bowls and flat
-   terminals, machined rather than sci-fi. Its lowercase is too geometric to carry
-   paragraphs, so text is Switzer (variable, 42KB), which stays out of the way.
+   Array is the LOGOTYPE, used once, for the wordmark and nothing else. It is a
+   dot matrix face: the word is built from a grid of points, which is the same
+   thing the globes are (a point lattice with lit vertex nodes). The word and the
+   bodies orbiting it are made of the same particles, which is the whole idea.
+   It breaks down below display size, so it never appears anywhere but the mark.
+   Nippo (variable 200-700) carries everything else, headings and paragraphs both:
+   squared and geometric, Array's solid counterpart. Checked at 17px against a
+   neutral grotesk before committing to it; the flat sided bowls read as instrument
+   text rather than the soft geometric that made the first pick wrong for body.
    Mono is the app's own stack: WARDEN's style.css declares local SF Mono / Menlo,
-   so the site and the product speak in the same typeface for zero payload. */
+   so the site and the product speak in the same typeface for zero payload.
+   Three families total (logotype, text, mono) and 59KB of font across the page. */
 @font-face{
-  font-family:Technor;
-  src:url("fonts/technor-variable.woff2") format("woff2-variations");
-  font-weight:200 900; font-style:normal; font-display:swap;
+  font-family:Array;
+  src:url("fonts/array.woff2") format("woff2");
+  font-weight:700; font-style:normal; font-display:swap;
 }
 @font-face{
-  font-family:Switzer;
-  src:url("fonts/switzer-variable.woff2") format("woff2-variations");
-  font-weight:100 900; font-style:normal; font-display:swap;
+  font-family:Nippo;
+  src:url("fonts/nippo-variable.woff2") format("woff2-variations");
+  font-weight:200 700; font-style:normal; font-display:swap;
 }
 @font-face{ /* metric matched fallback so the wordmark does not shift on load */
-  font-family:TechnorFallback;
+  font-family:MarkFallback;
   src:local("Helvetica Neue"),local("Arial");
-  size-adjust:104%; ascent-override:96%; descent-override:24%;
+  size-adjust:112%; ascent-override:92%; descent-override:22%;
 }
 
 :root{
@@ -45,8 +52,9 @@
   --codex:#4fc9ff;
   --slate:#8fa0b8;
 
-  --display:Technor,TechnorFallback,sans-serif;
-  --sans:Switzer,"Helvetica Neue",sans-serif;
+  --mark:Array,MarkFallback,sans-serif;   /* the logotype, used exactly once */
+  --display:Nippo,"Helvetica Neue",sans-serif;
+  --sans:Nippo,"Helvetica Neue",sans-serif;
   --mono:"SF Mono",Menlo,ui-monospace,monospace;
 
   --r-ctl:4px;             /* machined geometry: one control radius, one surface radius */
@@ -76,7 +84,7 @@ a{color:inherit}
   display:flex;align-items:baseline;justify-content:space-between;gap:24px;
   padding:24px 32px 0;
 }
-.rail b{font-family:var(--display);font-weight:800;font-size:14px;letter-spacing:.22em}
+.rail b{font-family:var(--display);font-weight:700;font-size:14px;letter-spacing:.22em}
 .rail .mono{color:var(--ink-3)}
 .rail .set{display:flex;gap:20px}
 
@@ -102,11 +110,11 @@ a{color:inherit}
 
 .mark{
   position:relative;z-index:2;
-  font-family:var(--display);font-weight:900;
-  font-size:clamp(3.4rem,13.5vw,12.5rem);
+  font-family:var(--mark);font-weight:700;
+  font-size:clamp(3.1rem,12.6vw,11.5rem);
   line-height:.9;
-  letter-spacing:.045em;
-  text-indent:.045em;          /* balance the trailing letterspace */
+  letter-spacing:.04em;
+  text-indent:.02em;           /* half the trailing letterspace, to optically centre */
   color:var(--ink);
   white-space:nowrap;
   user-select:none;
@@ -159,7 +167,7 @@ a{color:inherit}
 /* ── datasheet ────────────────────────────────────────────────────────── */
 .sheet{padding:120px 0 40px;border-top:1px solid var(--rule)}
 .sheet-head{display:grid;grid-template-columns:5fr 7fr;gap:56px;align-items:end;margin-bottom:64px}
-h2{font-family:var(--display);font-weight:800;font-size:clamp(2rem,4.4vw,3.4rem);line-height:1.02;letter-spacing:-.015em}
+h2{font-family:var(--display);font-weight:700;font-size:clamp(2rem,4.4vw,3.4rem);line-height:1.02;letter-spacing:-.015em}
 .sheet-head p{color:var(--ink-2);max-width:56ch;font-size:17px}
 
 .rows{border-top:1px solid var(--rule)}
@@ -416,8 +424,8 @@ function drawGlobe(ctx, a, x, y, r, k, t, front){
   if (front){
     ctx.globalCompositeOperation = 'source-over';
     const oc = ctx.createRadialGradient(x,y,0,x,y,r*1.04);
-    oc.addColorStop(0,'rgba(2,4,3,.90)'); oc.addColorStop(.88,'rgba(2,4,3,.86)');
-    oc.addColorStop(.97,'rgba(2,4,3,.46)'); oc.addColorStop(1,'rgba(2,4,3,0)');
+    oc.addColorStop(0,'rgba(2,4,3,.74)'); oc.addColorStop(.88,'rgba(2,4,3,.70)');
+    oc.addColorStop(.97,'rgba(2,4,3,.38)'); oc.addColorStop(1,'rgba(2,4,3,0)');
     ctx.fillStyle = oc; ctx.beginPath(); ctx.arc(x,y,r*1.04,0,6.2832); ctx.fill();
   }
   ctx.globalCompositeOperation = 'lighter';
