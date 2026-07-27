@@ -66,7 +66,7 @@ describe('normalizeRadarState', () => {
     });
     expect(a.composition.exact).toEqual({ cacheRead: 90000, fresh: 12000, output: 2620 });
     expect(a.composition.estimated).toEqual({ preamble: 7000, conversation: 3000, toolOutput: 1500, thinking: 200 });
-    expect(a.recentActivity[0]).toEqual({ ts: '2026-06-23T22:50:00Z', kind: 'tool', label: 'Read' });
+    expect(a.recentActivity[0]).toEqual({ ts: '2026-06-23T22:50:00Z', kind: 'tool', label: 'Read', target: null });
     expect(a.estCostUsd).toBeCloseTo(0.42);
   });
 
@@ -172,6 +172,122 @@ describe('normalizeRadarState', () => {
     expect(radarSubtitle({ label: 'x', cwd: null, model: 'claude-haiku-4-5-20251001' })).toBeNull();
     // Folder present but model unknown → folder alone.
     expect(radarSubtitle({ label: 'do a thing', cwd: 'MOBIUS', model: null })).toBe('MOBIUS');
+  });
+
+  it('defaults title/currentAction/team to null, and passes an activity target through', () => {
+    const model = normalizeRadarState({
+      agents: [{ id: 'bare', harness: 'codex', status: 'idle' }],
+    });
+    const a = model.agents[0];
+    expect(a.title).toBeNull();
+    expect(a.currentAction).toBeNull();
+    expect(a.team).toBeNull();
+
+    const withTarget = normalizeRadarState({
+      agents: [{ id: 'x', harness: 'claude_code', status: 'working', recentActivity: [{ ts: 'T', kind: 'read', label: 'Read x.rs', target: '~/x.rs' }] }],
+    });
+    expect(withTarget.agents[0].recentActivity[0].target).toBe('~/x.rs');
+  });
+
+  it('normalizes a well-formed currentAction (camelCase and snake_case)', () => {
+    const camel = normalizeRadarState({
+      agents: [
+        {
+          id: 'a',
+          harness: 'claude_code',
+          status: 'working',
+          title: 'Rebuild the radar panel',
+          currentAction: {
+            kind: 'write',
+            tool: 'Edit',
+            label: 'Edit agent.rs',
+            target: '~/Developer/Apps/WARDEN/src/agent.rs',
+            startedAt: '2026-06-23T22:00:00Z',
+            elapsedMs: 4200,
+          },
+        },
+      ],
+    });
+    expect(camel.agents[0].title).toBe('Rebuild the radar panel');
+    expect(camel.agents[0].currentAction).toEqual({
+      kind: 'write',
+      tool: 'Edit',
+      label: 'Edit agent.rs',
+      target: '~/Developer/Apps/WARDEN/src/agent.rs',
+      startedAt: '2026-06-23T22:00:00Z',
+      elapsedMs: 4200,
+    });
+
+    const snake = normalizeRadarState({
+      agents: [
+        {
+          id: 'b',
+          harness: 'codex',
+          status: 'working',
+          current_action: { kind: 'run', tool: 'exec_command', label: 'pnpm test', started_at: 'T1', elapsed_ms: 900 },
+        },
+      ],
+    });
+    expect(snake.agents[0].currentAction).toEqual({
+      kind: 'run',
+      tool: 'exec_command',
+      label: 'pnpm test',
+      target: null,
+      startedAt: 'T1',
+      elapsedMs: 900,
+    });
+  });
+
+  it('drops a currentAction missing kind or tool rather than rendering a half-populated hero', () => {
+    const model = normalizeRadarState({
+      agents: [{ id: 'a', harness: 'codex', status: 'working', currentAction: { tool: 'Bash', label: 'x' } }],
+    });
+    expect(model.agents[0].currentAction).toBeNull();
+  });
+
+  it('normalizes a well-formed team (camelCase and snake_case) and drops a nameless one', () => {
+    const camel = normalizeRadarState({
+      agents: [
+        {
+          id: 'a',
+          harness: 'claude_code',
+          status: 'working',
+          team: { id: 'session-1', name: 'session-1', memberName: 'BackendMap', memberType: 'Explore', memberCount: 6, isLead: false },
+        },
+      ],
+    });
+    expect(camel.agents[0].team).toEqual({
+      id: 'session-1',
+      name: 'session-1',
+      memberName: 'BackendMap',
+      memberType: 'Explore',
+      memberCount: 6,
+      isLead: false,
+    });
+
+    const snake = normalizeRadarState({
+      agents: [
+        {
+          id: 'b',
+          harness: 'claude_code',
+          status: 'working',
+          team: { id: 'session-1', name: 'session-1', member_name: null, member_type: null, member_count: 1, is_lead: true },
+        },
+      ],
+    });
+    expect(snake.agents[0].team).toEqual({
+      id: 'session-1',
+      name: 'session-1',
+      memberName: null,
+      memberType: null,
+      memberCount: 1,
+      isLead: true,
+    });
+
+    const nameless = normalizeRadarState({
+      agents: [{ id: 'c', harness: 'codex', status: 'idle', team: { id: 'session-1' } }],
+    });
+    expect(nameless.agents[0].team).toBeNull();
   });
 
   it('drops only the estimated lens when malformed but keeps exact', () => {

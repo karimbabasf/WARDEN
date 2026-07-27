@@ -16,6 +16,43 @@ export type RadarActivity = {
   ts: string;
   kind: 'tool' | 'message' | 'thinking' | string;
   label: string;
+  /**
+   * Display path (`~`-folded) this row touched, or null for a row with no single
+   * file target (a shell run, a message, thinking). Optional key so a fixture or
+   * an older backend payload that never mentions it still satisfies the type;
+   * `normalizeRadarState` always fills it in as a value or `null`.
+   */
+  target?: string | null;
+};
+
+/**
+ * The single in-flight action: a tool call started and not yet returned. Mirrors
+ * Rust `RadarAction`. `null` on the agent means genuinely idle between calls, not
+ * "we could not tell" (that distinction is what makes it honest to render as the
+ * panel hero).
+ */
+export type RadarCurrentAction = {
+  kind: string; // read | write | search | run | tool, same vocabulary as RadarActivity.kind
+  tool: string; // as the harness named it: "Edit", "Bash", "exec_command"
+  label: string; // short human label, e.g. "Edit agent.rs"
+  target: string | null; // ~-folded display path, when exactly one file is involved
+  startedAt: string;
+  elapsedMs: number;
+};
+
+/**
+ * Membership in a named agent team. Mirrors Rust `RadarTeam`; Codex has no team
+ * concept, so this stays null there.
+ */
+export type RadarTeam = {
+  id: string;
+  name: string;
+  /** This agent's own name within the team, e.g. "BackendMap". */
+  memberName: string | null;
+  /** The agent type the team recorded for this member, e.g. "Explore". */
+  memberType: string | null;
+  memberCount: number;
+  isLead: boolean;
 };
 
 /** API-anchored token split (always present, from the transcript). */
@@ -67,6 +104,17 @@ export type RadarAgent = {
   cwd: string | null; // project-folder basename (root only), for the "folder · model" subtitle
   role: string | null;
   model: string | null;
+  /**
+   * The harness's own session title (Claude `custom-title`, or a Codex plan's H1),
+   * distinct from `label` (radar-derived) and `nickname`. Optional key: a fixture
+   * or older payload that omits it still satisfies the type; the normalizer always
+   * fills it in as a string or `null`.
+   */
+  title?: string | null;
+  /** What this agent is doing right now; `null` when idle between tool calls. */
+  currentAction?: RadarCurrentAction | null;
+  /** Agent-team membership, when the harness groups agents into a named team. */
+  team?: RadarTeam | null;
   status: RadarStatus;
   contextTokens: number; // exact live occupancy
   maxTokens: number; // model window (0 if unknown)
@@ -172,6 +220,41 @@ function normalizeActivity(v: any): RadarActivity {
     ts: str(v?.ts),
     kind: str(v?.kind, 'message'),
     label: str(v?.label),
+    target: strOrNull(v?.target),
+  };
+}
+
+/** A well-formed action always names both kind and tool; anything else collapses
+ * to null so the hero never renders a half-populated action (honest-viz). */
+function normalizeCurrentAction(v: any): RadarCurrentAction | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const kind = str(v.kind);
+  const tool = str(v.tool);
+  if (!kind || !tool) return null;
+  return {
+    kind,
+    tool,
+    label: str(v.label),
+    target: strOrNull(v.target),
+    startedAt: str(v.startedAt ?? v.started_at),
+    elapsedMs: Math.max(0, num(v.elapsedMs ?? v.elapsed_ms)),
+  };
+}
+
+/** A well-formed team always has an id and a name; anything else collapses to null
+ * rather than rendering a nameless team badge. */
+function normalizeTeam(v: any): RadarTeam | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const id = str(v.id);
+  const name = str(v.name);
+  if (!id || !name) return null;
+  return {
+    id,
+    name,
+    memberName: strOrNull(v.memberName ?? v.member_name),
+    memberType: strOrNull(v.memberType ?? v.member_type),
+    memberCount: Math.max(0, Math.round(num(v.memberCount ?? v.member_count))),
+    isLead: v.isLead === true || v.is_lead === true,
   };
 }
 
@@ -213,6 +296,9 @@ function normalizeAgent(a: any): RadarAgent {
     cwd: strOrNull(a?.cwd),
     role: strOrNull(a?.role),
     model: strOrNull(a?.model),
+    title: strOrNull(a?.title),
+    currentAction: normalizeCurrentAction(a?.currentAction ?? a?.current_action),
+    team: normalizeTeam(a?.team),
     status: status(a?.status),
     contextTokens: num(a?.contextTokens ?? a?.context_tokens),
     maxTokens: num(a?.maxTokens ?? a?.max_tokens),
