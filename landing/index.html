@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WARDEN &middot; the agent that watches your agents</title>
+<meta name="description" content="A macOS radar for every Claude Code and Codex session running on your Mac. Local first, no API keys, no socket until you ask for one.">
+<!-- No font preload on purpose. CSS font fetches are CORS mode, so a preload needs
+     crossorigin, and over file:// that makes the origin null and the request is
+     blocked. This page is meant to open as a file. If it is ever served over http,
+     add back: <link rel="preload" as="font" type="font/woff2" href="..." crossorigin> -->
+<style>
+/* ── type ─────────────────────────────────────────────────────────────────
+   Array is the LOGOTYPE, used once, for the wordmark and nothing else. It is a
+   dot matrix face: the word is built from a grid of points, which is the same
+   thing the globes are (a point lattice with lit vertex nodes). The word and the
+   bodies orbiting it are made of the same particles, which is the whole idea.
+   It breaks down below display size, so it never appears anywhere but the mark.
+   Nippo (variable 200-700) carries everything else, headings and paragraphs both:
+   squared and geometric, Array's solid counterpart. Checked at 17px against a
+   neutral grotesk before committing to it; the flat sided bowls read as instrument
+   text rather than the soft geometric that made the first pick wrong for body.
+   Mono is the app's own stack: WARDEN's style.css declares local SF Mono / Menlo,
+   so the site and the product speak in the same typeface for zero payload.
+   Three families total (logotype, text, mono) and 59KB of font across the page. */
+@font-face{
+  font-family:Array;
+  src:url("fonts/array.woff2") format("woff2");
+  font-weight:700; font-style:normal; font-display:swap;
+}
+@font-face{
+  font-family:Nippo;
+  src:url("fonts/nippo-variable.woff2") format("woff2-variations");
+  font-weight:200 700; font-style:normal; font-display:swap;
+}
+@font-face{ /* metric matched fallback so the wordmark does not shift on load */
+  font-family:MarkFallback;
+  src:local("Helvetica Neue"),local("Arial");
+  size-adjust:112%; ascent-override:92%; descent-override:22%;
+}
+
+:root{
+  --void:#020403;          /* the app's own --bg */
+  --surface:#070d0b;
+  --ink:#e9f1ed;
+  --ink-2:#a3b3ad;         /* 9.4:1  */
+  --ink-3:#7d908a;         /* 6.1:1  */
+  --ink-4:#6e7c76;         /* 4.7:1, the dimmest step that still clears AA */
+  --rule:#16211d;
+  --rule-2:#101a17;
+  --claude:#ff8636;        /* harnessColors.ts, verbatim */
+  --codex:#4fc9ff;
+  --slate:#8fa0b8;
+
+  --mark:Array,MarkFallback,sans-serif;   /* the logotype, used exactly once */
+  --display:Nippo,"Helvetica Neue",sans-serif;
+  --sans:Nippo,"Helvetica Neue",sans-serif;
+  --mono:"SF Mono",Menlo,ui-monospace,monospace;
+
+  --r-ctl:4px;             /* machined geometry: one control radius, one surface radius */
+  --r-srf:2px;
+  --ease:cubic-bezier(.23,1,.32,1);
+}
+
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  background:var(--void); color:var(--ink);
+  font-family:var(--sans); font-weight:400;
+  font-size:17px; line-height:1.6; letter-spacing:0;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+::selection{background:var(--claude);color:#0a0503}
+a{color:inherit}
+:focus-visible{outline:2px solid var(--codex);outline-offset:3px;border-radius:2px}
+
+.wrap{max-width:1240px;margin:0 auto;padding:0 32px}
+.mono{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;font-weight:500}
+
+/* ── top rail ─────────────────────────────────────────────────────────── */
+.rail{
+  position:relative;z-index:4;
+  display:flex;align-items:baseline;justify-content:space-between;gap:24px;
+  padding:24px 32px 0;
+}
+.rail b{font-family:var(--display);font-weight:700;font-size:14px;letter-spacing:.22em}
+.rail .mono{color:var(--ink-3)}
+.rail .set{display:flex;gap:20px}
+
+/* ── hero ─────────────────────────────────────────────────────────────── */
+.hero{padding:0 0 96px}
+
+/* the ring stage. Two canvases with the wordmark sandwiched between them is
+   what buys real occlusion: near globes paint over the letters, far globes are
+   painted over by them. One shared orbit solves both layers. */
+.orbit{
+  position:relative;
+  height:clamp(420px,60vh,620px);
+  display:grid;place-items:center;
+}
+/* The canvases overhang the stage box top and bottom. The ring is taller than
+   the wordmark's band, and clipping it at the box edge sliced globes in half. */
+.orbit canvas{
+  position:absolute;left:0;right:0;top:-168px;bottom:-168px;
+  width:100%;height:calc(100% + 336px);display:block;
+}
+#ring-back{z-index:1}
+#ring-front{z-index:3;pointer-events:none}
+
+.mark{
+  position:relative;z-index:2;
+  font-family:var(--mark);font-weight:700;
+  font-size:clamp(3.1rem,12.6vw,11.5rem);
+  line-height:.9;
+  letter-spacing:.04em;
+  text-indent:.02em;           /* half the trailing letterspace, to optically centre */
+  color:var(--ink);
+  white-space:nowrap;
+  user-select:none;
+}
+
+.lede{
+  max-width:52ch;margin:0 auto;padding:0 32px;
+  text-align:center;color:var(--ink-2);
+  font-size:clamp(17px,1.55vw,20px);line-height:1.55;
+}
+.lede em{font-style:normal;color:var(--ink)}
+
+.actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:36px;padding:0 32px}
+
+/* Controls: layered depth, not a flat fill. Hard offset that collapses on press. */
+.btn{
+  font-family:var(--display);font-size:14px;font-weight:600;letter-spacing:.03em;
+  padding:12px 24px;border-radius:var(--r-ctl);
+  cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px;
+  transition:transform .12s var(--ease),box-shadow .12s var(--ease),background-color .12s var(--ease);
+}
+.btn-key{
+  background:var(--ink);color:#050a08;border:1px solid #ffffff;
+  box-shadow:0 2px 0 #6d7d77, inset 0 1px 0 rgba(255,255,255,.85);
+}
+.btn-key:hover{background:#fff}
+.btn-key:active{transform:translateY(2px);box-shadow:0 0 0 #6d7d77,inset 0 1px 0 rgba(255,255,255,.85)}
+.btn-ghost{
+  background:var(--surface);color:var(--ink);border:1px solid #23312c;
+  box-shadow:0 2px 0 #0b120f, inset 0 1px 0 rgba(255,255,255,.06);
+}
+.btn-ghost:hover{background:#0c1512;border-color:#31423b}
+.btn-ghost:active{transform:translateY(2px);box-shadow:0 0 0 #0b120f,inset 0 1px 0 rgba(255,255,255,.06)}
+.note{margin-top:20px;text-align:center;color:var(--ink-3)}
+
+/* ── legend: what a globe is telling you ──────────────────────────────── */
+.legend{
+  margin-top:88px;border-top:1px solid var(--rule);
+  display:grid;grid-template-columns:repeat(3,1fr);
+}
+.legend li{list-style:none;padding:24px 28px 24px 0;border-right:1px solid var(--rule-2)}
+.legend li:last-child{border-right:0}
+.legend dt{color:var(--ink-3);margin-bottom:8px}
+.legend dd{color:var(--ink-2);font-size:15px;line-height:1.5;max-width:34ch}
+.legend dd b{color:var(--ink);font-weight:600}
+.g-claude{color:var(--claude)}.g-codex{color:var(--codex)}.g-slate{color:var(--slate)}
+/* the harness glyphs come from the mono stack, which actually carries them */
+.gly{font-family:var(--mono);font-size:.92em}
+
+/* ── datasheet ────────────────────────────────────────────────────────── */
+.sheet{padding:120px 0 40px;border-top:1px solid var(--rule)}
+.sheet-head{display:grid;grid-template-columns:5fr 7fr;gap:56px;align-items:end;margin-bottom:64px}
+h2{font-family:var(--display);font-weight:700;font-size:clamp(2rem,4.4vw,3.4rem);line-height:1.02;letter-spacing:-.015em}
+.sheet-head p{color:var(--ink-2);max-width:56ch;font-size:17px}
+
+.rows{border-top:1px solid var(--rule)}
+.row{
+  display:grid;grid-template-columns:44px 5fr 7fr;gap:32px;
+  padding:32px 0;border-bottom:1px solid var(--rule-2);align-items:start;
+}
+.row .idx{font-family:var(--mono);font-size:11px;color:var(--ink-4);padding-top:4px;letter-spacing:.08em}
+.row h3{font-family:var(--display);font-weight:700;font-size:20px;letter-spacing:.005em;line-height:1.25}
+.row p{color:var(--ink-2);font-size:16px;max-width:64ch}
+.row p b{color:var(--ink);font-weight:600}
+
+.spec{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-2);margin-top:64px;border:1px solid var(--rule-2)}
+.spec div{background:var(--void);padding:20px 24px}
+.spec dt{color:var(--ink-4);margin-bottom:8px}
+.spec dd{font-size:15px;color:var(--ink);font-weight:500}
+
+/* ── close ────────────────────────────────────────────────────────────── */
+.close{padding:128px 0 100px;text-align:center}
+.close h2{max-width:16ch;margin:0 auto 24px}
+.close p{color:var(--ink-2);max-width:46ch;margin:0 auto 32px}
+
+footer{border-top:1px solid var(--rule);padding:24px 0 40px}
+.foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--ink-4)}
+
+@media (max-width:900px){
+  .legend{grid-template-columns:1fr}
+  .legend li{border-right:0;border-bottom:1px solid var(--rule-2);padding-right:0}
+  .legend li:last-child{border-bottom:0}
+  .sheet-head{grid-template-columns:1fr;gap:24px;align-items:start}
+  .row{grid-template-columns:1fr;gap:12px}
+  .row .idx{padding-top:0}
+  .spec{grid-template-columns:repeat(2,1fr)}
+  .rail .set{display:none}
+  .wrap{padding:0 20px}
+}
+@media (max-width:640px){
+  /* narrow: the stage collapses toward the wordmark so the ring stops sitting in
+     a field of dead space, and the mark takes more of the width to stay dominant */
+  .orbit{height:clamp(300px,42vh,400px)}
+  .orbit canvas{top:-104px;bottom:-104px;height:calc(100% + 208px)}
+  .mark{font-size:clamp(3rem,15.5vw,5rem);letter-spacing:.03em;text-indent:.03em}
+  .lede,.actions{padding:0 20px}
+  .hero{padding-bottom:64px}
+  .legend{margin-top:56px}
+  .sheet{padding-top:88px}
+  .close{padding:96px 0 80px}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition-duration:.01ms!important}
+}
+</style>
+</head>
+<body>
+
+<div class="rail">
+  <b>WARDEN</b>
+  <div class="set mono">
+    <span>LOCAL FIRST</span><span>MACOS</span><span>NO API KEYS</span>
+  </div>
+  <span class="mono">v0.1 &middot; APPLE SILICON</span>
+</div>
+
+<main>
+<section class="hero">
+  <div class="orbit" id="orbit">
+    <canvas id="ring-back"></canvas>
+    <h1 class="mark">WARDEN</h1>
+    <canvas id="ring-front"></canvas>
+  </div>
+
+  <p class="lede"><em>Every Claude Code and Codex session on your Mac, drawn as one live map.</em>
+  Which agents are working, which have gone quiet, how much context each one has left.</p>
+
+  <div class="actions">
+    <a class="btn btn-key" href="#">Download for macOS</a>
+    <a class="btn btn-ghost" href="#read">What the radar shows</a>
+  </div>
+  <p class="note mono">Reads your transcripts. Writes nothing to your projects.</p>
+
+  <div class="wrap">
+    <ul class="legend">
+      <li><dl>
+        <dt class="mono">Size &middot; context occupancy</dt>
+        <dd>A globe grows with the context its session is holding. A near full agent is a <b>large body</b> before you open anything.</dd>
+      </dl></li>
+      <li><dl>
+        <dt class="mono">Brightness &middot; liveness</dt>
+        <dd>Working agents blaze toward <b>white hot</b>. Idle ones dim and hold their hue. Colour never encodes load.</dd>
+      </dl></li>
+      <li><dl>
+        <dt class="mono">Hue &middot; harness</dt>
+        <dd><span class="g-claude"><span class="gly">&#9670;</span> Claude</span>, <span class="g-codex"><span class="gly">&#9635;</span> Codex</span>, <span class="g-slate"><span class="gly">&#9671;</span> Unknown</span>. Always paired with a glyph, never colour alone.</dd>
+      </dl></li>
+    </ul>
+  </div>
+</section>
+
+<section class="sheet" id="read">
+  <div class="wrap">
+    <div class="sheet-head">
+      <h2>Three things it will not do</h2>
+      <p>WARDEN sits on top of work you care about, so the interesting part of the spec is
+      the part about restraint. These are enforced in the code, not in the marketing.</p>
+    </div>
+
+    <div class="rows">
+      <div class="row">
+        <span class="idx">01</span>
+        <h3>It does not write to your projects</h3>
+        <p>WARDEN tails the transcript files your harnesses already produce and never touches a
+        watched project's source. <b>The only writes outside its own database are harness session
+        metadata</b>, and they are confined to a single file so the write surface stays one file wide.</p>
+      </div>
+      <div class="row">
+        <span class="idx">02</span>
+        <h3>It does not open a socket until you ask</h3>
+        <p>At rest it contacts no relay and binds no endpoint. Remote observation binds lazily,
+        the moment you press Share. <b>What crosses the wire is a redacted projection</b>, never the
+        radar state itself, and a test fails the build if a radar type is ever serialized toward
+        the network.</p>
+      </div>
+      <div class="row">
+        <span class="idx">03</span>
+        <h3>It does not invent a number</h3>
+        <p>Every globe, ring and flare maps to a real signal: session liveness, context token
+        weight, subagent hierarchy. <b>An unrecognised harness gets a neutral slate globe</b> rather
+        than borrowing Claude's or Codex's identity, and nothing on screen is there to fill space.</p>
+      </div>
+    </div>
+
+    <dl class="spec">
+      <div><dt class="mono">Platform</dt><dd>macOS, Apple Silicon</dd></div>
+      <div><dt class="mono">Harnesses</dt><dd>Claude Code, Codex</dd></div>
+      <div><dt class="mono">Storage</dt><dd>SQLite with FTS5, local</dd></div>
+      <div><dt class="mono">Sharing</dt><dd>QUIC, on demand only</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="close">
+  <div class="wrap">
+    <h2>Run five agents. Watch one screen.</h2>
+    <p>It launches to the radar, sits in the tray, and answers the only question worth asking
+    mid session: which of these is actually still moving?</p>
+    <div class="actions" style="margin-top:0">
+      <a class="btn btn-key" href="#">Download for macOS</a>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap foot mono">
+    <span>WARDEN &middot; the agent that watches your agents</span>
+    <span>Local first &middot; no account &middot; no keys</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+'use strict';
+
+/* ══ the agent ring ══════════════════════════════════════════════════════
+   The globes are drawn to match RadarConstellation.tsx as closely as a 2D
+   canvas can, values taken from that file rather than eyeballed:
+
+     outer shell  IcosahedronGeometry(1, root ? 2 : 1), so a root carries the
+                  dense 162-vertex lattice and a subagent the 42-vertex one.
+                  Solid for a root, DASHED for a subagent. Front edges take the
+                  harness hue, back edges take colour * 0.16, which is the app's
+                  `backfaceStroke` and the thing that makes the shell read solid.
+     inner cage   IcosahedronGeometry(0.6, 1), counter-rotating against the
+                  shell (y -0.18, x +0.1), stroked in colour.lerp(white, 0.24)
+                  over a 0.035 face wash.
+     nodes        a lit point at every outer vertex, colour.lerp(white, 0.16).
+     gem          IcosahedronGeometry(0.26, 0), the faceted crystal heart.
+     halo         radial sprite, scale (root .74 : sub .58) * (1 + live * .95
+                  + pulse * .45).
+
+   Spin is Y only: 0.08 rad/s for a root, 0.14 for a subagent (roots are bigger
+   so they turn slower), lifted 85% while working. Working globes ride the same
+   ~4.2s breathing pulse; idle ones get the slow ambient breath. Plus the slow
+   positional bob.
+
+   Lifecycle is the app's as well. radarLifecycle.ts implodes a dead agent at
+   lambda 16 and blooms a new one at lambda 7, so here a globe occasionally
+   collapses into itself and a different harness takes the slot. That is what a
+   real radar shows when one session ends and another starts.
+
+   The ring: globes ride a circle tilted in 3D and projected with perspective,
+   so a near globe is larger and painted AFTER the wordmark while a far one is
+   smaller and painted BEFORE it. Roll is zero, so the left and right extremes
+   of the ellipse sit on exactly the same horizontal. */
+
+const BACK  = document.getElementById('ring-back');
+const FRONT = document.getElementById('ring-front');
+const ORBIT = document.getElementById('orbit');
+const MARK  = document.querySelector('.mark');
+const bctx = BACK.getContext('2d');
+const fctx = FRONT.getContext('2d');
+
+const TILT  = 10.5 * Math.PI/180; /* ring inclination. Perspective throws the near
+                                     globes out and pulls the far ones in, so this
+                                     is tuned against the cap band: near globes bite
+                                     up into the letters, far ones cut behind them */
+const ROLL  = 0;                  /* no side tilt: the left and right extremes of
+                                     the ellipse land on the same y */
+const PERIOD = 52;                /* seconds for one full revolution */
+
+const RGB = { claude:[255,134,54], codex:[79,201,255], slate:[143,160,184] };
+const HARNESSES = ['claude','codex','claude','codex','slate'];
+
+/* Honest to the app: size is context occupancy, brightness is liveness, hue is
+   harness. Roots carry the dense lattice, subagents the dashed one. */
+const AGENTS = [
+  {h:'claude', ctx:1.00, live:1.00, root:true },
+  {h:'codex',  ctx:0.57, live:0.16, root:false},
+  {h:'claude', ctx:0.74, live:0.34, root:true },
+  {h:'slate',  ctx:0.32, live:0.10, root:false},
+  {h:'codex',  ctx:0.88, live:0.92, root:true },
+  {h:'claude', ctx:0.45, live:0.20, root:false},
+  {h:'claude', ctx:0.66, live:0.55, root:false},
+  {h:'codex',  ctx:0.38, live:0.13, root:false},
+  {h:'claude', ctx:0.93, live:0.78, root:true },
+  {h:'slate',  ctx:0.29, live:0.08, root:false},
+  {h:'codex',  ctx:0.62, live:0.30, root:false},
+];
+AGENTS.forEach((a,i) => {
+  a.rgb   = RGB[a.h];
+  a.the   = (i/AGENTS.length) * Math.PI*2;
+  a.seed  = i*0.61;
+  a.ls    = 1;            /* lifecycle scale, exactly radarLifecycle's `scale` */
+  a.phase = 'alive';
+});
+
+/* ── icosphere: detail 1 = 42 verts / 120 edges, detail 2 = 162 / 480 ─────── */
+function icosphere(detail){
+  const t=(1+Math.sqrt(5))/2, n=v=>{const l=Math.hypot(v[0],v[1],v[2]);return [v[0]/l,v[1]/l,v[2]/l];};
+  let V=[[-1,t,0],[1,t,0],[-1,-t,0],[1,-t,0],[0,-1,t],[0,1,t],[0,-1,-t],[0,1,-t],[t,0,-1],[t,0,1],[-t,0,-1],[-t,0,1]].map(n);
+  let F=[[0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],[1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
+         [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],[4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1]];
+  for(let d=0;d<detail;d++){
+    const cache=new Map(), NF=[];
+    const mid=(a,b)=>{const k=a<b?a+':'+b:b+':'+a; if(cache.has(k))return cache.get(k);
+      const p=V[a],q=V[b]; V.push(n([p[0]+q[0],p[1]+q[1],p[2]+q[2]]));
+      cache.set(k,V.length-1); return V.length-1;};
+    for(const [a,b,c] of F){const ab=mid(a,b),bc=mid(b,c),ca=mid(c,a);
+      NF.push([a,ab,ca],[b,bc,ab],[c,ca,bc],[ab,bc,ca]);}
+    F=NF;
+  }
+  const seen=new Set(), E=[];
+  for(const [a,b,c] of F) for(const [p,q] of [[a,b],[b,c],[c,a]]){
+    const k=p<q?p+':'+q:q+':'+p; if(!seen.has(k)){seen.add(k);E.push([p,q]);}
+  }
+  return {V,E,F};
+}
+const SPH1 = icosphere(1);   /* subagent shell + every inner cage */
+const SPH2 = icosphere(2);   /* root shell */
+const GEM  = icosphere(0);   /* the 20-face crystal heart */
+
+/* ── math ─────────────────────────────────────────────────────────────────── */
+function rot(v, rx, ry){
+  const cy=Math.cos(ry), sy=Math.sin(ry);
+  const x=v[0]*cy + v[2]*sy, z=-v[0]*sy + v[2]*cy, y=v[1];
+  const cx=Math.cos(rx), sx=Math.sin(rx);
+  return [x, y*cx - z*sx, y*sx + z*cx];
+}
+/* the app's dampValue: exp damped, dt bounded, never overshoots */
+function damp(v, target, lambda, dt){ return v + (target-v)*(1-Math.exp(-lambda*dt)); }
+
+function project(sph, x, y, r, rx, ry){
+  const out = new Array(sph.V.length);
+  for(let i=0;i<sph.V.length;i++){
+    const q = rot(sph.V[i], rx, ry);
+    out[i] = [x+q[0]*r, y+q[1]*r, q[2]];
+  }
+  return out;
+}
+
+function strokeEdges(ctx, P, E, wantFront, style, width, dash){
+  ctx.beginPath();
+  for(let i=0;i<E.length;i++){
+    const p=P[E[i][0]], q=P[E[i][1]];
+    if(((p[2]+q[2])*0.5 >= 0) !== wantFront) continue;
+    ctx.moveTo(p[0],p[1]); ctx.lineTo(q[0],q[1]);
+  }
+  ctx.strokeStyle=style; ctx.lineWidth=width;
+  if(dash) ctx.setLineDash(dash);
+  ctx.stroke();
+  if(dash) ctx.setLineDash([]);
+}
+
+/* ── one globe, matched to RadarConstellation.tsx ─────────────────────────── */
+function drawGlobe(ctx, a, x, y, r, k, t, front){
+  const root = a.root;
+  const sph  = root ? SPH2 : SPH1;
+  const [R,G,B] = a.rgb;
+
+  const live  = a.live;
+  const pulse = Math.sin(t*1.5 + a.seed*6.28) * live;   /* PULSE_RATE 1.5 rad/s */
+  const heat  = live*live;
+  const cr = R+(255-R)*heat, cg = G+(255-G)*heat, cb = B+(255-B)*heat;
+  const lit  = (0.30 + live*0.70) * k;
+  const hue  = (cr|0)+','+(cg|0)+','+(cb|0);
+  const back = ((cr*0.16)|0)+','+((cg*0.16)|0)+','+((cb*0.16)|0);          /* backfaceStroke */
+  const inner= ((cr+(255-cr)*0.24)|0)+','+((cg+(255-cg)*0.24)|0)+','+((cb+(255-cb)*0.24)|0);
+  const node = ((cr+(255-cr)*0.16)|0)+','+((cg+(255-cg)*0.16)|0)+','+((cb+(255-cb)*0.16)|0);
+
+  /* a near globe occludes the letters under its disc, in normal compositing,
+     before any additive line work goes down. Kept tight to the body, and light
+     enough that a crossed letter ghosts through instead of disappearing. */
+  if (front){
+    ctx.globalCompositeOperation = 'source-over';
+    const oc = ctx.createRadialGradient(x,y,0,x,y,r*1.04);
+    oc.addColorStop(0,'rgba(2,4,3,.74)'); oc.addColorStop(.88,'rgba(2,4,3,.70)');
+    oc.addColorStop(.97,'rgba(2,4,3,.38)'); oc.addColorStop(1,'rgba(2,4,3,0)');
+    ctx.fillStyle = oc; ctx.beginPath(); ctx.arc(x,y,r*1.04,0,6.2832); ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'lighter';
+
+  /* halo sprite: same stops and the same live+pulse swell as the app */
+  const hr = r * (root?0.74:0.58) * (1 + live*0.95 + pulse*0.45) * 0.92;
+  const ha = Math.min(1, (0.05 + (0.3 + live*0.85)*0.34)) * k;
+  const hg = ctx.createRadialGradient(x,y,0,x,y,hr);
+  hg.addColorStop(0,   'rgba('+hue+','+(ha).toFixed(3)+')');
+  hg.addColorStop(.18, 'rgba('+hue+','+(ha*0.8).toFixed(3)+')');
+  hg.addColorStop(.5,  'rgba('+hue+','+(ha*0.22).toFixed(3)+')');
+  hg.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.fillStyle=hg; ctx.beginPath(); ctx.arc(x,y,hr,0,6.2832); ctx.fill();
+
+  /* spin: Y only, roots slower than subagents, both lifted while working */
+  const spin = (root ? 0.08 : 0.14) * (1 + live*0.85);
+  const gy = t*spin + a.seed*2.1;
+
+  const P  = project(sph, x, y, r, 0, gy);
+  const sw = r * (root ? 0.02 : 0.016);
+  const dash = root ? null : [r*0.055, r*0.04];   /* subagent shells are dashed */
+
+  /* back half in the near-black tint, then the cage, then the front half in
+     full hue: that ordering is what gives the shell its solidity */
+  strokeEdges(ctx, P, sph.E, false, 'rgba('+back+','+(lit).toFixed(3)+')', sw, dash);
+
+  /* inner cage, counter-rotating against the shell */
+  const IP = project(SPH1, x, y, r*0.6, t*0.1, gy - t*0.18);
+  ctx.beginPath();
+  for(const [f0,f1,f2] of SPH1.F){
+    const p=IP[f0], q=IP[f1], s=IP[f2];
+    if((p[2]+q[2]+s[2])/3 < 0) continue;
+    ctx.moveTo(p[0],p[1]); ctx.lineTo(q[0],q[1]); ctx.lineTo(s[0],s[1]); ctx.closePath();
+  }
+  ctx.fillStyle='rgba('+hue+','+(0.035*lit).toFixed(3)+')'; ctx.fill();
+  strokeEdges(ctx, IP, SPH1.E, false, 'rgba('+inner+','+(0.30*lit).toFixed(3)+')', r*0.022, null);
+  strokeEdges(ctx, IP, SPH1.E, true,  'rgba('+inner+','+(0.62*lit).toFixed(3)+')', r*0.022, null);
+
+  strokeEdges(ctx, P, sph.E, true, 'rgba('+hue+','+(0.95*lit).toFixed(3)+')', sw, dash);
+
+  /* a lit node at every outer vertex */
+  const nr = r * (root ? 0.040 : 0.035);
+  ctx.beginPath();
+  for(const p of P){ ctx.moveTo(p[0]+nr,p[1]); ctx.arc(p[0],p[1],nr,0,6.2832); }
+  ctx.fillStyle='rgba('+node+','+(0.6*lit).toFixed(3)+')';
+  ctx.fill();
+
+  /* the crystal heart: a 20 face icosahedron, emissive on the harness hue */
+  const gr = r*0.26;
+  const GP = project(GEM, x, y, gr, t*0.12, gy + t*0.28);
+  const core = ctx.createRadialGradient(x,y,0,x,y,gr*2.1);
+  const w = 0.55 + live*0.45;
+  core.addColorStop(0,'rgba('+Math.round(cr+(255-cr)*w)+','+Math.round(cg+(255-cg)*w)+','+Math.round(cb+(255-cb)*w)+','+(0.95*k).toFixed(3)+')');
+  core.addColorStop(.42,'rgba('+hue+','+(0.34*lit).toFixed(3)+')');
+  core.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=core; ctx.beginPath(); ctx.arc(x,y,gr*2.1,0,6.2832); ctx.fill();
+  strokeEdges(ctx, GP, GEM.E, true, 'rgba('+hue+','+(0.8*lit).toFixed(3)+')', Math.max(0.6,r*0.012), null);
+}
+
+/* ── stars, seeded so the field is identical on every load ─────────────── */
+let stars=[];
+function seedStars(w,h){
+  stars=[]; let s=20260727;
+  const rnd=()=>{s=(s*1664525+1013904223)>>>0; return s/4294967296;};
+  const n=Math.round(w*h/9000);
+  for(let i=0;i<n;i++) stars.push([rnd()*w, rnd()*h, rnd()*0.9+0.2, (rnd()*0.45+0.06).toFixed(3)]);
+}
+
+/* ── layout + loop ─────────────────────────────────────────────────────── */
+let W=0,H=0,cx=0,cy=0,Rr=0,gR=0,dpr=1;
+function layout(){
+  /* measure the CANVAS box, not the stage box: the canvases overhang it */
+  const b=BACK.getBoundingClientRect();
+  W=Math.round(b.width); H=Math.round(b.height);
+  dpr=Math.min(window.devicePixelRatio||1, 2);
+  for(const c of [BACK,FRONT]){ c.width=Math.round(W*dpr); c.height=Math.round(H*dpr); }
+  bctx.setTransform(dpr,0,0,dpr,0,0);
+  fctx.setTransform(dpr,0,0,dpr,0,0);
+
+  const m=MARK.getBoundingClientRect();
+  cx=W/2;
+  /* seat the ring on the cap height middle, not the line box middle */
+  cy=(m.top - b.top) + m.height*0.45;
+  Rr=Math.min(m.width*0.545 + 30, W*0.42);
+  /* the globes are scaled back on narrow screens: at phone width the same ratio
+     buries the wordmark instead of orbiting it */
+  gR=Rr*(W<640 ? 0.092 : 0.107);
+  seedStars(W,H);
+}
+
+/* ring point to screen, with perspective */
+function place(th){
+  const st=Math.sin(th), ct=Math.cos(th);
+  const X=Rr*ct, Y=Rr*st*Math.sin(TILT), Z=Rr*st*Math.cos(TILT);
+  const xs=X*Math.cos(ROLL)-Y*Math.sin(ROLL), ys=X*Math.sin(ROLL)+Y*Math.cos(ROLL);
+  const f=Rr*2.45, k=f/(f-Z);
+  return {x:cx+xs*k, y:cy+ys*k, k, Z};
+}
+
+/* ── lifecycle: a session ends, its globe implodes, another harness takes the
+   slot and blooms. Same lambdas as radarLifecycle.ts. Deliberately rare. ─── */
+const LAMBDA_IN = 7, LAMBDA_OUT = 16, ALIVE_AT = 0.985, GONE_AT = 0.025;
+let nextEvent = 14;
+function stepLifecycle(t, dt){
+  let busy = 0;
+  for(const a of AGENTS) if(a.phase !== 'alive') busy++;
+
+  if(t > nextEvent && busy < 2){
+    const alive = AGENTS.filter(a => a.phase === 'alive');
+    if(alive.length > 3){
+      alive[Math.floor(Math.random()*alive.length)].phase = 'imploding';
+      busy++;
+    }
+    nextEvent = t + 32 + Math.random()*26;  /* one every ~32 to 58s: rare enough
+                                               to read as an event, not a loop */
+  }
+
+  for(const a of AGENTS){
+    if(a.phase === 'imploding'){
+      a.ls = damp(a.ls, 0, LAMBDA_OUT, dt);
+      if(a.ls <= GONE_AT){
+        /* the slot turns over: a different harness, its own context and liveness */
+        let h = a.h;
+        while(h === a.h) h = HARNESSES[Math.floor(Math.random()*HARNESSES.length)];
+        a.h = h; a.rgb = RGB[h];
+        a.ctx  = 0.28 + Math.random()*0.66;
+        a.live = Math.random() < 0.45 ? 0.6 + Math.random()*0.4 : Math.random()*0.3;
+        a.root = Math.random() < 0.36;
+        a.ls = GONE_AT; a.phase = 'spawning';
+      }
+    } else if(a.phase === 'spawning'){
+      a.ls = damp(a.ls, 1, LAMBDA_IN, dt);
+      if(a.ls >= ALIVE_AT){ a.ls = 1; a.phase = 'alive'; }
+    }
+  }
+}
+
+const reduce=window.matchMedia('(prefers-reduced-motion:reduce)');
+let t0=null, last=0, raf=0;
+
+function frame(ts){
+  if(t0===null){ t0=ts; last=ts; }
+  const t  = reduce.matches ? 11.5 : (ts-t0)/1000;
+  const dt = reduce.matches ? 0 : Math.min(0.05, (ts-last)/1000);
+  last = ts;
+  if(!reduce.matches) stepLifecycle(t, dt);
+  const spin = (t/PERIOD)*Math.PI*2;
+
+  bctx.clearRect(0,0,W,H); fctx.clearRect(0,0,W,H);
+
+  bctx.globalCompositeOperation='lighter';
+  for(const [x,y,r,a] of stars){ bctx.fillStyle='rgba(190,214,206,'+a+')'; bctx.fillRect(x,y,r,r); }
+
+  /* the orbit path, split at the crossover so it too passes behind the word */
+  for(const ctx of [bctx,fctx]){
+    const wantFront = ctx===fctx;
+    ctx.globalCompositeOperation='lighter';
+    ctx.beginPath(); let drawing=false;
+    for(let i=0;i<=180;i++){
+      const p=place(i/180*Math.PI*2);
+      if((p.Z>=0)===wantFront){ drawing?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y); drawing=true; }
+      else drawing=false;
+    }
+    ctx.strokeStyle= wantFront ? 'rgba(143,160,184,.17)' : 'rgba(143,160,184,.085)';
+    ctx.lineWidth=1; ctx.stroke();
+  }
+
+  /* far to near, so overlapping globes stack correctly inside each layer */
+  const placed = AGENTS.map(a=>({a, p:place(a.the+spin)})).sort((u,v)=>u.p.Z-v.p.Z);
+  for(const {a,p} of placed){
+    if(a.ls <= 0.004) continue;
+    /* idle globes keep a slow ambient breath, working ones ride the 4.2s pulse */
+    const idleBreath = Math.sin(t*0.5 + a.seed*6.28)*0.045;
+    const pulse = Math.sin(t*1.5 + a.seed*6.28)*a.live;
+    const breathe = 1 + idleBreath*(1-a.live) + pulse*0.05;
+    const bob = Math.sin(t*0.6 + a.seed*6.28)*0.05*gR;
+    const ctx = p.Z>=0 ? fctx : bctx;
+    const r = gR*(0.62+a.ctx*0.55)*p.k*a.ls*breathe;
+    drawGlobe(ctx, a, p.x, p.y+bob, r, Math.min(1.25,p.k*0.86), t, p.Z>=0);
+  }
+
+  bctx.globalCompositeOperation='source-over';
+  fctx.globalCompositeOperation='source-over';
+  raf = reduce.matches ? 0 : requestAnimationFrame(frame);
+}
+
+function start(){ layout(); cancelAnimationFrame(raf); t0=null; raf=requestAnimationFrame(frame); }
+
+let rt=0;
+window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(start,120)});
+reduce.addEventListener('change',start);
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){ cancelAnimationFrame(raf); raf=0; }
+  else if(!raf && !reduce.matches){ t0=null; raf=requestAnimationFrame(frame); }
+});
+
+start();
+if(document.fonts && document.fonts.ready) document.fonts.ready.then(start);
+})();
+</script>
+</body>
+</html>
