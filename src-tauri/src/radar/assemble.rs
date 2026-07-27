@@ -298,9 +298,13 @@ pub fn assemble(
         // Label precedence, most specific first:
         //   1. a name the user set in WARDEN (they renamed it; nothing may override that),
         //   2. the agent's own team-roster name, the name its operator actually uses,
-        //   3. the derived positional label (cwd basename, or `subagent N`).
-        // Without (2) every teammate reads as an interchangeable `subagent 3`, which is
-        // the naming complaint this addresses.
+        //   3. the harness's own session title, else the derived positional label (cwd
+        //      basename, or `subagent N`).
+        // Without (2) every teammate reads as an interchangeable `subagent 3`, and
+        // without the title in (3) every root reads as its folder even when the harness
+        // has already named the session. This assignment runs AFTER `build_agent` and
+        // overwrites `.label` unconditionally, so it is the ONLY seam where a naming
+        // change takes effect.
         let user_name = s
             .meta
             .get("warden_display_name")
@@ -313,6 +317,7 @@ pub fn assemble(
             (None, Some((_, member_name))) => member_name.clone(),
             (None, None) => display_label(
                 depth,
+                agent.title.as_deref(),
                 agent.cwd.as_deref(),
                 subagent_ordinal.get(&s.id).copied(),
                 root_dup_ordinal.get(&s.id).copied(),
@@ -1921,24 +1926,26 @@ mod tests {
         );
     }
 
-    /// `est_cost_usd` bills cache reads ~10× cheaper than fresh input: for opus
-    /// (input $15/1M, cache-read $1.50/1M), 1M cache-read tokens cost ≈ $1.50, NOT
-    /// the $15.00 the old "full input rate on the whole sum" path produced. Fresh
-    /// input still bills at the full input rate; output at the output rate.
+    /// `est_cost_usd` bills cache reads 10x cheaper than fresh input. The RATES here
+    /// were corrected on 2026-07-27: this test used to assert $15.00 input and $1.50
+    /// cache-read, which were Opus 4.1-era numbers. Opus 4.5 and newer (including
+    /// 4.8) are $5.00 input, so cache read is 0.1x that, $0.50. The 10x relationship
+    /// is the invariant being tested; the absolute numbers just have to track the
+    /// real table in `radar/pricing.rs`.
     #[test]
     fn est_cost_bills_cache_read_cheaper_than_fresh() {
         let model = Some("claude-opus-4-8".to_string());
 
-        // Pure cache-read: 1M tokens at the cache-read rate (~0.1× input).
+        // Pure cache-read: 1M tokens at the cache-read rate (0.1x input).
         let cache_only = composition::ExactComposition {
             cache_read: 1_000_000,
             fresh: 0,
             output: 0,
         };
-        let cost = est_cost_usd(&model, &cache_only).expect("opus → a cost");
+        let cost = est_cost_usd(&model, &cache_only).expect("opus -> a cost");
         assert!(
-            (cost - 1.50).abs() < 1e-6,
-            "1M cache-read tokens bill at the cache-read rate (~$1.50), got {cost}"
+            (cost - 0.50).abs() < 1e-6,
+            "1M cache-read tokens bill at the cache-read rate ($0.50), got {cost}"
         );
 
         // Pure fresh input: 1M tokens at the full input rate.
@@ -1947,10 +1954,16 @@ mod tests {
             fresh: 1_000_000,
             output: 0,
         };
-        let fresh_cost = est_cost_usd(&model, &fresh_only).expect("opus → a cost");
+        let fresh_cost = est_cost_usd(&model, &fresh_only).expect("opus -> a cost");
         assert!(
-            (fresh_cost - 15.0).abs() < 1e-6,
-            "1M fresh tokens bill at the input rate ($15.00), got {fresh_cost}"
+            (fresh_cost - 5.0).abs() < 1e-6,
+            "1M fresh tokens bill at the input rate ($5.00), got {fresh_cost}"
+        );
+        // The invariant that actually matters, independent of the absolute rates.
+        assert!(
+            (fresh_cost / cost - 10.0).abs() < 1e-6,
+            "cache reads bill at exactly 0.1x input, got a ratio of {}",
+            fresh_cost / cost
         );
 
         // Cache reads are strictly cheaper than the same volume of fresh input.
@@ -2780,29 +2793,60 @@ mod tests {
     fn display_label_names_root_by_folder_and_subagent_by_ordinal() {
         // root with a folder → the folder name
         assert_eq!(
-            display_label(0, Some("WARDEN"), None, None, "fallback"),
+            display_label(0, None, Some("WARDEN"), None, None, "fallback"),
             "WARDEN"
         );
         // a second live root in the same folder → circled disambiguator (oldest keeps bare name)
         assert_eq!(
-            display_label(0, Some("WARDEN"), None, Some(2), "fallback"),
+            display_label(0, None, Some("WARDEN"), None, Some(2), "fallback"),
             "WARDEN ②"
         );
         assert_eq!(
-            display_label(0, Some("WARDEN"), None, Some(1), "fallback"),
+            display_label(0, None, Some("WARDEN"), None, Some(1), "fallback"),
             "WARDEN"
         );
         // root with no folder → falls back to the identity label
         assert_eq!(
-            display_label(0, None, None, None, "diagnose the bug"),
+            display_label(0, None, None, None, None, "diagnose the bug"),
             "diagnose the bug"
         );
         // subagent → strictly "subagent N", regardless of any role/description
         assert_eq!(
-            display_label(1, Some("WARDEN"), Some(1), None, "Explore"),
+            display_label(1, None, Some("WARDEN"), Some(1), None, "Explore"),
             "subagent 1"
         );
-        assert_eq!(display_label(2, None, Some(3), None, "x"), "subagent 3");
+        assert_eq!(
+            display_label(2, None, None, Some(3), None, "x"),
+            "subagent 3"
+        );
+    }
+
+    /// The harness's own session name beats the folder: two agents in one repo read as
+    /// what each is doing, not as "WARDEN" and "WARDEN ②".
+    #[test]
+    fn display_label_prefers_the_harness_session_title() {
+        assert_eq!(
+            display_label(
+                0,
+                Some("Fix slow tailorings in trigger"),
+                Some("WARDEN"),
+                None,
+                Some(2),
+                "fallback"
+            ),
+            "Fix slow tailorings in trigger"
+        );
+        // Blank/whitespace title is not a name: fall through to the folder.
+        assert_eq!(
+            display_label(0, Some("   "), Some("WARDEN"), None, None, "fallback"),
+            "WARDEN"
+        );
+        // A subagent keeps its ordinal: a title belongs to the session, and inheriting
+        // the parent's would make every child read as the parent.
+        assert_eq!(
+            display_label(1, Some("Parent title"), Some("WARDEN"), Some(2), None, "x"),
+            "subagent 2"
+        );
     }
 
     /// Seed: a live Claude ROOT that logged a `ToolResult` for `call_id` (the

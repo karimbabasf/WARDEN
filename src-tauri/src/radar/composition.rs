@@ -263,44 +263,21 @@ pub fn tokenize_len(text: &str) -> u64 {
     }
 }
 
-/// Max context window for a model id, by substring match. Returns `0` for an
-/// unknown model so `fill_pct` degrades to `0.0` (honest: no fabricated window).
+/// Max context window for a model id. Delegates to the pricing/window table in
+/// `pricing.rs` (exact id, then family prefix such as `opus`/`sonnet`/`haiku`/
+/// `fable`/`mythos`, then the legacy Codex/OpenAI provider fallback), returning
+/// `0` for a genuinely unrecognized id so `fill_pct` degrades to `0.0` (honest:
+/// no fabricated window, and no vendor-level guess for context window even when
+/// price would give one; see `pricing::context_window_for_model` for the full
+/// lookup precedence and the source-verified table).
 ///
-/// Table (per the M3 design spec §4.5 and the model lookup anchor):
-/// * Claude `opus` → 1_000_000 (Opus 4.x runs a 1M context window — confirmed live:
-///   an Opus session here holds ~372k resident, which a 200k window cannot);
-/// * Claude `sonnet`/`haiku` → 200_000 (the 1M Sonnet variant only when its id
-///   advertises it, `-1m`/`[1m]`); a session that observably exceeds its window is
-///   promoted to 1M by `claude_context_size`'s observed-window guard;
-/// * Codex / GPT-5-class → 258_400 (equals the on-disk `model_context_window`).
+/// Kept here (not moved into `pricing.rs` itself) because the sibling
+/// `claude_context_size`'s observed-window guard lives in this same file and
+/// stays the safety net on top of this table: if a session's actual resident
+/// token count ever exceeds this function's answer, the window is promoted to
+/// 1,000,000 on the spot, correcting any row whose table value undershoots.
 pub fn max_window_for_model(model: &str) -> u64 {
-    let m = model.to_ascii_lowercase();
-    // Explicit 1M-context Sonnet variant, when the id advertises it. Match only the
-    // two real forms (`-1m` suffix, `[1m]` beta tag) — a bare `1m` substring is too
-    // broad (it would catch e.g. a date fragment like `21mar`).
-    if m.contains("sonnet") && (m.contains("-1m") || m.contains("[1m]")) {
-        return 1_000_000;
-    }
-    // Opus runs a 1M window today; the other Claude models default to 200k (and are
-    // promoted on observation if a session proves a wider window).
-    if m.contains("opus") {
-        return 1_000_000;
-    }
-    if m.contains("sonnet") || m.contains("haiku") || m.contains("claude") {
-        return 200_000;
-    }
-    // `openai` is the Codex Desktop *provider* id (`session_meta.model_provider`),
-    // which `build_agent` passes here for Codex sessions — map it to the Codex/GPT-5
-    // class window so the live Codex globe gets a real context bar instead of 0.
-    if m.contains("codex")
-        || m.contains("gpt-5")
-        || m.contains("gpt5")
-        || m.contains("o200k")
-        || m.contains("openai")
-    {
-        return 258_400;
-    }
-    0
+    super::pricing::context_window_for_model(model)
 }
 
 #[cfg(test)]

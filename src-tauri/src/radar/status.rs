@@ -22,17 +22,60 @@ pub(crate) fn agent_status(
     mtime_secs_ago: &dyn Fn(&str) -> Option<u64>,
     now: DateTime<Utc>,
 ) -> AgentStatus {
+    // Claude's live registry is the harness's OWN statement about the session (its
+    // `status` field is updated even mid-generation and during a long tool run), so it is
+    // never second-guessed here. Where that registry entry had no verdict to give, the
+    // conversation-state fallback it delegated to has already applied the in-flight
+    // promotion itself (see `claude_conversation_status`).
     if let Some(st) = claude_status.get(&s.external_id) {
         return *st;
     }
+    let events = store.session_events(&s.id).unwrap_or_default();
+    let base = base_agent_status(store, s, mtime_secs_ago, now, &events);
+    promote_if_mid_tool_call(base, &events, now)
+}
+
+/// A tool call the harness STARTED and has not finished is direct evidence the agent is
+/// mid-step, so it promotes an otherwise-idle verdict to `Working`.
+///
+/// This inverts the old order, which gated the in-flight call behind the status. Every
+/// status rule below decides from the age of the LAST ingested event against a staleness
+/// window (default 180s), and while a long `Read`, `Edit`, or build is running the tool
+/// call IS the last line in the transcript: nothing else arrives until it returns. So a
+/// slow call aged the session into `Idle` and took the live action off the panel with it,
+/// which is the "does not catch edits or reads being made live" complaint. A started call
+/// with no end is a fact, not a timer, and it now outranks the timer.
+///
+/// `Closed` and `Terminated` are never promoted: those are verdicts about the agent
+/// EXISTING (a dead PID, a subagent whose parent logged its result), and a dangling call
+/// there just means the session died mid-call.
+fn promote_if_mid_tool_call(
+    base: AgentStatus,
+    events: &[(crate::ir::Turn, EventRecord)],
+    now: DateTime<Utc>,
+) -> AgentStatus {
+    if !matches!(base, AgentStatus::Idle) {
+        return base;
+    }
+    match super::agent::in_flight_tool_call(events, now) {
+        Some(_) => AgentStatus::Working,
+        None => base,
+    }
+}
+
+fn base_agent_status(
+    store: &Store,
+    s: &Session,
+    mtime_secs_ago: &dyn Fn(&str) -> Option<u64>,
+    now: DateTime<Utc>,
+    events: &[(crate::ir::Turn, EventRecord)],
+) -> AgentStatus {
     // FAULT B: conversation-state first (deterministic), mtime only as a last resort.
     let stale_secs = crate::util::radar_working_stale_secs();
     let working_secs = crate::util::radar_working_ms() / 1000;
-    let events = store.session_events(&s.id).unwrap_or_default();
     if matches!(s.harness, Harness::Codex) {
         let has_uningested_tail = source_has_uningested_tail(store, s);
-        if let Some(st) =
-            codex_status_from_last_event(&events, now, stale_secs, has_uningested_tail)
+        if let Some(st) = codex_status_from_last_event(events, now, stale_secs, has_uningested_tail)
         {
             return st;
         }
@@ -43,7 +86,7 @@ pub(crate) fn agent_status(
             };
         }
     }
-    if let Some(st) = liveness::status_from_last_event(&events, now, stale_secs) {
+    if let Some(st) = liveness::status_from_last_event(events, now, stale_secs) {
         return st;
     }
     // No usable events at all → fall back to the old transcript-mtime heuristic.
@@ -188,7 +231,8 @@ pub(crate) fn claude_conversation_status(
                     )
                 })
                 .map(|(_, e)| e.ts)?;
-            liveness::status_from_last_event(&events, now, stale_secs).map(|st| (last_ts, st))
+            liveness::status_from_last_event(&events, now, stale_secs)
+                .map(|st| (last_ts, promote_if_mid_tool_call(st, &events, now)))
         })
         .max_by_key(|(ts, _)| *ts);
     if let Some((_, st)) = freshest {

@@ -489,6 +489,22 @@ fn parse_slice(
                 });
             }
         }
+        // The SURFACE this session is being driven from: `cli` (a terminal),
+        // `claude-vscode` / `claude-desktop` (an IDE or app panel), `sdk-*`. Claude
+        // stamps it on every envelope and a session cannot change surface mid-run, so
+        // the first non-empty value is the answer. The IDE plugin bundles the same CLI
+        // binary and writes to this same tree, so this field is the ONLY thing that
+        // separates a terminal agent from an IDE one.
+        if meta.get("entrypoint").is_none() {
+            if let Some(ep) = v
+                .get("entrypoint")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+            {
+                meta["entrypoint"] = json!(ep);
+            }
+        }
         match v.get("type").and_then(Value::as_str).unwrap_or("unknown") {
             "user" | "assistant" => {
                 idx += 1;
@@ -664,18 +680,32 @@ fn parse_slice(
                     },
                 });
             }
-            // The session's human title. Claude APPENDS a fresh `custom-title` record
-            // every time the title changes, so the file holds the whole history and the
-            // current title is simply the last one. Records arrive in file order here,
-            // so overwriting on each hit leaves exactly that.
+            // The session's human title. Claude APPENDS a fresh title record every time
+            // the title changes, so the file holds the whole history and the current
+            // title is simply the last one. Records arrive in file order here, so
+            // overwriting on each hit leaves exactly that.
+            //
+            // Two records, two authorities, kept in SEPARATE meta keys so the radar can
+            // rank them (see `radar::agent::session_title`) and so an incremental tail
+            // carrying only one of them cannot clobber the other:
+            //   `custom-title` is the name the operator typed,
+            //   `ai-title` is the name the harness generated for itself ("Fix slow
+            //   tailorings in trigger"), which is the one that exists without anyone
+            //   doing anything and is by far the more common of the two.
             "custom-title" => {
-                if let Some(t) = v
-                    .get("customTitle")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                {
+                if let Some(t) = title_field(v, "customTitle") {
+                    meta["session_title_custom"] = json!(t);
                     meta["session_title"] = json!(t);
+                }
+            }
+            "ai-title" => {
+                if let Some(t) = title_field(v, "aiTitle") {
+                    meta["session_title_ai"] = json!(t);
+                    // Legacy single-slot key: only fill it when no operator-set title
+                    // has been seen, so old readers keep the same precedence.
+                    if meta.get("session_title_custom").is_none() {
+                        meta["session_title"] = json!(t);
+                    }
                 }
             }
             other => {
@@ -708,6 +738,14 @@ fn parse_slice(
         offset,
     })
 }
+/// A non-empty, trimmed title string from a title record, or `None`.
+fn title_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
 fn map_user(
     events: &mut Vec<EventRecord>,
     sid: &str,
