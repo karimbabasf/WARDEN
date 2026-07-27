@@ -16,6 +16,9 @@ import { StarCatalog } from '@/viz/shared/scene/StarCatalog';
 import { CameraRig } from '@/viz/shared/scene/CameraRig';
 import { RadarForest } from '@/viz/modules/radar/RadarConstellation';
 import { RadarDetailPanel } from '@/viz/modules/radar/RadarDetailPanel';
+import { ShareMenu } from '@/viz/modules/observe/ShareMenu';
+import { PeersPanel } from '@/viz/modules/observe/PeersPanel';
+import { ApprovalModal } from '@/viz/modules/observe/ApprovalModal';
 import { FilterBar } from './FilterBar';
 import { Breadcrumb } from './Breadcrumb';
 import { layoutRadarScene, isFlatAgent } from '@/viz/modules/radar/radarLayout';
@@ -436,6 +439,19 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
       />
 
       <FilterBar agents={radarModel.agents} filter={emphasisFilter} onFilter={onFilter} />
+
+      {/* Remote observation chrome: the host's share/access menu and the observer's
+          watch trigger, tucked into the opposite corner from the brand mark so neither
+          collides with the radar detail dock (which only opens at var(--top-safe)). */}
+      <div className="wd-observe-chrome">
+        <ShareMenu />
+        <PeersPanel />
+      </div>
+
+      {/* Unmissable host-side gate: nothing is sent to a new connection until this
+          resolves, so it renders itself (and blocks everything else) the moment Rust
+          pushes `observe:approval`, independent of whether the share menu is open. */}
+      <ApprovalModal />
 
       {/* Radar detail panel: its own right-dock. Opens when a globe is selected and the
           camera has dived in; the roster's jump-to flies to a child via onRadarJump. */}

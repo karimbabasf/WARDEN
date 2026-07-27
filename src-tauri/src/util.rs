@@ -70,6 +70,16 @@ pub fn warden_config_path() -> PathBuf {
         .map(|s| expand_tilde(&s))
         .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".warden/config.toml"))
 }
+/// Path to the host's persistent iroh identity for remote observation.
+///
+/// It MUST survive restarts: the key is what every issued grant is bound to, so
+/// regenerating it on launch would silently kill every grant the user has handed out.
+/// Same env-helper shape as `default_db_path`; `WARDEN_OBSERVE_KEY` overrides.
+pub fn observe_key_path() -> PathBuf {
+    std::env::var("WARDEN_OBSERVE_KEY")
+        .map(|s| expand_tilde(&s))
+        .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".warden/observer_key"))
+}
 /// Path to the user's `~/.claude/CLAUDE.md` — the durable Claude Code guidance
 /// file that several fix-preview patterns target. `WARDEN_CLAUDE_MD` overrides
 /// (tests point it at a temp file).

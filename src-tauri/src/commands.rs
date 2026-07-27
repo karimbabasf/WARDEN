@@ -1,7 +1,11 @@
+use crate::observe::{
+    BindMode, EventSink, FrameSource, GrantStore, HostShare, ObserveEvent, ObserverHub,
+};
 use crate::radar::{self, RadarState};
 use crate::store::Store;
 use crate::util::{default_claude_sessions_dir, default_db_path};
 use anyhow::Result;
+use std::sync::{Arc, RwLock};
 
 /// Shared app state: the SQLite store plus the last-pushed RADAR forest cache.
 /// Cloned into Tauri's managed state and the background watchers.
@@ -9,7 +13,81 @@ use anyhow::Result;
 pub struct AppState {
     pub store: Store,
     pub radar_state: crate::scheduler::RadarStateCache,
+    pub observe: ObserveRuntime,
 }
+
+/// The remote-observation runtime.
+///
+/// The `tauri::AppHandle` lives HERE, not inside `observe/`. That module is handed two
+/// closures (a frame source and an event sink) and nothing else, so it has no route to a
+/// Tauri command even if a bug reached for one, and no way to name the un-redacted radar
+/// types. This struct is the seam where those two capabilities are granted, deliberately
+/// narrow and in one place.
+#[derive(Clone)]
+pub struct ObserveRuntime {
+    pub host: HostShare,
+    pub hub: ObserverHub,
+    app: Arc<RwLock<Option<tauri::AppHandle>>>,
+}
+
+impl ObserveRuntime {
+    fn new(store: Store, radar_state: crate::scheduler::RadarStateCache) -> Self {
+        let app: Arc<RwLock<Option<tauri::AppHandle>>> = Arc::new(RwLock::new(None));
+
+        // The one path from the radar to the wire. `project_state` is applied HERE, so what
+        // the transport receives is already redacted and it never sees a `RadarState`.
+        let cache = radar_state.clone();
+        let frames: FrameSource = Arc::new(move |salt: &[u8; 16]| {
+            crate::scheduler::latest_cached_radar_state(&cache).map(|radar| {
+                crate::observe::project_state(&radar, crate::observe::Profile::Shapes, salt)
+            })
+        });
+
+        let sink_app = app.clone();
+        let events: EventSink = Arc::new(move |event: ObserveEvent| {
+            use tauri::Emitter;
+            let Ok(guard) = sink_app.read() else { return };
+            let Some(app) = guard.as_ref() else { return };
+            let _ = match event {
+                ObserveEvent::Grants => app.emit("observe:grants", ()),
+                ObserveEvent::Peers => app.emit("observe:peers", ()),
+                ObserveEvent::Frame { peer_id } => {
+                    app.emit("observe:frame", serde_json::json!({ "peerId": peer_id }))
+                }
+                ObserveEvent::Approval(a) => app.emit("observe:approval", a),
+            };
+        });
+
+        let host_label = hostname_label();
+        Self {
+            host: HostShare::new(
+                GrantStore::new(store.clone()),
+                frames,
+                events.clone(),
+                host_label,
+                crate::util::observe_key_path(),
+                BindMode::Public,
+            ),
+            hub: ObserverHub::new(store, events, BindMode::Public),
+            app,
+        }
+    }
+
+    /// Hand the runtime its event channel once Tauri has one. Until this is called the
+    /// sink is a no-op, which is the correct behaviour during startup.
+    pub fn attach_app(&self, app: tauri::AppHandle) {
+        if let Ok(mut slot) = self.app.write() {
+            *slot = Some(app);
+        }
+    }
+}
+
+/// A short, human-meaningful name for this machine, shown to an observer as the host
+/// label. Falls back to a generic string rather than leaking a username.
+fn hostname_label() -> String {
+    std::env::var("WARDEN_HOST_LABEL").unwrap_or_else(|_| "Warden host".to_string())
+}
+
 impl AppState {
     pub fn init() -> Result<Self> {
         let store = Store::open(default_db_path())?;
@@ -17,9 +95,12 @@ impl AppState {
     }
 
     fn from_store(store: Store) -> Self {
+        let radar_state = crate::scheduler::new_radar_state_cache();
+        let observe = ObserveRuntime::new(store.clone(), radar_state.clone());
         Self {
             store,
-            radar_state: crate::scheduler::new_radar_state_cache(),
+            radar_state,
+            observe,
         }
     }
 
@@ -212,12 +293,361 @@ pub async fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), Stri
         .reveal_item_in_dir(&canonical)
         .map_err(|e| format!("reveal: {e}"))
 }
+
+/// Exactly what a remote observer would see of this machine right now.
+///
+/// Runs the live radar through the SAME [`crate::observe::project_state`] the wire uses.
+/// There is deliberately no second "preview formatter": a preview that can drift from the
+/// wire is worse than no preview, because it manufactures false confidence right at the
+/// moment the user decides whether to share.
+///
+/// `salt` is per-grant in real use; the preview uses a fixed salt because the hashes are
+/// not the point here, the absence of names and paths is.
+#[tauri::command]
+pub async fn preview_observed_state(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::observe::ObservedState, String> {
+    let radar = fresh_radar_state_for_read(&state);
+    Ok(crate::observe::project_state(
+        &radar,
+        crate::observe::Profile::Shapes,
+        &[0u8; 16],
+    ))
+}
+
 fn fresh_radar_state_for_read(state: &AppState) -> RadarState {
     let sessions_dir = default_claude_sessions_dir();
     radar::refresh_live_context(&state.store, &sessions_dir);
     let radar = radar::recompute_radar_state(&state.store, &sessions_dir);
     state.cache_radar_state(radar.clone());
     radar
+}
+
+// ---------------------------------------------------------------------------
+// Remote observation. Host side: sharing this machine.
+// ---------------------------------------------------------------------------
+
+/// A freshly minted grant. `token` is shown ONCE and is never retrievable again: the host
+/// stores only a hash of it, so there is nothing to re-read.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewGrant {
+    pub grant_id: String,
+    pub token: String,
+    pub expires_at: String,
+}
+
+/// One grant as the management tab renders it. Carries no secret and no verifier.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantRow {
+    pub grant_id: String,
+    pub label: String,
+    pub state: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub redeemed_fingerprint: Option<String>,
+    pub last_seen_at: Option<String>,
+    pub connected: bool,
+}
+
+/// Bind the observation endpoint and start accepting observers.
+///
+/// This is the moment Warden first touches the network. Before it, the app binds no
+/// socket and contacts no relay, which is what keeps "fully local by default" literally
+/// true. Idempotent: calling it while already sharing returns the same identity.
+#[tauri::command]
+pub async fn observe_start_sharing(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::observe::HostIdentity, String> {
+    state
+        .observe
+        .host
+        .start()
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Stop sharing: unbind the endpoint and close every live observer.
+#[tauri::command]
+pub async fn observe_stop_sharing(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.observe.host.stop().await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn observe_sharing_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::observe::SharingStatus, String> {
+    Ok(state.observe.host.status().await)
+}
+
+/// Mint a single-use token for one friend.
+///
+/// Requires sharing to be on, because the token embeds this host's endpoint id and there
+/// is no endpoint until then. The returned token is the only copy that will ever exist.
+#[tauri::command]
+pub async fn observe_create_grant(
+    state: tauri::State<'_, AppState>,
+    label: String,
+    ttl_secs: u64,
+) -> Result<NewGrant, String> {
+    let endpoint_id = state
+        .observe
+        .host
+        .endpoint_id()
+        .await
+        .ok_or("start sharing before creating a grant")?;
+    let (record, token) = state
+        .observe
+        .host
+        .grants()
+        .create(
+            endpoint_id,
+            &label,
+            ttl_secs,
+            crate::observe::Profile::Shapes,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(NewGrant {
+        grant_id: record.grant_id,
+        token,
+        expires_at: stamp(record.expires_at),
+    })
+}
+
+#[tauri::command]
+pub async fn observe_list_grants(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<GrantRow>, String> {
+    let host = &state.observe.host;
+    // Flip anything stale before listing, so the tab never shows a pending grant that can
+    // no longer be redeemed. Cosmetic only: redemption re-checks expiry regardless.
+    let _ = host.grants().sweep_expired(chrono::Utc::now().timestamp());
+    let rows = host.grants().list().map_err(|e| format!("{e:#}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|g| GrantRow {
+            grant_id: g.grant_id,
+            label: g.label,
+            state: g.state.as_str().to_string(),
+            created_at: stamp(g.created_at),
+            expires_at: stamp(g.expires_at),
+            redeemed_fingerprint: g
+                .redeemed_by
+                .as_ref()
+                .map(crate::observe::transport::fingerprint),
+            last_seen_at: g
+                .last_seen_at
+                .and_then(crate::observe::peers::unix_to_rfc3339),
+            connected: g
+                .redeemed_by
+                .as_ref()
+                .is_some_and(|id| host.is_connected(id)),
+        })
+        .collect())
+}
+
+/// Revoke a grant: mark the row, drop the endpoint from the allow set, and close the live
+/// connection. All three, because the row alone races an in-flight frame.
+#[tauri::command]
+pub async fn observe_revoke_grant(
+    state: tauri::State<'_, AppState>,
+    grant_id: String,
+) -> Result<(), String> {
+    state
+        .observe
+        .host
+        .revoke(&grant_id)
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn observe_pending_approvals(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::observe::PendingApproval>, String> {
+    Ok(state.observe.host.pending_approvals())
+}
+
+/// Approve or deny a waiting observer. Nothing has been sent to them before this resolves,
+/// which is what makes an intercepted token survivable.
+#[tauri::command]
+pub async fn observe_resolve_approval(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    approve: bool,
+) -> Result<(), String> {
+    state.observe.host.resolve_approval(&conn_id, approve);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Remote observation. Observer side: watching someone else.
+// ---------------------------------------------------------------------------
+
+/// Redeem a token and start watching that host.
+#[tauri::command]
+pub async fn observe_add_peer(
+    state: tauri::State<'_, AppState>,
+    token: String,
+) -> Result<crate::observe::PeerRow, String> {
+    state
+        .observe
+        .hub
+        .add_peer(&token)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn observe_list_peers(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::observe::PeerRow>, String> {
+    state.observe.hub.list().map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn observe_remove_peer(
+    state: tauri::State<'_, AppState>,
+    peer_id: String,
+) -> Result<(), String> {
+    state
+        .observe
+        .hub
+        .remove_peer(&peer_id)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// The latest frame from one host, or `null` until the first one lands.
+#[tauri::command]
+pub async fn observe_peer_state(
+    state: tauri::State<'_, AppState>,
+    peer_id: String,
+) -> Result<Option<crate::observe::ObservedState>, String> {
+    state
+        .observe
+        .hub
+        .peer_state(&peer_id)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Unix seconds to rfc3339, the shape every timestamp crosses IPC in.
+fn stamp(ts: i64) -> String {
+    crate::observe::peers::unix_to_rfc3339(ts).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn rejects_names_that_would_corrupt_a_line_delimited_transcript() {
+        // A newline would split one JSONL record into two, which is the failure that
+        // would actually damage a user's transcript.
+        assert!(clean_session_name("a\nb").is_err());
+        assert!(clean_session_name("a\r\nb").is_err());
+        assert!(clean_session_name("tab\there").is_err());
+        assert!(clean_session_name("null\0byte").is_err());
+        assert!(clean_session_name("").is_err());
+        assert!(clean_session_name("   ").is_err());
+    }
+
+    #[test]
+    fn trims_and_caps_length() {
+        assert_eq!(clean_session_name("  hello  ").expect("valid"), "hello");
+        let long = "x".repeat(500);
+        let cleaned = clean_session_name(&long).expect("valid");
+        assert_eq!(cleaned.chars().count(), MAX_SESSION_NAME);
+    }
+
+    #[test]
+    fn keeps_unicode_and_punctuation() {
+        assert_eq!(
+            clean_session_name("Warden: radar refactor (v2) 🚀").expect("valid"),
+            "Warden: radar refactor (v2) 🚀"
+        );
+    }
+
+    /// The write path: appends one well-formed record and leaves prior bytes untouched.
+    #[test]
+    fn appends_one_record_without_touching_existing_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let proj = root.join("-Users-someone-repo");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let file = proj.join("abc.jsonl");
+        let original = "{\"type\":\"user\",\"uuid\":\"1\"}\n";
+        std::fs::write(&file, original).expect("seed");
+
+        append_claude_custom_title(root, &file, "abc", "New Name").expect("append succeeds");
+
+        let mut got = String::new();
+        std::fs::File::open(&file)
+            .expect("open")
+            .read_to_string(&mut got)
+            .expect("read");
+        assert!(got.starts_with(original), "existing bytes must be preserved");
+
+        let last = got.lines().next_back().expect("a last line");
+        let v: serde_json::Value = serde_json::from_str(last).expect("appended line is valid json");
+        assert_eq!(v["type"], "custom-title");
+        assert_eq!(v["customTitle"], "New Name");
+        assert_eq!(v["sessionId"], "abc");
+        assert!(got.ends_with('\n'), "must stay newline-terminated");
+    }
+
+    #[test]
+    fn quotes_and_backslashes_survive_as_valid_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let file = root.join("x.jsonl");
+        std::fs::write(&file, "").expect("seed");
+        let tricky = r#"He said "hi" \ back"#;
+        append_claude_custom_title(root, &file, "s", tricky).expect("append");
+        let got = std::fs::read_to_string(&file).expect("read");
+        let v: serde_json::Value =
+            serde_json::from_str(got.trim_end()).expect("still valid json");
+        assert_eq!(v["customTitle"], tricky);
+    }
+
+    /// A crafted id must not be able to steer the append outside the projects root.
+    #[test]
+    fn refuses_targets_outside_the_claude_projects_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("projects");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let outside = dir.path().join("elsewhere.jsonl");
+        std::fs::write(&outside, "").expect("seed");
+
+        let err = append_claude_custom_title(&root, &outside, "s", "n")
+            .expect_err("must refuse a path outside the root");
+        assert!(err.contains("outside"), "unexpected error: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("read"),
+            "",
+            "the refused file must be untouched"
+        );
+    }
+
+    #[test]
+    fn refuses_a_non_jsonl_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let file = root.join("notes.md");
+        std::fs::write(&file, "").expect("seed");
+        let err = append_claude_custom_title(root, &file, "s", "n").expect_err("must refuse");
+        assert!(err.contains("jsonl"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn refuses_a_missing_file_rather_than_creating_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let missing = root.join("ghost.jsonl");
+        assert!(append_claude_custom_title(root, &missing, "s", "n").is_err());
+        assert!(!missing.exists(), "must not create a transcript");
+    }
 }
 
 #[cfg(test)]

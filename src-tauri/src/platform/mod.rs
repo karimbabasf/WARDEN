@@ -53,6 +53,31 @@ pub fn primary_hotkey() -> Shortcut {
     )
 }
 
+/// Write `bytes` to `path` readable only by the current user.
+///
+/// Split on the unix/windows axis, same as [`process_alive`]:
+/// * unix (macOS, Linux): created with mode 0600, so the permission is set by the `open`
+///   itself. Writing first and chmod-ing after would leave the file world-readable for the
+///   window in between, which for a private key is the whole risk;
+/// * windows / other: a plain write, with the ACL left to the parent directory. Flagged
+///   rather than silently accepted, because the caller stores a private key here.
+pub fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)
+}
+
 /// True when `pid` names a live process. Split on the unix/windows axis:
 /// * unix (macOS, Linux): `kill(pid, 0)` — probes existence/permission, sends
 ///   no signal;
