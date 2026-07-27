@@ -33,3 +33,6 @@ status.sh
 # local scratch (design exploration, throwaway artifacts)
 /.scratch/
 /.warden-run/
+
+# Browser-audit output (screenshots + audit.json) from the UI verification pass.
+/.design/

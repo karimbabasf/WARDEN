@@ -22,6 +22,12 @@ wording rather than the old summary:
 - **Read-only toward projects, always.** WARDEN never writes to your watched projects. The
   only writes outside its own DB are harness session metadata (see the invariants above),
   and they are confined to `commands.rs` so the write surface stays one file wide.
+- **File reads are allowlisted, not open.** `preview_file` lets the panel show what an
+  agent is reading or writing, but it refuses any path that is not already a target on
+  the CURRENT radar state, so it can never become an arbitrary local-file-read
+  primitive. The allowlist is rebuilt per call from live state, so it revokes itself as
+  a path ages out of the feed. It is unreachable from the network by construction: a
+  remote observer gets `ObservedState`, which carries no paths at all.
 - **Redaction is a projection, not a scrub.** Anything an observer receives is built by
   `observe::project_state`. Never serialize a radar type toward the network, and never add
   a free-text field to `ObservedAgent` without deciding it may leave the machine: the
@@ -61,8 +67,45 @@ Layered `ingest -> store -> radar -> commands/lib/scheduler`.
 - `lib.rs` the Tauri builder / `setup()` (visible window on launch, tray, hotkey, startup backfill, watchers); `commands.rs` the `#[tauri::command]`s.
 
 **Frontend `web/`**: an FSD-lite island; imports point DOWN only (`app -> views -> modules -> shared`, enforced by `pnpm check:arch`); the `@/` alias maps to `web/`.
-- `index.html` (the `#war-room-root` mount); `main.ts` the Tauri event router; `style.css` green-phosphor tokens (`--bg #020403`, `--green #76ff9d`).
-- `web/viz/`: `app/` (mount); `views/war-room/` (WarRoom + FilterBar + Breadcrumb); `modules/radar/` (the constellation, layout, detail panel, hover card, theme); `shared/{state,types,theme,scene,lib}` (`bridge.ts` is the pure reducer in `state/`); `dev/preview/` (radar sandboxes).
+- `index.html` (the `#war-room-root` mount); `main.ts` the Tauri event router; `style.css` the instrument tokens (see Design system below).
+- `web/viz/`: `app/` (mount); `views/war-room/` (WarRoom + FleetRail + FilterBar + Breadcrumb); `modules/radar/` (the constellation, layout, detail panel, hover card, theme, peer constellation); `modules/observe/` (peers, grants UI, `observedToScene` adapter); `shared/{state,types,theme,scene,lib,ui}` (`bridge.ts` is the pure reducer in `state/`); `dev/preview/` (sandboxes).
+- `web/fonts/` self-hosted WOFF2. The app opens no socket at rest, so a webfont CDN is not an option.
+
+## Design system
+Domain metaphor is air traffic control: a strip rack on the left, the scope in the
+middle, the selected target's readout on the right.
+- **Type**: Technor (display/UI) + Commit Mono (every numeral, path, and caps label,
+  so readouts stay column-aligned). Both self-hosted and bundled. The face was
+  chosen off a rendered specimen sheet at the app's real sizes, never from memory.
+- **Colour**: the chrome is entirely neutral cold steel (`--bg #070910`, a
+  `--surface-1/2/3` ramp, `--ink`/`--ink-soft`/`--ink-faint`). The ONLY hues are the
+  two harness identities from `harnessColors.ts` and one red alert (`--danger`),
+  which is used in exactly one place: a context gauge past 85%. Keeping the chrome
+  colourless is what lets the constellation read as the hero.
+- **Depth is physical, never a glow**: a tone step, then a 1px border, then a 1px
+  inset top highlight (`--lift`), then one tight key shadow (`--key` / `--key-lg`).
+  There are no wide diffuse coloured glows and no `drop-shadow(0 0 Npx currentColor)`
+  anywhere. That was the old phosphor-CRT look and it read as generated.
+- **Motion**: easing tokens only (`--ease-out`, `--t-micro`/`--t-base`/`--t-travel`);
+  never a bare CSS keyword and never one global duration. Animate transform and
+  opacity. `prefers-reduced-motion` is honoured globally in CSS and per-component in
+  the R3F scene.
+- **Two-rail layout**: "centre" means the FREE CHANNEL between the rails, not the
+  viewport. Anything centred keys off `--rail-left-occupied` / `--rail-right-occupied`
+  (`left: calc(50% + (L - R) / 2)`), and the camera gets the same insets in CSS
+  pixels via `framingInsetLeft` / `framingInsetRight` so the constellation never
+  frames underneath a panel. Two classes previously shared the name
+  `.wd-radar-empty`; the full-screen one is now `.wd-radar-void`. Do not reuse a
+  class name across a fixed-position overlay and an inline element.
+
+## Dev harnesses (browser, no backend)
+`pnpm dev`, then:
+- `/radar-lab.html` the constellation + detail panel against a mock forest.
+- `/war-room-lab.html` the WHOLE chrome, for LAYOUT passes. `?select=<n>` auto-clicks
+  the nth fleet strip, so the both-rails-open state (the one that actually has to be
+  checked for overlap) is reachable in a static screenshot.
+Neither may redefine a design token locally: that is how a harness silently keeps
+rendering a palette the app has already moved off.
 
 ## Conventions
 - **Env helper**: `std::env::var("X").ok().map(...).unwrap_or_else(default)` (see `util.rs`).
