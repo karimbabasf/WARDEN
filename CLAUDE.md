@@ -2,8 +2,16 @@
 
 WARDEN is "the agent that watches your agents": a macOS **Tauri v2** app that tails your
 local AI-coding transcripts (`~/.claude/projects`, `~/.codex/sessions`) and renders every
-active and idle agent as a live 3D radar. It is read-only and fully local: no network, no
-API keys, no writes to your projects.
+active and idle agent as a live 3D radar. It is local-first and has no API keys.
+
+Two invariants are narrower than they used to be. Both are load-bearing, so read the exact
+wording rather than the old summary:
+- **Never writes to your projects.** WARDEN may write HARNESS SESSION METADATA (its own
+  `sessions.meta_json`, and a `custom-title` line appended to a Claude transcript when you
+  rename a session from the app). It must never write to a watched project's source files.
+- **No network until you ask for one.** Remote observation binds its endpoint LAZILY, only
+  when you press Share. At rest WARDEN opens no socket and contacts no relay. What crosses
+  the wire is never `RadarState`: it is the redacted `ObservedState` projection.
 
 ## How we work in this repo
 - **Delegate discovery.** For broad file search or multi-file reads, dispatch Explore or
@@ -11,7 +19,13 @@ API keys, no writes to your projects.
   main context.
 - **Verify before claiming done.** Run the build and tests and read the real output.
   Evidence before assertions.
-- **Read-only, always.** WARDEN never writes to your watched projects.
+- **Read-only toward projects, always.** WARDEN never writes to your watched projects. The
+  only writes outside its own DB are harness session metadata (see the invariants above),
+  and they are confined to `commands.rs` so the write surface stays one file wide.
+- **Redaction is a projection, not a scrub.** Anything an observer receives is built by
+  `observe::project_state`. Never serialize a radar type toward the network, and never add
+  a free-text field to `ObservedAgent` without deciding it may leave the machine: the
+  canary test in `observe/projection.rs` is what enforces this and it must stay green.
 - **Never `git push` or open a PR** without an explicit instruction in that message.
 - Package manager is **pnpm**. Platform target: macOS Apple Silicon. OS-specific code is
   isolated in `platform/`, ready for future ports.
@@ -40,7 +54,8 @@ Layered `ingest -> store -> radar -> commands/lib/scheduler`.
 - `ir.rs` the canonical IR (single source of truth; every adapter maps raw records to this).
 - `store.rs` rusqlite + FTS5 (sessions/turns/events/watermarks/radar_token_cache), byte-offset watermarks.
 - `ingest/` the `Adapter` trait + `AdapterRegistry` + `claude_code.rs` / `codex.rs`. Adding a harness is one adapter, zero downstream changes.
-- `radar.rs` + `radar/` the live agent forest: a façade over `model/assemble/agent/context/identity/live/status` + `composition/hierarchy/liveness`.
+- `radar.rs` + `radar/` the live agent forest: a façade over `model/assemble/agent/context/identity/live/status` + `composition/hierarchy/liveness` + `teams` (Claude agent-team rosters from `~/.claude/teams/*/config.json`, the source of real subagent names).
+- `observe.rs` + `observe/` remote read-only observation: `projection` (the redaction boundary; the ONLY producer of wire data), `grants` (token codec + single-use/expiry), `transport` (iroh QUIC, host side), `peers` (observer side). Holds no `AppHandle` and cannot name a radar type, both asserted by tests.
 - `scheduler.rs` + `scheduler/` the task drivers: `watch` (live-ingest) and `radar` (recompute + `RadarStateCache`).
 - `util.rs` env + path helpers; `platform/` the OS seam (port + `macos.rs` + `fallback.rs`).
 - `lib.rs` the Tauri builder / `setup()` (visible window on launch, tray, hotkey, startup backfill, watchers); `commands.rs` the `#[tauri::command]`s.
