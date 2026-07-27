@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod ingest;
 pub mod ir;
+pub mod observe;
 pub mod platform;
 pub mod radar;
 pub mod scheduler;
@@ -72,6 +73,11 @@ pub fn run() {
             platform::apply_activation_policy(app);
 
             let state = AppState::init().map_err(|e| format!("state init: {e}"))?;
+            // Give the observation runtime its event channel. It never holds the
+            // AppHandle itself; this hands it a closure that can only emit, so the
+            // module has no route to a Tauri command. Binding a socket still waits for
+            // an explicit observe_start_sharing.
+            state.observe.attach_app(app.handle().clone());
 
             // 2) RADAR liveness watchers: the Claude `~/.claude/sessions` registry
             //     (bloom/implode) + the Codex live/archived roots (archive-move =
@@ -268,7 +274,22 @@ pub fn run() {
             hide_overlay,
             minimize_window,
             hide_window,
-            get_radar_state
+            get_radar_state,
+            rename_session,
+            reveal_path,
+            preview_observed_state,
+            observe_start_sharing,
+            observe_stop_sharing,
+            observe_sharing_status,
+            observe_create_grant,
+            observe_list_grants,
+            observe_revoke_grant,
+            observe_pending_approvals,
+            observe_resolve_approval,
+            observe_add_peer,
+            observe_list_peers,
+            observe_remove_peer,
+            observe_peer_state
         ])
         .on_window_event(|window, event| {
             // The red traffic-light button (and ⌘W) asks the window to CLOSE. WARDEN

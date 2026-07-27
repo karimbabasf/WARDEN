@@ -80,7 +80,47 @@ impl Store {
         if !has_parent_col {
             c.execute_batch("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;")?;
         }
+        // Remote observation: one row per issued observer grant. The SQL that reads and
+        // claims these rows lives in `observe::grants`, deliberately kept next to the
+        // token codec it enforces, so the whole credential lifecycle is one auditable
+        // file. Only the DDL lives here, with the rest of the schema.
+        //
+        // `token_id` is a PRIMARY KEY rather than a plain index: it is the first 8 bytes
+        // of the verifier, so uniqueness is what makes "one token_id names one grant"
+        // true, and a hash collision fails an INSERT loudly instead of silently
+        // shadowing an existing grant.
+        c.execute_batch(
+            r#"
+        CREATE TABLE IF NOT EXISTS observer_grants(
+            token_id BLOB PRIMARY KEY,
+            verifier BLOB NOT NULL,
+            friend_label TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            redeemed_by BLOB,
+            redeemed_at INTEGER,
+            profile TEXT NOT NULL,
+            last_seen_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_observer_grants_state ON observer_grants(state);
+        CREATE TABLE IF NOT EXISTS observer_peers(
+            peer_id BLOB PRIMARY KEY,
+            host_label TEXT NOT NULL,
+            added_at INTEGER NOT NULL
+        );
+        "#,
+        )?;
         Ok(())
+    }
+
+    /// Run one closure against the raw connection.
+    ///
+    /// Exists for `observe::grants`, which owns the `observer_grants` table end to end.
+    /// It is `pub(crate)` and takes a closure rather than handing out the `Arc<Mutex<_>>`
+    /// so the lock cannot escape and deadlock, and so every caller is greppable.
+    pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        f(&self.conn())
     }
     /// RADAR: record that `child_id`'s session was spawned by `parent_id`. Sets
     /// the child row's `parent_session_id`; a no-op if the child id is unknown.
