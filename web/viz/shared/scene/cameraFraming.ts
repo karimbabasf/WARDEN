@@ -6,17 +6,32 @@ export interface Bounds {
 }
 
 /**
- * Given a bounding sphere radius and a camera vertical/horizontal FOV in degrees,
- * returns the camera-to-center distance that fills `fill` fraction of the frame.
+ * Given a bounding sphere radius and a camera VERTICAL FOV in degrees, returns the
+ * camera-to-center distance that fills `fill` fraction of the frame.
  *
  * Formula: r / (tan(fov_rad / 2) * fill)
+ *
+ * `aspect` (width / height) frames against the TIGHTER of the two frustums. three.js
+ * `PerspectiveCamera.fov` is vertical only, so the horizontal frustum narrows with the
+ * window: on a portrait or simply narrow window (aspect < 1) the vertical fit alone
+ * leaves the constellation's wide rail layout clipped off the left and right edges.
+ * Since tan(hFov/2) = tan(vFov/2) * aspect, clamping the effective half-angle by
+ * min(1, aspect) yields whichever distance actually contains the sphere. Omitting
+ * `aspect` keeps the original vertical-only behaviour.
  */
 export function frameDistance(
   boundingRadius: number,
   fovDeg: number,
   fill = 0.6,
+  aspect?: number,
 ): number {
-  return boundingRadius / (Math.tan(((fovDeg * Math.PI) / 180) / 2) * fill);
+  const halfV = Math.tan(((fovDeg * Math.PI) / 180) / 2);
+  // A non-finite or non-positive aspect (a 0-height canvas mid-resize) must not divide
+  // by zero or NaN the camera into oblivion, so fall back to vertical-only framing.
+  const tighten = aspect !== undefined && Number.isFinite(aspect) && aspect > 0
+    ? Math.min(1, aspect)
+    : 1;
+  return boundingRadius / (halfV * fill * tighten);
 }
 
 /**

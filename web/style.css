@@ -150,18 +150,32 @@ html, body {
 }
 
 /* ── filter bar (dead-centre bottom — a modern segmented dock) ──────────────*/
+/* The right-hand inspector steals a slice of the board while a globe is selected.
+   Centring the bar on the full viewport therefore reads as pushed-right exactly when
+   you are inspecting something. `--dock-occupied` is the width the dock actually takes
+   (0 when closed), so the bar centres against the REMAINING canvas and stays optically
+   dead-centre either way. It animates on the same 220ms curve as the dock itself. */
+.wd-radar-root { --dock-occupied: 0px; }
+.wd-radar-root.has-dock { --dock-occupied: calc(var(--panel-w) + var(--side-margin)); }
+
 .wd-filterbar {
   position: absolute;
-  left: 50%;
+  left: calc(50% - var(--dock-occupied, 0px) / 2);
   bottom: 22px;
-  transform: translateX(-50%);
+  /* Centred with the independent `translate` property, NOT `transform`. The wd-fade-up
+     keyframes below animate `transform` with fill-mode `both`, which permanently REPLACES
+     any transform declared here, so a `transform: translateX(-50%)` silently never applied
+     and `left: 50%` left the bar sitting half its own width right of centre. `translate`
+     composes with the animated transform instead of losing to it. */
+  translate: -50% 0;
+  transition: left 220ms ease;
   z-index: var(--z-deck);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
   gap: 4px;
-  max-width: min(92vw, 900px);
+  max-width: min(92vw, 900px, calc(100vw - var(--dock-occupied, 0px) - 32px));
   padding: 6px;
   border-radius: 15px;
   background: var(--panel-strong);
@@ -258,6 +272,10 @@ html, body {
 
 .wd-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .wd-detail-title { margin: 6px 0 0; font-size: 17px; line-height: 1.15; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink); }
+/* the harness's OWN session name (Claude custom-title / Codex plan H1): normal
+   case and softer colour, so it never competes with the derived .wd-detail-title
+   above it. */
+.wd-detail-session-name { margin: 3px 0 0; font-size: 12px; line-height: 1.35; color: var(--ink-soft); }
 .wd-detail-sub { margin: 4px 0 0; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
 .wd-detail-close {
   flex: none;
@@ -358,6 +376,91 @@ html, body {
 }
 .wd-radar-section { margin-top: 16px; }
 .wd-radar-section + .wd-radar-section { border-top: 1px solid var(--hair); padding-top: 14px; }
+
+/* ── current-action hero: the in-flight tool call, the first thing under the
+   header and above the context gauge. `--action` keys off [data-kind] so a
+   write/edit runs a stronger accent than a read, with zero colour literals in
+   the component. `.is-idle` is deliberately quiet: no pulse, no fake spinner,
+   because "no action" is a real, honest state, not a loading state. ─────────*/
+.wd-action-hero {
+  --action: var(--harness, var(--green));
+  padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--action) 50%, transparent);
+  background: linear-gradient(160deg, color-mix(in srgb, var(--action) 13%, transparent), rgba(2, 9, 6, 0.7));
+  box-shadow: 0 0 22px color-mix(in srgb, var(--action) 24%, transparent), inset 0 0 22px rgba(118, 255, 157, 0.03);
+}
+.wd-action-hero[data-kind="read"] { --action: #7fd7ff; }
+.wd-action-hero[data-kind="write"] { --action: #ffcf7a; }
+.wd-action-hero[data-kind="search"] { --action: #8bffb0; }
+.wd-action-hero[data-kind="run"],
+.wd-action-hero[data-kind="tool"] { --action: var(--acid); }
+.wd-action-hero[data-kind="thinking"] { --action: #b98cff; }
+/* a write/edit reads heavier: a brighter glow and a bolder verb than a read. */
+.wd-action-hero[data-kind="write"] {
+  box-shadow: 0 0 32px color-mix(in srgb, var(--action) 34%, transparent), inset 0 0 26px rgba(118, 255, 157, 0.04);
+  border-color: color-mix(in srgb, var(--action) 64%, transparent);
+}
+.wd-action-hero[data-kind="write"] .wd-action-hero-verb { font-weight: 700; }
+
+.wd-action-hero-body { display: flex; align-items: flex-start; gap: 11px; }
+.wd-action-hero-glyph { flex: none; font-size: 24px; line-height: 1.1; filter: drop-shadow(0 0 9px currentColor); }
+.wd-action-hero-glyph.is-tool, .wd-action-hero-glyph.is-run { color: var(--acid); }
+.wd-action-hero-glyph.is-read { color: #7fd7ff; }
+.wd-action-hero-glyph.is-write { color: #ffcf7a; }
+.wd-action-hero-glyph.is-search { color: #8bffb0; }
+.wd-action-hero-glyph.is-message { color: var(--ink-soft); }
+.wd-action-hero-glyph.is-thinking { color: #b98cff; }
+
+.wd-action-hero-main { flex: 1; min-width: 0; }
+.wd-action-hero-meta { display: flex; align-items: baseline; gap: 8px; }
+.wd-action-hero-kind { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--action); }
+.wd-action-hero-tool { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
+.wd-action-hero-verb {
+  margin-top: 3px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wd-action-hero-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 7px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--action) 42%, transparent);
+  background: rgba(2, 9, 6, 0.5);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.wd-action-hero-target:hover {
+  background: color-mix(in srgb, var(--action) 15%, transparent);
+  border-color: color-mix(in srgb, var(--action) 62%, transparent);
+}
+.wd-action-hero-target-glyph { flex: none; color: var(--action); }
+.wd-action-hero-target-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+
+.wd-action-hero-elapsed { flex: none; text-align: right; font-variant-numeric: tabular-nums; }
+.wd-action-hero-elapsed-value { display: block; font-size: 19px; color: var(--action); text-shadow: 0 0 11px color-mix(in srgb, var(--action) 55%, transparent); }
+.wd-action-hero-elapsed-label { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); }
+
+.wd-action-hero.is-idle { border-color: var(--hair); background: rgba(118, 255, 157, 0.03); box-shadow: none; }
+.wd-action-hero-idle { display: flex; align-items: center; gap: 8px; margin-top: 2px; color: var(--ink-faint); font-size: 12px; letter-spacing: 0.03em; }
+.wd-action-hero-idle-glyph { font-size: 15px; opacity: 0.6; }
 
 /* context window — static live readout, shaped like the Claude context panel */
 .wd-context-window {
@@ -551,6 +654,22 @@ html, body {
   color: var(--ink-faint);
 }
 .wd-radar-feed-time { flex: none; font-size: 10px; color: var(--ink-faint); }
+/* small Finder-reveal affordance, shown only on rows that carry a target path so
+   a row with no single file never LOOKS clickable. */
+.wd-radar-feed-reveal {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-left: 2px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+.wd-radar-feed-reveal:hover { color: var(--green); border-color: var(--hair); }
 
 /* children roster — each row flies the camera to that globe */
 .wd-radar-roster-count { color: var(--ink-faint); }
@@ -623,6 +742,9 @@ html, body {
     width: auto;
     max-height: 46vh;
   }
+  /* At this size the dock is a full-width TOP overlay, not a right rail, so it steals
+     no horizontal room: reset the offset or the bar would drift left instead. */
+  .wd-radar-root.has-dock { --dock-occupied: 0px; }
   /* filter bar stays centred; wrap tighter and shrink on small widths */
   .wd-filterbar {
     bottom: 14px;
@@ -795,3 +917,47 @@ html, body {
   background: transparent;
 }
 .wd-crumb.is-current:hover { background: transparent; }
+
+/* ── rename control (detail panel title) ────────────────────────────────────
+   The pencil stays quiet until the header is hovered or the button is focused, so
+   the title reads as a title, not as a form field, until you reach for it. */
+.wd-detail-title-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.wd-detail-rename {
+  flex: none;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink-faint);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 140ms ease, color 140ms ease;
+}
+.wd-detail-head:hover .wd-detail-rename,
+.wd-detail-rename:focus-visible { opacity: 1; }
+.wd-detail-rename:hover { color: var(--green); }
+.wd-detail-rename:focus-visible { outline: 1px solid var(--hair-bright); outline-offset: 2px; }
+.wd-detail-title-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--hair-bright);
+  border-radius: 5px;
+  background: rgba(118, 255, 157, 0.06);
+  color: var(--ink);
+  font-family: var(--mono);
+  /* Matches .wd-detail-title so committing does not visibly reflow the header. */
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.wd-detail-title-input:focus { outline: none; border-color: var(--green); }
+.wd-detail-rename-error {
+  flex: 1 0 100%;
+  color: var(--red);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}

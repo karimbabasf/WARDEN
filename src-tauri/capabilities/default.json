@@ -25,6 +25,7 @@
     "core:event:allow-emit-to",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
-    "global-shortcut:allow-is-registered"
+    "global-shortcut:allow-is-registered",
+    "opener:allow-reveal-item-in-dir"
   ]
 }

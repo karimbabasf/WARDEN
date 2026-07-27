@@ -19,6 +19,35 @@ describe('frameDistance', () => {
     const explicit = frameDistance(2, 46, 0.6);
     expect(withDefault).toBeCloseTo(explicit, 10);
   });
+
+  it('omitting aspect keeps the original vertical-only framing', () => {
+    expect(frameDistance(2, 46, 0.6, undefined)).toBeCloseTo(frameDistance(2, 46, 0.6), 10);
+  });
+
+  it('a wide window (aspect > 1) is unchanged: the vertical frustum is the tight one', () => {
+    expect(frameDistance(2, 46, 0.6, 1.9)).toBeCloseTo(frameDistance(2, 46, 0.6), 10);
+  });
+
+  it('a square window (aspect = 1) matches vertical-only framing', () => {
+    expect(frameDistance(2, 46, 0.6, 1)).toBeCloseTo(frameDistance(2, 46, 0.6), 10);
+  });
+
+  it('a narrow window (aspect < 1) pulls the camera back so the width still fits', () => {
+    const wide = frameDistance(2, 46, 0.6, 1.6);
+    const narrow = frameDistance(2, 46, 0.6, 0.5);
+    expect(narrow).toBeGreaterThan(wide);
+    // Exactly 1/aspect further out: tan(hFov/2) = tan(vFov/2) * aspect.
+    expect(narrow).toBeCloseTo(frameDistance(2, 46, 0.6) / 0.5, 10);
+  });
+
+  it('a degenerate aspect (0, NaN, negative) falls back to vertical framing, never NaN', () => {
+    const base = frameDistance(2, 46, 0.6);
+    for (const bad of [0, Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+      const d = frameDistance(2, 46, 0.6, bad);
+      expect(Number.isFinite(d)).toBe(true);
+      expect(d).toBeCloseTo(base, 10);
+    }
+  });
 });
 
 describe('subtreeBounds', () => {
