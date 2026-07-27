@@ -111,6 +111,16 @@ export type RadarAgent = {
    * fills it in as a string or `null`.
    */
   title?: string | null;
+  /**
+   * Where this session is being driven from, as the harness recorded it:
+   * `cli` (a terminal), `claude-vscode` / `codex_vscode` (an IDE plugin),
+   * `claude-desktop`, and so on. IDE-plugin sessions write into the SAME
+   * transcript tree as terminal ones, so this is the only thing that tells
+   * them apart, and people running an agent from inside their editor should
+   * still see themselves tracked correctly. `null` when the harness did not
+   * say. Optional key so an older payload still satisfies the type.
+   */
+  surface?: string | null;
   /** What this agent is doing right now; `null` when idle between tool calls. */
   currentAction?: RadarCurrentAction | null;
   /** Agent-team membership, when the harness groups agents into a named team. */
@@ -297,6 +307,7 @@ function normalizeAgent(a: any): RadarAgent {
     role: strOrNull(a?.role),
     model: strOrNull(a?.model),
     title: strOrNull(a?.title),
+    surface: strOrNull(a?.surface ?? a?.entrypoint),
     currentAction: normalizeCurrentAction(a?.currentAction ?? a?.current_action),
     team: normalizeTeam(a?.team),
     status: status(a?.status),

@@ -34,6 +34,64 @@ export function frameDistance(
   return boundingRadius / (halfV * fill * tighten);
 }
 
+// ── framing inside the DOM's free channel ────────────────────────────────────
+// The canvas fills the window, but the chrome does not: a left rail is always
+// mounted and a right rail opens on selection, each `var(--rail-w)` wide. Framing
+// against the full viewport therefore parks part of the constellation UNDER a panel.
+// These three pure helpers move the fit into the free channel between the rails:
+// `channelWidth` narrows the aspect fed to `frameDistance` (so the fit accounts for
+// the width actually visible), and `channelShiftPx` + `pixelsToWorld` truck the
+// camera sideways so the scene lands in the middle of that channel rather than the
+// middle of the window. All inputs are CSS pixels, matching `useThree().size`.
+
+/** Reserved chrome on each side of the canvas, in CSS pixels. */
+export type RailInsets = { left: number; right: number };
+
+/** Visible width between the reserved rails, floored at 1 so it never divides to 0. */
+export function channelWidth(viewportWidth: number, insets: RailInsets): number {
+  const w = Number.isFinite(viewportWidth) ? viewportWidth : 0;
+  const left = Number.isFinite(insets.left) ? Math.max(0, insets.left) : 0;
+  const right = Number.isFinite(insets.right) ? Math.max(0, insets.right) : 0;
+  return Math.max(1, w - left - right);
+}
+
+/**
+ * Signed CSS pixels to move the CAMERA along its own right vector so the scene
+ * appears centred in the free channel instead of the window.
+ *
+ * The channel's midpoint sits `(left - right) / 2` px right of the window's midpoint,
+ * and moving the camera right pushes the scene left, so the camera moves the opposite
+ * way: `(right - left) / 2`. A left rail alone (right = 0) therefore returns a
+ * negative shift, dollying the camera left so the constellation slides right, clear
+ * of the panel. Equal rails cancel to 0, as does no chrome at all.
+ */
+export function channelShiftPx(insets: RailInsets): number {
+  const left = Number.isFinite(insets.left) ? Math.max(0, insets.left) : 0;
+  const right = Number.isFinite(insets.right) ? Math.max(0, insets.right) : 0;
+  return (right - left) / 2;
+}
+
+/**
+ * Convert a screen offset in CSS pixels to world units at `distance` from the camera.
+ *
+ * The frustum is `2 * distance * tan(fov/2)` world units tall and `viewportHeight`
+ * pixels tall, so one pixel is their ratio. `fovDeg` is three.js's VERTICAL fov, which
+ * is why height (never width) is the denominator: the vertical mapping is the only one
+ * that holds regardless of aspect. Degenerate inputs return 0 rather than NaN, so a
+ * mid-resize frame nudges the camera nowhere instead of into oblivion.
+ */
+export function pixelsToWorld(
+  px: number,
+  distance: number,
+  fovDeg: number,
+  viewportHeight: number,
+): number {
+  if (!Number.isFinite(px) || !Number.isFinite(distance) || !Number.isFinite(fovDeg)) return 0;
+  if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return 0;
+  const frustumHeight = 2 * distance * Math.tan(((fovDeg * Math.PI) / 180) / 2);
+  return (px * frustumHeight) / viewportHeight;
+}
+
 /**
  * Enclosing sphere for an ENTIRE laid-out forest — every node, regardless of
  * hierarchy. Centre is the midpoint of the axis-aligned extent; radius is the
@@ -63,6 +121,34 @@ export function enclosingBounds(
     if (d > radius) radius = d;
   }
   return { center: [cx, cy, cz], radius };
+}
+
+/** Axis-aligned extent of a laid-out forest. Null for an empty set. */
+export type Box = { min: [number, number, number]; max: [number, number, number] };
+
+/**
+ * Axis-aligned bounding box of a laid-out forest, node surfaces included.
+ *
+ * The enclosing SPHERE is what the camera frames with, but anything that has to be
+ * drawn AROUND a constellation (a border, a backdrop) needs its real proportions: the
+ * abacus board is far wider than it is tall, so a square sized off the sphere radius
+ * would tower over it with dead space above and below.
+ */
+export function enclosingBox(
+  points: { pos: [number, number, number]; radius: number }[],
+): Box | null {
+  if (points.length === 0) return null;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const { pos, radius } of points) {
+    minX = Math.min(minX, pos[0] - radius);
+    minY = Math.min(minY, pos[1] - radius);
+    minZ = Math.min(minZ, pos[2] - radius);
+    maxX = Math.max(maxX, pos[0] + radius);
+    maxY = Math.max(maxY, pos[1] + radius);
+    maxZ = Math.max(maxZ, pos[2] + radius);
+  }
+  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
 }
 
 /**

@@ -372,3 +372,53 @@ describe('layoutRadarScene — frozen output contract (every node carries id + p
     expect(map.size).toBe(layout.nodes.length);
   });
 });
+
+// The trap that produced a real bug: the constellation used to lay out
+// `radarModelWithoutGone(model, goneIds)` while everything outside the canvas
+// (WarRoom's `selectedNode`, `sceneBounds`, `subtreeBounds`) laid out the FULL
+// model. These tests pin down why that could never work, so nobody reintroduces
+// a second, filtered layout: dropping a node is not a local edit to the board.
+describe('layout stability: dropping a node is NOT a local change', () => {
+  const full: RadarSceneModel = {
+    generatedAt: 'T',
+    agents: [
+      agent({ id: 'root', depth: 0, cwd: '~/w', contextTokens: 172_000, childCount: 2 }),
+      agent({ id: 'kid-a', depth: 1, parentId: 'root', contextTokens: 61_000 }),
+      agent({ id: 'kid-b', depth: 1, parentId: 'root', contextTokens: 24_000, status: 'terminated' }),
+    ],
+  };
+  const withoutTerminated: RadarSceneModel = {
+    ...full,
+    agents: full.agents.filter((a) => a.id !== 'kid-b'),
+  };
+  const xOf = (m: RadarSceneModel, id: string) =>
+    layoutRadarScene(m).nodes.find((n) => n.id === id)!.position.x;
+
+  it('MOVES the parent when a finished child is filtered out (a parent centres over its children)', () => {
+    const before = xOf(full, 'root');
+    const after = xOf(withoutTerminated, 'root');
+    expect(after).not.toBeCloseTo(before, 3);
+    // Not a rounding wobble: it is most of a globe's width, enough to slide the
+    // globe out from under the camera pose that was framing it.
+    expect(Math.abs(after - before)).toBeGreaterThan(0.5);
+  });
+
+  it('keeps every position identical when the SAME model is laid out twice', () => {
+    // The layout is a pure function of the model, so one model is one board. The
+    // fix for the divergence is simply to feed every consumer the same model.
+    const a = layoutRadarScene(full).nodes.map((n) => [n.id, n.position.x, n.position.y]);
+    const b = layoutRadarScene(full).nodes.map((n) => [n.id, n.position.x, n.position.y]);
+    expect(a).toEqual(b);
+  });
+
+  it('does not move a live sibling when another agent merely CHANGES STATUS', () => {
+    // Position never depends on activity: the same agents in the same folders lay
+    // out identically whatever they are doing.
+    const busy: RadarSceneModel = {
+      ...full,
+      agents: full.agents.map((a) => ({ ...a, status: 'idle' as const })),
+    };
+    expect(xOf(busy, 'root')).toBeCloseTo(xOf(full, 'root'), 10);
+    expect(xOf(busy, 'kid-a')).toBeCloseTo(xOf(full, 'kid-a'), 10);
+  });
+});
