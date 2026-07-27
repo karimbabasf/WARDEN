@@ -105,7 +105,10 @@ a{color:inherit}
   position:absolute;left:0;right:0;top:-168px;bottom:-168px;
   width:100%;height:calc(100% + 336px);display:block;
 }
-#ring-back{z-index:1}
+/* Both canvases are transparent and both are inert. A positioned z-index:1
+   element paints ABOVE in-flow content, so an opaque back canvas overhanging the
+   stage swallowed the lede and the top half of the buttons underneath it. */
+#ring-back{z-index:1;pointer-events:none}
 #ring-front{z-index:3;pointer-events:none}
 
 .mark{
@@ -327,362 +330,657 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
   </div>
 </footer>
 
+<script src="vendor/w3.js"></script>
 <script>
 (() => {
 'use strict';
 
-/* ══ the agent ring ══════════════════════════════════════════════════════
-   The globes are drawn to match RadarConstellation.tsx as closely as a 2D
-   canvas can, values taken from that file rather than eyeballed:
+/* == the agent ring ======================================================
+   These are not an impression of WARDEN's globes, they ARE WARDEN's globes:
+   the same three r181, the same IcosahedronGeometry lattices, the same drei
+   wireframe shader (ported below, uniform for uniform), the same crystal
+   heart, the same gyro cradle and brand heart on a root, the same pmndrs
+   bloom at the same settings. Every constant is quoted from the file it
+   lives in, so if the app moves, the diff is obvious.
 
-     outer shell  IcosahedronGeometry(1, root ? 2 : 1), so a root carries the
-                  dense 162-vertex lattice and a subagent the 42-vertex one.
-                  Solid for a root, DASHED for a subagent. Front edges take the
-                  harness hue, back edges take colour * 0.16, which is the app's
-                  `backfaceStroke` and the thing that makes the shell read solid.
-     inner cage   IcosahedronGeometry(0.6, 1), counter-rotating against the
-                  shell (y -0.18, x +0.1), stroked in colour.lerp(white, 0.24)
-                  over a 0.035 face wash.
-     nodes        a lit point at every outer vertex, colour.lerp(white, 0.16).
-     gem          IcosahedronGeometry(0.26, 0), the faceted crystal heart.
-     halo         radial sprite, scale (root .74 : sub .58) * (1 + live * .95
-                  + pulse * .45).
+     shell        IcosahedronGeometry(1, root ? 2 : 1), barycentric wireframe,
+                  thickness .02 root / .016 sub, dashed on a sub (dashRepeats
+                  4), backfaceStroke = colour * .16.
+                  RadarConstellation.tsx:251, :414-430
+     inner cage   IcosahedronGeometry(0.6, 1), stroke colour.lerp(white, .24)
+                  over a .035 face wash, counter-rotating y -.18 / x +.1.
+                  RadarConstellation.tsx:252, :340-341, :435
+     nodes        a lit point per shell vertex, colour.lerp(white, .16),
+                  additive, size .08 root / .07 sub.        :254-258, :439-452
+     gem          IcosahedronGeometry(0.26, 0) in MeshPhysicalMaterial,
+                  emissive = the harness hue.                      :253, :467
+     halo         radial sprite, (root .74 : sub .58) * (1 + live * .95
+                  + pulse * .45).                                  :338, :455
+     core         a ROOT also wears the orchestrator signature: two gyro rings
+                  at r 1.22 and the harness's own brand heart, Claude's
+                  sunburst or Codex's blossom.                    AgentCore.tsx
+     scene        ambient .085, two directionals, a 128px lightformer probe,
+                  ACES tone mapping at 1.05 exposure, bloom intensity 1.3 /
+                  threshold .22 / smoothing .9 / mipmap / radius .85.
+                                          RadarConstellation.tsx:938-974
 
-   Spin is Y only: 0.08 rad/s for a root, 0.14 for a subagent (roots are bigger
-   so they turn slower), lifted 85% while working. Working globes ride the same
-   ~4.2s breathing pulse; idle ones get the slow ambient breath. Plus the slow
-   positional bob.
+   Two deliberate departures, both because a landing page is not the app:
+     1. an occluder sprite behind each front globe, so a globe crossing the
+        wordmark actually hides it. The app has nothing to occlude.
+     2. no fog. fogExp2(BG, .014) over this scene's ~13 world units is a
+        0.4% attenuation, i.e. invisible. Carrying it would be cargo cult.
 
-   Lifecycle is the app's as well. radarLifecycle.ts implodes a dead agent at
-   lambda 16 and blooms a new one at lambda 7, so here a globe occasionally
-   collapses into itself and a different harness takes the slot. That is what a
-   real radar shows when one session ends and another starts.
-
-   The ring: globes ride a circle tilted in 3D and projected with perspective,
-   so a near globe is larger and painted AFTER the wordmark while a far one is
-   smaller and painted BEFORE it. Roll is zero, so the left and right extremes
-   of the ellipse sit on exactly the same horizontal. */
+   The ring itself is a real circle in the XZ plane read by a camera lifted
+   TILT above it, so the ellipse, the size falloff and the front/back split
+   are all perspective rather than arithmetic. The camera carries no roll, so
+   the left and right extremes of the ellipse sit on the same horizontal by
+   construction: at theta 0 and theta PI the height term is R sin(theta) sin
+   (TILT), which is zero at both. */
 
 const BACK  = document.getElementById('ring-back');
 const FRONT = document.getElementById('ring-front');
 const ORBIT = document.getElementById('orbit');
 const MARK  = document.querySelector('.mark');
-const bctx = BACK.getContext('2d');
-const fctx = FRONT.getContext('2d');
 
-const TILT  = 10.5 * Math.PI/180; /* ring inclination. Perspective throws the near
-                                     globes out and pulls the far ones in, so this
-                                     is tuned against the cap band: near globes bite
-                                     up into the letters, far ones cut behind them */
-const ROLL  = 0;                  /* no side tilt: the left and right extremes of
-                                     the ellipse land on the same y */
-const PERIOD = 52;                /* seconds for one full revolution */
+const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-const RGB = { claude:[255,134,54], codex:[79,201,255], slate:[143,160,184] };
-const HARNESSES = ['claude','codex','claude','codex','slate'];
+/* No WebGL (or the vendor bundle failed to load): drop the canvases and let the
+   wordmark carry the hero on its own rather than shipping a broken frame. */
+if (typeof W3 === 'undefined') { BACK.remove(); FRONT.remove(); return; }
+const { THREE, EffectComposer, RenderPass, EffectPass, BloomEffect } = W3;
 
-/* Honest to the app: size is context occupancy, brightness is liveness, hue is
-   harness. Roots carry the dense lattice, subagents the dashed one. */
-const AGENTS = [
-  {h:'claude', ctx:1.00, live:1.00, root:true },
-  {h:'codex',  ctx:0.57, live:0.16, root:false},
-  {h:'claude', ctx:0.74, live:0.34, root:true },
-  {h:'slate',  ctx:0.32, live:0.10, root:false},
-  {h:'codex',  ctx:0.88, live:0.92, root:true },
-  {h:'claude', ctx:0.45, live:0.20, root:false},
-  {h:'claude', ctx:0.66, live:0.55, root:false},
-  {h:'codex',  ctx:0.38, live:0.13, root:false},
-  {h:'claude', ctx:0.93, live:0.78, root:true },
-  {h:'slate',  ctx:0.29, live:0.08, root:false},
-  {h:'codex',  ctx:0.62, live:0.30, root:false},
-];
-AGENTS.forEach((a,i) => {
-  a.rgb   = RGB[a.h];
-  a.the   = (i/AGENTS.length) * Math.PI*2;
-  a.seed  = i*0.61;
-  a.ls    = 1;            /* lifecycle scale, exactly radarLifecycle's `scale` */
-  a.phase = 'alive';
-});
+const BG    = '#020403';                       /* RadarConstellation.tsx:46 */
+const WHITE = new THREE.Color('#ffffff');
+/* harnessColors.ts:35-39, verbatim. Colour is harness identity and nothing
+   else: size is context occupancy, brightness is liveness. */
+const HARNESS = {
+  claude_code: { hue: '#ff8636', motif: 'sunburst' },
+  codex:       { hue: '#4fc9ff', motif: 'blossom'  },
+};
+const HARNESS_IDS = Object.keys(HARNESS);
 
-/* ── icosphere: detail 1 = 42 verts / 120 edges, detail 2 = 162 / 480 ─────── */
-function icosphere(detail){
-  const t=(1+Math.sqrt(5))/2, n=v=>{const l=Math.hypot(v[0],v[1],v[2]);return [v[0]/l,v[1]/l,v[2]/l];};
-  let V=[[-1,t,0],[1,t,0],[-1,-t,0],[1,-t,0],[0,-1,t],[0,1,t],[0,-1,-t],[0,1,-t],[t,0,-1],[t,0,1],[-t,0,-1],[-t,0,1]].map(n);
-  let F=[[0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],[1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
-         [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],[4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1]];
-  for(let d=0;d<detail;d++){
-    const cache=new Map(), NF=[];
-    const mid=(a,b)=>{const k=a<b?a+':'+b:b+':'+a; if(cache.has(k))return cache.get(k);
-      const p=V[a],q=V[b]; V.push(n([p[0]+q[0],p[1]+q[1],p[2]+q[2]]));
-      cache.set(k,V.length-1); return V.length-1;};
-    for(const [a,b,c] of F){const ab=mid(a,b),bc=mid(b,c),ca=mid(c,a);
-      NF.push([a,ab,ca],[b,bc,ab],[c,ca,bc],[ab,bc,ca]);}
-    F=NF;
+/* Camera lift above the ring plane. This is the whole "saturn" dial: the ring's
+   vertical half-spread on screen is Rpx * sin(TILT), so at 11.5 degrees the near
+   globes land ~103px below the cap band, which on a ~110px wordmark drops them
+   clean under the baseline and kills the lapping. At 6.5 they cross the lower
+   half of the letters and the far ones cross the upper half, which is the
+   overlap Karim asked for, and it still reads as an oval rather than a line. */
+const TILT   = 8 * Math.PI / 180;
+const PERIOD = 64;                    /* seconds per revolution */
+const COUNT  = 10;
+const R      = 3.2;                   /* ring radius, world units */
+
+/* == drei's wireframe material, ported ===================================
+   node_modules/@react-three/drei/materials/WireframeMaterial.js, unchanged.
+   This is the shader that makes a WARDEN globe look like a WARDEN globe: it
+   strokes triangle edges from barycentric coordinates in the fragment stage
+   rather than drawing line primitives, which is why the lattice has real
+   thickness, real anti-aliasing and a dash pattern that follows the surface.
+   Reproducing it with LineSegments is exactly what the earlier pass got
+   wrong. Inlined rather than imported because the drei module pulls in React
+   and @react-three/fiber to deliver ~40 lines of GLSL. */
+const WIRE_VERT = `
+  attribute vec3 barycentric;
+  varying vec3 v_edges_Barycentric;
+  varying vec3 v_edges_Position;
+  void initWireframe() {
+    v_edges_Barycentric = barycentric;
+    v_edges_Position = position.xyz;
   }
-  const seen=new Set(), E=[];
-  for(const [a,b,c] of F) for(const [p,q] of [[a,b],[b,c],[c,a]]){
-    const k=p<q?p+':'+q:q+':'+p; if(!seen.has(k)){seen.add(k);E.push([p,q]);}
+  void main() {
+    initWireframe();
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
-  return {V,E,F};
-}
-const SPH1 = icosphere(1);   /* subagent shell + every inner cage */
-const SPH2 = icosphere(2);   /* root shell */
-const GEM  = icosphere(0);   /* the 20-face crystal heart */
+`;
+const WIRE_FRAG = `
+  #ifndef PI
+    #define PI 3.1415926535897932384626433832795
+  #endif
+  varying vec3 v_edges_Barycentric;
+  varying vec3 v_edges_Position;
+  uniform float strokeOpacity;
+  uniform float fillOpacity;
+  uniform float thickness;
+  uniform bool dashInvert;
+  uniform bool dash;
+  uniform float dashRepeats;
+  uniform float dashLength;
+  uniform vec3 stroke;
+  uniform vec3 backfaceStroke;
+  uniform vec3 fill;
 
-/* ── math ─────────────────────────────────────────────────────────────────── */
-function rot(v, rx, ry){
-  const cy=Math.cos(ry), sy=Math.sin(ry);
-  const x=v[0]*cy + v[2]*sy, z=-v[0]*sy + v[2]*cy, y=v[1];
-  const cx=Math.cos(rx), sx=Math.sin(rx);
-  return [x, y*cx - z*sx, y*sx + z*cx];
-}
-/* the app's dampValue: exp damped, dt bounded, never overshoots */
-function damp(v, target, lambda, dt){ return v + (target-v)*(1-Math.exp(-lambda*dt)); }
-
-function project(sph, x, y, r, rx, ry){
-  const out = new Array(sph.V.length);
-  for(let i=0;i<sph.V.length;i++){
-    const q = rot(sph.V[i], rx, ry);
-    out[i] = [x+q[0]*r, y+q[1]*r, q[2]];
+  float wireframe_aastep(float threshold, float dist) {
+    float afwidth = fwidth(dist) * 0.5;
+    return smoothstep(threshold - afwidth, threshold + afwidth, dist);
   }
-  return out;
-}
-
-function strokeEdges(ctx, P, E, wantFront, style, width, dash){
-  ctx.beginPath();
-  for(let i=0;i<E.length;i++){
-    const p=P[E[i][0]], q=P[E[i][1]];
-    if(((p[2]+q[2])*0.5 >= 0) !== wantFront) continue;
-    ctx.moveTo(p[0],p[1]); ctx.lineTo(q[0],q[1]);
+  float wireframe_map(float value, float min1, float max1, float min2, float max2) {
+    return min2 + (value - min1) * (max2 - min2) / (max1 - min1);
   }
-  ctx.strokeStyle=style; ctx.lineWidth=width;
-  if(dash) ctx.setLineDash(dash);
-  ctx.stroke();
-  if(dash) ctx.setLineDash([]);
-}
-
-/* ── one globe, matched to RadarConstellation.tsx ─────────────────────────── */
-function drawGlobe(ctx, a, x, y, r, k, t, front){
-  const root = a.root;
-  const sph  = root ? SPH2 : SPH1;
-  const [R,G,B] = a.rgb;
-
-  const live  = a.live;
-  const pulse = Math.sin(t*1.5 + a.seed*6.28) * live;   /* PULSE_RATE 1.5 rad/s */
-  const heat  = live*live;
-  const cr = R+(255-R)*heat, cg = G+(255-G)*heat, cb = B+(255-B)*heat;
-  const lit  = (0.30 + live*0.70) * k;
-  const hue  = (cr|0)+','+(cg|0)+','+(cb|0);
-  const back = ((cr*0.16)|0)+','+((cg*0.16)|0)+','+((cb*0.16)|0);          /* backfaceStroke */
-  const inner= ((cr+(255-cr)*0.24)|0)+','+((cg+(255-cg)*0.24)|0)+','+((cb+(255-cb)*0.24)|0);
-  const node = ((cr+(255-cr)*0.16)|0)+','+((cg+(255-cg)*0.16)|0)+','+((cb+(255-cb)*0.16)|0);
-
-  /* a near globe occludes the letters under its disc, in normal compositing,
-     before any additive line work goes down. Kept tight to the body, and light
-     enough that a crossed letter ghosts through instead of disappearing. */
-  if (front){
-    ctx.globalCompositeOperation = 'source-over';
-    const oc = ctx.createRadialGradient(x,y,0,x,y,r*1.04);
-    oc.addColorStop(0,'rgba(2,4,3,.74)'); oc.addColorStop(.88,'rgba(2,4,3,.70)');
-    oc.addColorStop(.97,'rgba(2,4,3,.38)'); oc.addColorStop(1,'rgba(2,4,3,0)');
-    ctx.fillStyle = oc; ctx.beginPath(); ctx.arc(x,y,r*1.04,0,6.2832); ctx.fill();
-  }
-  ctx.globalCompositeOperation = 'lighter';
-
-  /* halo sprite: same stops and the same live+pulse swell as the app */
-  const hr = r * (root?0.74:0.58) * (1 + live*0.95 + pulse*0.45) * 0.92;
-  const ha = Math.min(1, (0.05 + (0.3 + live*0.85)*0.34)) * k;
-  const hg = ctx.createRadialGradient(x,y,0,x,y,hr);
-  hg.addColorStop(0,   'rgba('+hue+','+(ha).toFixed(3)+')');
-  hg.addColorStop(.18, 'rgba('+hue+','+(ha*0.8).toFixed(3)+')');
-  hg.addColorStop(.5,  'rgba('+hue+','+(ha*0.22).toFixed(3)+')');
-  hg.addColorStop(1,   'rgba(0,0,0,0)');
-  ctx.fillStyle=hg; ctx.beginPath(); ctx.arc(x,y,hr,0,6.2832); ctx.fill();
-
-  /* spin: Y only, roots slower than subagents, both lifted while working */
-  const spin = (root ? 0.08 : 0.14) * (1 + live*0.85);
-  const gy = t*spin + a.seed*2.1;
-
-  const P  = project(sph, x, y, r, 0, gy);
-  const sw = r * (root ? 0.02 : 0.016);
-  const dash = root ? null : [r*0.055, r*0.04];   /* subagent shells are dashed */
-
-  /* back half in the near-black tint, then the cage, then the front half in
-     full hue: that ordering is what gives the shell its solidity */
-  strokeEdges(ctx, P, sph.E, false, 'rgba('+back+','+(lit).toFixed(3)+')', sw, dash);
-
-  /* inner cage, counter-rotating against the shell */
-  const IP = project(SPH1, x, y, r*0.6, t*0.1, gy - t*0.18);
-  ctx.beginPath();
-  for(const [f0,f1,f2] of SPH1.F){
-    const p=IP[f0], q=IP[f1], s=IP[f2];
-    if((p[2]+q[2]+s[2])/3 < 0) continue;
-    ctx.moveTo(p[0],p[1]); ctx.lineTo(q[0],q[1]); ctx.lineTo(s[0],s[1]); ctx.closePath();
-  }
-  ctx.fillStyle='rgba('+hue+','+(0.035*lit).toFixed(3)+')'; ctx.fill();
-  strokeEdges(ctx, IP, SPH1.E, false, 'rgba('+inner+','+(0.30*lit).toFixed(3)+')', r*0.022, null);
-  strokeEdges(ctx, IP, SPH1.E, true,  'rgba('+inner+','+(0.62*lit).toFixed(3)+')', r*0.022, null);
-
-  strokeEdges(ctx, P, sph.E, true, 'rgba('+hue+','+(0.95*lit).toFixed(3)+')', sw, dash);
-
-  /* a lit node at every outer vertex */
-  const nr = r * (root ? 0.040 : 0.035);
-  ctx.beginPath();
-  for(const p of P){ ctx.moveTo(p[0]+nr,p[1]); ctx.arc(p[0],p[1],nr,0,6.2832); }
-  ctx.fillStyle='rgba('+node+','+(0.6*lit).toFixed(3)+')';
-  ctx.fill();
-
-  /* the crystal heart: a 20 face icosahedron, emissive on the harness hue */
-  const gr = r*0.26;
-  const GP = project(GEM, x, y, gr, t*0.12, gy + t*0.28);
-  const core = ctx.createRadialGradient(x,y,0,x,y,gr*2.1);
-  const w = 0.55 + live*0.45;
-  core.addColorStop(0,'rgba('+Math.round(cr+(255-cr)*w)+','+Math.round(cg+(255-cg)*w)+','+Math.round(cb+(255-cb)*w)+','+(0.95*k).toFixed(3)+')');
-  core.addColorStop(.42,'rgba('+hue+','+(0.34*lit).toFixed(3)+')');
-  core.addColorStop(1,'rgba(0,0,0,0)');
-  ctx.fillStyle=core; ctx.beginPath(); ctx.arc(x,y,gr*2.1,0,6.2832); ctx.fill();
-  strokeEdges(ctx, GP, GEM.E, true, 'rgba('+hue+','+(0.8*lit).toFixed(3)+')', Math.max(0.6,r*0.012), null);
-}
-
-/* ── stars, seeded so the field is identical on every load ─────────────── */
-let stars=[];
-function seedStars(w,h){
-  stars=[]; let s=20260727;
-  const rnd=()=>{s=(s*1664525+1013904223)>>>0; return s/4294967296;};
-  const n=Math.round(w*h/9000);
-  for(let i=0;i<n;i++) stars.push([rnd()*w, rnd()*h, rnd()*0.9+0.2, (rnd()*0.45+0.06).toFixed(3)]);
-}
-
-/* ── layout + loop ─────────────────────────────────────────────────────── */
-let W=0,H=0,cx=0,cy=0,Rr=0,gR=0,dpr=1;
-function layout(){
-  /* measure the CANVAS box, not the stage box: the canvases overhang it */
-  const b=BACK.getBoundingClientRect();
-  W=Math.round(b.width); H=Math.round(b.height);
-  dpr=Math.min(window.devicePixelRatio||1, 2);
-  for(const c of [BACK,FRONT]){ c.width=Math.round(W*dpr); c.height=Math.round(H*dpr); }
-  bctx.setTransform(dpr,0,0,dpr,0,0);
-  fctx.setTransform(dpr,0,0,dpr,0,0);
-
-  const m=MARK.getBoundingClientRect();
-  cx=W/2;
-  /* seat the ring on the cap height middle, not the line box middle */
-  cy=(m.top - b.top) + m.height*0.45;
-  Rr=Math.min(m.width*0.545 + 30, W*0.42);
-  /* the globes are scaled back on narrow screens: at phone width the same ratio
-     buries the wordmark instead of orbiting it */
-  gR=Rr*(W<640 ? 0.092 : 0.107);
-  seedStars(W,H);
-}
-
-/* ring point to screen, with perspective */
-function place(th){
-  const st=Math.sin(th), ct=Math.cos(th);
-  const X=Rr*ct, Y=Rr*st*Math.sin(TILT), Z=Rr*st*Math.cos(TILT);
-  const xs=X*Math.cos(ROLL)-Y*Math.sin(ROLL), ys=X*Math.sin(ROLL)+Y*Math.cos(ROLL);
-  const f=Rr*2.45, k=f/(f-Z);
-  return {x:cx+xs*k, y:cy+ys*k, k, Z};
-}
-
-/* ── lifecycle: a session ends, its globe implodes, another harness takes the
-   slot and blooms. Same lambdas as radarLifecycle.ts. Deliberately rare. ─── */
-const LAMBDA_IN = 7, LAMBDA_OUT = 16, ALIVE_AT = 0.985, GONE_AT = 0.025;
-let nextEvent = 14;
-function stepLifecycle(t, dt){
-  let busy = 0;
-  for(const a of AGENTS) if(a.phase !== 'alive') busy++;
-
-  if(t > nextEvent && busy < 2){
-    const alive = AGENTS.filter(a => a.phase === 'alive');
-    if(alive.length > 3){
-      alive[Math.floor(Math.random()*alive.length)].phase = 'imploding';
-      busy++;
+  float getWireframe() {
+    vec3 barycentric = v_edges_Barycentric;
+    float d = min(min(barycentric.x, barycentric.y), barycentric.z);
+    float positionAlong = max(barycentric.x, barycentric.y);
+    if (barycentric.y < barycentric.x && barycentric.y < barycentric.z) {
+      positionAlong = 1.0 - positionAlong;
     }
-    nextEvent = t + 32 + Math.random()*26;  /* one every ~32 to 58s: rare enough
-                                               to read as an event, not a loop */
+    float computedThickness = wireframe_map(thickness, 0.0, 1.0, 0.0, 0.34);
+    if (dash) {
+      float offset = 1.0 / dashRepeats * dashLength / 2.0;
+      if (!dashInvert) { offset += 1.0 / dashRepeats / 2.0; }
+      float pattern = fract((positionAlong + offset) * dashRepeats);
+      computedThickness *= 1.0 - wireframe_aastep(dashLength, pattern);
+    }
+    return 1.0 - wireframe_aastep(computedThickness, d);
   }
 
-  for(const a of AGENTS){
-    if(a.phase === 'imploding'){
-      a.ls = damp(a.ls, 0, LAMBDA_OUT, dt);
-      if(a.ls <= GONE_AT){
-        /* the slot turns over: a different harness, its own context and liveness */
-        let h = a.h;
-        while(h === a.h) h = HARNESSES[Math.floor(Math.random()*HARNESSES.length)];
-        a.h = h; a.rgb = RGB[h];
-        a.ctx  = 0.28 + Math.random()*0.66;
-        a.live = Math.random() < 0.45 ? 0.6 + Math.random()*0.4 : Math.random()*0.3;
-        a.root = Math.random() < 0.36;
-        a.ls = GONE_AT; a.phase = 'spawning';
-      }
-    } else if(a.phase === 'spawning'){
-      a.ls = damp(a.ls, 1, LAMBDA_IN, dt);
-      if(a.ls >= ALIVE_AT){ a.ls = 1; a.phase = 'alive'; }
+  void main() {
+    float edge = getWireframe();
+    vec4 colorStroke = vec4(stroke, edge);
+    #ifdef FLIP_SIDED
+      colorStroke.rgb = backfaceStroke;
+    #endif
+    vec4 colorFill = vec4(fill, fillOpacity);
+    gl_FragColor = mix(colorFill, colorStroke, edge * strokeOpacity);
+  }
+`;
+
+function wireMaterial(o) {
+  const m = new THREE.ShaderMaterial({
+    uniforms: {
+      strokeOpacity: { value: 1 },
+      fillOpacity:   { value: o.fillOpacity ?? 0.25 },
+      thickness:     { value: o.thickness ?? 0.05 },
+      dashInvert:    { value: true },
+      dash:          { value: !!o.dash },
+      dashRepeats:   { value: o.dashRepeats ?? 4 },
+      dashLength:    { value: 0.5 },
+      stroke:         { value: new THREE.Color(o.stroke ?? '#ffffff') },
+      backfaceStroke: { value: new THREE.Color(o.backfaceStroke ?? '#000000') },
+      fill:           { value: new THREE.Color(o.fill ?? '#ffffff') },
+    },
+    vertexShader: WIRE_VERT,
+    fragmentShader: WIRE_FRAG,
+    transparent: true,
+    side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -4,
+  });
+  return m;
+}
+
+/* drei's getBarycentricCoordinates, verbatim (Wireframe.js:29-46). `simplify`
+   sets the third component of every third vertex to 1 so the triangulation
+   diagonal never strokes, which is what leaves a clean icosahedral lattice
+   instead of a triangulated mesh. The loop runs over `count` rather than
+   `count / 3` in drei too: the tail is never read, and matching the original
+   is worth more here than saving a few KB of Float32Array. */
+function setBarycentric(geometry, simplify) {
+  if (geometry.index) {
+    const n = geometry.toNonIndexed();
+    geometry.copy(n);
+    geometry.setIndex(null);
+  }
+  const count = geometry.getAttribute('position').count;
+  const b = [];
+  for (let i = 0; i < count; i++) {
+    const even = i % 2 === 0;
+    const Q = simplify ? 1 : 0;
+    if (even) b.push(0, 0, 1, 0, 1, 0, 1, 0, Q);
+    else      b.push(0, 1, 0, 0, 0, 1, 1, 0, Q);
+  }
+  geometry.setAttribute('barycentric', new THREE.BufferAttribute(Float32Array.from(b), 3));
+}
+
+/* == sprite textures (RadarConstellation.tsx:152-167, verbatim) =========== */
+function radialTexture(size, stops) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  for (const [at, a] of stops) g.addColorStop(at, `rgba(255,255,255,${a})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+const glowTex = radialTexture(128, [[0, 1], [0.18, 0.8], [0.5, 0.22], [1, 0]]);
+const dotTex  = radialTexture(48,  [[0, 1], [0.4, 0.75], [1, 0]]);
+/* The one thing the app has no need for: a dark disc that lets a front globe
+   genuinely eat the wordmark behind it. Tight rather than wide on purpose. A
+   broad soft disc greys the letters across the globe's whole footprint and
+   reads as a smudge on the type; a small dense one reads as a solid body
+   passing in front, which is the point. */
+const occTex = radialTexture(128, [[0, 0.86], [0.45, 0.82], [0.72, 0.3], [1, 0]]);
+
+/* == AgentCore geometry (AgentCore.tsx:63-145, verbatim) ================== */
+function ringGeometry(radius, segments = 96) {
+  const pos = new Float32Array((segments + 1) * 3);
+  for (let i = 0; i <= segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    pos[i * 3] = Math.cos(a) * radius;
+    pos[i * 3 + 1] = Math.sin(a) * radius;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  return g;
+}
+function sunburstGeometry() {
+  const t = (1 + Math.sqrt(5)) / 2;
+  const verts = [
+    [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+    [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+    [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+  ];
+  const pos = [];
+  verts.forEach((v, i) => {
+    const d = new THREE.Vector3(v[0], v[1], v[2]).normalize();
+    const inner = 0.1;
+    const outer = 0.42 + (i % 2 === 0 ? 0.12 : 0);
+    pos.push(d.x * inner, d.y * inner, d.z * inner, d.x * outer, d.y * outer, d.z * outer);
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  return g;
+}
+function blossomGeometry() {
+  const PETALS = 6, SEG = 40, major = 0.34, minor = 0.12, seat = 0.12;
+  const pos = [];
+  for (let p = 0; p < PETALS; p++) {
+    const a = (p / PETALS) * Math.PI * 2;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const cx = ca * seat, cy = sa * seat;
+    let prev = null;
+    for (let s = 0; s <= SEG; s++) {
+      const th = (s / SEG) * Math.PI * 2;
+      const ex = Math.cos(th) * major, ey = Math.sin(th) * minor;
+      const x = cx + ex * ca - ey * sa;
+      const y = cy + ex * sa + ey * ca;
+      if (prev) pos.push(prev[0], prev[1], 0, x, y, 0);
+      prev = [x, y];
     }
   }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  return g;
+}
+const GYRO_GEO  = ringGeometry(1.22);
+const HEART_GEO = { sunburst: sunburstGeometry(), blossom: blossomGeometry() };
+
+/* == the lightformer probe (RadarConstellation.tsx:959-964) ===============
+   drei's <Environment> renders its Lightformer children into a cube target
+   and hands it to the scene as an env map. Same thing by hand: the formers
+   are unlit planes and a ring, each turned to face the origin. It exists to
+   put a glint on the crystal hearts, nothing else. One per renderer, because
+   a texture cannot cross a GL context. */
+function buildEnv(renderer) {
+  const s = new THREE.Scene();
+  const former = (geo, color, intensity, pos, sx, sy) => {
+    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: new THREE.Color(color).multiplyScalar(intensity), toneMapped: false,
+    }));
+    m.position.set(pos[0], pos[1], pos[2]);
+    m.scale.set(sx, sy, 1);
+    m.lookAt(0, 0, 0);
+    s.add(m);
+  };
+  const rect = new THREE.PlaneGeometry(1, 1);
+  const ring = new THREE.RingGeometry(0.5, 1, 32);
+  former(rect, '#ffcaa0', 1.7, [-5, 3, -3], 7, 7);
+  former(rect, '#bfeaff', 1.4, [5, 1, -4], 6, 6);
+  former(ring, '#ffffff', 1.2, [2, 4, 2], 2, 2);
+
+  const rt = new THREE.WebGLCubeRenderTarget(128, { type: THREE.HalfFloatType });
+  const cam = new THREE.CubeCamera(0.1, 100, rt);
+  cam.update(renderer, s);
+  return rt.texture;
 }
 
-const reduce=window.matchMedia('(prefers-reduced-motion:reduce)');
-let t0=null, last=0, raf=0;
+/* == one globe (RadarConstellation.tsx:170-493) =========================== */
+function makeGlobe(i) {
+  const g = {
+    group: new THREE.Group(),
+    seed: (i * 137.508 % 100) / 100,
+    isRoot: i % 3 === 0,
+    harness: HARNESS_IDS[i % 2],
+    /* A working globe blazes toward white (whiteHot below), which is honest but
+       washes the harness hue out. On a real board most sessions are idle at any
+       moment, so a minority here keeps both the blaze AND the tangerine/cyan the
+       legend underneath promises. */
+    working: i % 3 === 1,
+    ctx: 0.45 + ((i * 37) % 55) / 100,   /* context occupancy = the SIZE channel */
+    phase: 'alive',
+    lscale: 1,
+    sim: { scale: 0.0001, glow: 0.5, live: 0, core: 1 },
+    theta: (i / COUNT) * Math.PI * 2,
+  };
 
-function frame(ts){
-  if(t0===null){ t0=ts; last=ts; }
-  const t  = reduce.matches ? 11.5 : (ts-t0)/1000;
-  const dt = reduce.matches ? 0 : Math.min(0.05, (ts-last)/1000);
-  last = ts;
-  if(!reduce.matches) stepLifecycle(t, dt);
-  const spin = (t/PERIOD)*Math.PI*2;
+  const isRoot = g.isRoot;
+  const outerGeo = new THREE.IcosahedronGeometry(1, isRoot ? 2 : 1);
+  setBarycentric(outerGeo, true);
+  g.shellMat = wireMaterial({
+    thickness: isRoot ? 0.02 : 0.016,
+    dash: !isRoot, dashRepeats: isRoot ? 1 : 4, fillOpacity: 0,
+  });
+  g.group.add(new THREE.Mesh(outerGeo, g.shellMat));
 
-  bctx.clearRect(0,0,W,H); fctx.clearRect(0,0,W,H);
+  const innerGeo = new THREE.IcosahedronGeometry(0.6, 1);
+  setBarycentric(innerGeo, true);
+  g.cageMat = wireMaterial({ thickness: 0.022, fillOpacity: 0.035 });
+  g.innerCage = new THREE.Group();
+  g.innerCage.add(new THREE.Mesh(innerGeo, g.cageMat));
+  g.group.add(g.innerCage);
 
-  bctx.globalCompositeOperation='lighter';
-  for(const [x,y,r,a] of stars){ bctx.fillStyle='rgba(190,214,206,'+a+')'; bctx.fillRect(x,y,r,r); }
+  /* nodes: the shell's own (non-indexed) vertex positions, so shared corners
+     stack and read brighter under additive blending. :254-258 */
+  const nodeGeo = new THREE.BufferGeometry();
+  nodeGeo.setAttribute('position', outerGeo.getAttribute('position').clone());
+  g.nodeMat = new THREE.PointsMaterial({
+    size: isRoot ? 0.08 : 0.07, map: dotTex, transparent: true, opacity: 0.6,
+    toneMapped: false, depthWrite: false, blending: THREE.AdditiveBlending,
+    sizeAttenuation: true,
+  });
+  g.group.add(new THREE.Points(nodeGeo, g.nodeMat));
 
-  /* the orbit path, split at the crossover so it too passes behind the word */
-  for(const ctx of [bctx,fctx]){
-    const wantFront = ctx===fctx;
-    ctx.globalCompositeOperation='lighter';
-    ctx.beginPath(); let drawing=false;
-    for(let i=0;i<=180;i++){
-      const p=place(i/180*Math.PI*2);
-      if((p.Z>=0)===wantFront){ drawing?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y); drawing=true; }
-      else drawing=false;
+  g.gem = new THREE.Group();
+  g.haloMat = new THREE.SpriteMaterial({
+    map: glowTex, transparent: true, opacity: 0.2, depthWrite: false,
+    blending: THREE.AdditiveBlending, toneMapped: false,
+  });
+  g.halo = new THREE.Sprite(g.haloMat);
+  g.halo.scale.setScalar(isRoot ? 0.74 : 0.58);
+  g.gem.add(g.halo);
+  g.gemMat = new THREE.MeshPhysicalMaterial({
+    color: '#05120b', emissiveIntensity: 0.5, metalness: 0, roughness: 0.22,
+    transmission: 0.55, thickness: 0.6, ior: 1.45, transparent: true,
+    envMapIntensity: 1.1, flatShading: true,
+  });
+  g.gem.add(new THREE.Mesh(new THREE.IcosahedronGeometry(0.26, 0), g.gemMat));
+  g.group.add(g.gem);
+
+  /* orchestrator signature: a root wears the gyro cradle + brand heart. */
+  if (isRoot) {
+    g.ringA = new THREE.Group();
+    g.ringMatA = new THREE.LineBasicMaterial({
+      transparent: true, opacity: 0.34, depthWrite: false,
+      blending: THREE.AdditiveBlending, toneMapped: false,
+    });
+    g.ringA.add(new THREE.LineLoop(GYRO_GEO, g.ringMatA));
+    g.ringB = new THREE.Group();
+    g.ringB.rotation.set(Math.PI * 0.5, 0, Math.PI * 0.18);
+    g.ringMatB = new THREE.LineBasicMaterial({
+      transparent: true, opacity: 0.28, depthWrite: false,
+      blending: THREE.AdditiveBlending, toneMapped: false,
+    });
+    g.ringB.add(new THREE.LineLoop(GYRO_GEO, g.ringMatB));
+    g.heart = new THREE.Group();
+    g.heartMat = new THREE.LineBasicMaterial({
+      transparent: true, opacity: 0.9, depthWrite: false,
+      blending: THREE.AdditiveBlending, toneMapped: false,
+    });
+    g.heartLines = new THREE.LineSegments(HEART_GEO.sunburst, g.heartMat);
+    g.heart.add(g.heartLines);
+    g.group.add(g.ringA, g.ringB, g.heart);
+  }
+
+  /* the landing-only occluder, mounted OUTSIDE the group so it never takes the
+     globe's spin, and drawn first so it can never erase another globe's lines. */
+  g.occ = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: occTex, color: new THREE.Color(BG), transparent: true,
+    depthWrite: false, depthTest: false,
+  }));
+  g.occ.renderOrder = -1;
+
+  applyHarness(g);
+  return g;
+}
+
+/* Colour derivation, RadarConstellation.tsx:231-249. */
+function applyHarness(g) {
+  const h = HARNESS[g.harness];
+  g.color = new THREE.Color(h.hue);
+  g.innerColor = g.color.clone().lerp(WHITE, 0.24);
+  g.nodeColor = g.color.clone().lerp(WHITE, 0.16);
+  g.shellMat.uniforms.backfaceStroke.value.copy(g.color).multiplyScalar(0.16);
+  g.gemMat.emissive = g.color.clone();
+  if (g.isRoot) {
+    g.ringMatA.color.copy(g.color).lerp(WHITE, 0.3);
+    g.ringMatB.color.copy(g.color).lerp(WHITE, 0.3);
+    g.heartMat.color.copy(g.color);
+    g.heartLines.geometry = HEART_GEO[h.motif];
+  }
+}
+
+const damp = (cur, target, lambda, dt) => cur + (target - cur) * (1 - Math.exp(-lambda * dt));
+const livenessColorScale = (k) => 0.62 + k * 0.38;           /* :112-115 */
+const spinRate = (isRoot, liveK) =>
+  (isRoot ? 0.08 : 0.14) * (REDUCED ? 1 : 1 + liveK * 0.85); /* radarMotion.ts */
+const glowTarget = (g) => Math.max(0.05, (g.isRoot ? 0.22 : 0.16) + (g.working ? 2.7 : 0)); /* :68-92 */
+
+function updateGlobe(g, t, dt, ringY, radiusUnit) {
+  const s = g.sim;
+
+  /* lifecycle, radarLifecycle.ts: implode at lambda 16, bloom back at 7, and
+     a different harness takes the slot on the way through zero. */
+  if (g.phase === 'imploding') {
+    g.lscale = damp(g.lscale, 0, 16, dt);
+    if (g.lscale <= 0.025) {
+      g.lscale = 0;
+      g.phase = 'spawning';
+      g.harness = HARNESS_IDS[(HARNESS_IDS.indexOf(g.harness) + 1) % HARNESS_IDS.length];
+      g.working = Math.random() < 0.34;
+      g.ctx = 0.4 + Math.random() * 0.6;
+      applyHarness(g);
     }
-    ctx.strokeStyle= wantFront ? 'rgba(143,160,184,.17)' : 'rgba(143,160,184,.085)';
-    ctx.lineWidth=1; ctx.stroke();
+  } else if (g.phase === 'spawning') {
+    g.lscale = damp(g.lscale, 1, 7, dt);
+    if (g.lscale >= 0.985) { g.lscale = 1; g.phase = 'alive'; }
   }
 
-  /* far to near, so overlapping globes stack correctly inside each layer */
-  const placed = AGENTS.map(a=>({a, p:place(a.the+spin)})).sort((u,v)=>u.p.Z-v.p.Z);
-  for(const {a,p} of placed){
-    if(a.ls <= 0.004) continue;
-    /* idle globes keep a slow ambient breath, working ones ride the 4.2s pulse */
-    const idleBreath = Math.sin(t*0.5 + a.seed*6.28)*0.045;
-    const pulse = Math.sin(t*1.5 + a.seed*6.28)*a.live;
-    const breathe = 1 + idleBreath*(1-a.live) + pulse*0.05;
-    const bob = Math.sin(t*0.6 + a.seed*6.28)*0.05*gR;
-    const ctx = p.Z>=0 ? fctx : bctx;
-    const r = gR*(0.62+a.ctx*0.55)*p.k*a.ls*breathe;
-    drawGlobe(ctx, a, p.x, p.y+bob, r, Math.min(1.25,p.k*0.86), t, p.Z>=0);
+  /* :281-289 the calm ~4.2s breath, phased per globe by its seed */
+  const pulseWave = Math.sin(t * 1.5 + g.seed * 6.28);
+  const idleBreath = Math.sin(t * 0.5 + g.seed * 6.28) * 0.045;
+
+  const targetScale = radiusUnit * (g.isRoot ? 1.16 : 0.84) * (0.78 + g.ctx * 0.46)
+                    * Math.max(0, g.lscale);
+  const scaleLambda = g.phase === 'imploding' ? 18 : g.lscale < 0.999 ? 10 : 6;
+  s.scale = damp(s.scale, targetScale, scaleLambda, dt);
+  s.glow  = damp(s.glow, glowTarget(g), 5, dt);
+  s.live  = damp(s.live, g.working ? 1 : 0, 3.5, dt);
+
+  const liveK = s.live;
+  const pulse = liveK * pulseWave;
+
+  const breathe = 1 + idleBreath * (1 - liveK) + pulse * 0.045;
+  g.group.scale.setScalar(s.scale * breathe);
+
+  const x = Math.cos(g.theta) * R;
+  const z = Math.sin(g.theta) * R;
+  const y = ringY + Math.sin(t * 0.6 + g.seed * 6.28) * 0.05;
+  g.group.position.set(x, y, z);
+  g.group.rotation.y += dt * spinRate(g.isRoot, liveK);
+
+  g.halo.scale.setScalar((g.isRoot ? 0.74 : 0.58) * (1 + liveK * 0.95 + pulse * 0.45));
+  g.innerCage.rotation.y -= dt * 0.18;
+  g.innerCage.rotation.x += dt * 0.1;
+  g.gem.rotation.y += dt * 0.28;
+  g.gem.rotation.x += dt * 0.12;
+
+  /* brightness = liveness, :345-357 */
+  const pulseGlow = 1 + pulse * 0.3;
+  g.gemMat.emissiveIntensity = (0.3 + s.glow * 1.05) * pulseGlow;
+  g.haloMat.opacity = Math.min(1, (0.05 + s.glow * 0.34) * (1 + pulse * 0.45));
+  g.nodeMat.opacity = Math.min(1, (0.16 + s.glow * 0.32) * pulseGlow);
+
+  /* colour: idle lattices dim, working ones blaze toward white-hot, :359-383 */
+  const shellLit = 0.32 + liveK * 0.68;
+  const colorQuiet = livenessColorScale(liveK);
+  const whiteHot = liveK * 0.5 + pulse * 0.12;
+  g.shellMat.uniforms.stroke.value.copy(g.color).lerp(WHITE, whiteHot * 0.4).multiplyScalar(shellLit);
+  g.shellMat.uniforms.backfaceStroke.value.copy(g.color).multiplyScalar(0.16 * shellLit);
+  g.cageMat.uniforms.stroke.value.copy(g.innerColor).lerp(WHITE, whiteHot * 0.4).multiplyScalar(shellLit);
+  g.cageMat.uniforms.fill.value.copy(g.color).lerp(WHITE, whiteHot * 0.4).multiplyScalar(shellLit);
+  g.nodeMat.color.copy(g.nodeColor).lerp(WHITE, whiteHot).multiplyScalar(colorQuiet);
+  g.haloMat.color.copy(g.color).lerp(WHITE, whiteHot).multiplyScalar(colorQuiet);
+  g.gemMat.emissive.copy(g.color).lerp(WHITE, whiteHot).multiplyScalar(colorQuiet);
+
+  /* the root's cradle + heart, AgentCore.tsx:190-218 */
+  if (g.isRoot) {
+    const spin = g.working ? 1.35 : 1;
+    const w = Math.max(-1, Math.min(1, Math.sin(t * 2.2)));
+    const crest = (w + 1) / 2;
+    const ringScale  = g.working ? 1.02 + w * 0.05 : 1;
+    const heartScale = g.working ? 1.04 + w * 0.08 : 1;
+    const glowMul    = g.working ? 1 + crest * 0.28 : 1;
+    g.ringA.scale.setScalar(ringScale);
+    g.ringB.scale.setScalar(ringScale);
+    g.heart.scale.setScalar(heartScale);
+    g.ringA.rotation.y += dt * 0.22 * spin;
+    g.ringA.rotation.x += dt * 0.05 * spin;
+    g.ringB.rotation.x += dt * 0.18 * spin;
+    g.ringB.rotation.z -= dt * 0.07 * spin;
+    g.heart.rotation.y += dt * 0.3;
+    g.heart.rotation.z += dt * 0.11;
+    s.core = damp(s.core, glowMul * (1 + Math.sin(t * 1.4) * 0.03), 5, dt);
+    g.ringMatA.opacity = 0.34 * s.core;
+    g.ringMatB.opacity = 0.28 * s.core;
+    g.heartMat.opacity = 0.9 * s.core;
   }
 
-  bctx.globalCompositeOperation='source-over';
-  fctx.globalCompositeOperation='source-over';
-  raf = reduce.matches ? 0 : requestAnimationFrame(frame);
+  /* the occluder tracks the globe, sized to the shell and faded with it */
+  g.occ.position.copy(g.group.position);
+  g.occ.scale.setScalar(s.scale * breathe * 1.75);
+  g.occ.material.opacity = Math.max(0, Math.min(1, g.lscale));
 }
 
-function start(){ layout(); cancelAnimationFrame(raf); t0=null; raf=requestAnimationFrame(frame); }
+/* == scene, one camera shared by both canvases =========================== */
+const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 200);
 
-let rt=0;
-window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(start,120)});
-reduce.addEventListener('change',start);
-document.addEventListener('visibilitychange',()=>{
-  if(document.hidden){ cancelAnimationFrame(raf); raf=0; }
-  else if(!raf && !reduce.matches){ t0=null; raf=requestAnimationFrame(frame); }
-});
+function makeStage(canvas) {
+  const renderer = new THREE.WebGLRenderer({
+    canvas, antialias: true, alpha: true, powerPreference: 'high-performance',
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;   /* :941-942 */
+  renderer.toneMappingExposure = 1.05;
+  renderer.setClearColor(new THREE.Color(BG), 0);
 
-start();
-if(document.fonts && document.fonts.ready) document.fonts.ready.then(start);
+  const scene = new THREE.Scene();
+  scene.environment = buildEnv(renderer);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.085));    /* :956-958 */
+  const d1 = new THREE.DirectionalLight(0xfff3e9, 2.1); d1.position.set(5, 6, 4);
+  const d2 = new THREE.DirectionalLight(0xbfe2ff, 0.65); d2.position.set(-6, -1, -2);
+  scene.add(d1, d2);
+
+  const composer = new EffectComposer(renderer, { frameBufferType: THREE.HalfFloatType, multisampling: 4 });
+  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(new EffectPass(camera, new BloomEffect({
+    intensity: 1.3, luminanceThreshold: 0.22, luminanceSmoothing: 0.9,
+    mipmapBlur: true, radius: 0.85,
+  })));                                                  /* :972 */
+  return { renderer, scene, composer };
+}
+
+/* A machine with no working WebGL still gets a hero: the wordmark alone reads
+   fine, so drop the canvases rather than leaving two dead black rectangles and
+   a thrown exception over the page. */
+let back, front;
+try {
+  back  = makeStage(BACK);
+  front = makeStage(FRONT);
+} catch (err) {
+  console.warn('WARDEN ring: no WebGL, falling back to the wordmark alone.', err);
+  BACK.remove();
+  FRONT.remove();
+  return;
+}
+
+const globes = [];
+for (let i = 0; i < COUNT; i++) globes.push(makeGlobe(i));
+
+/* == layout: the ring is measured off the wordmark, so it adapts to the face */
+let ringY = 0;
+function resize() {
+  const b = ORBIT.getBoundingClientRect();
+  const m = MARK.getBoundingClientRect();
+  const W = b.width;
+  const H = b.height + 336;                 /* the canvases overhang, see CSS */
+  if (W < 2 || H < 2) return;
+
+  const Rpx = Math.min(m.width * 0.545 + 30, W * 0.42);
+  const worldPerPx = R / Rpx;
+  const D = (worldPerPx * H) / (2 * Math.tan((34 * Math.PI / 180) / 2));
+
+  camera.aspect = W / H;
+  camera.position.set(0, D * Math.sin(TILT), D * Math.cos(TILT));
+  camera.lookAt(0, 0, 0);                   /* no roll: left and right stay level */
+  camera.updateProjectionMatrix();
+
+  /* slide the ring so its centre lands on the wordmark's cap band, not the
+     canvas centre (the canvas is 336px taller than the stage) */
+  const canvasTop = b.top - 168;
+  const markCentre = (m.top - canvasTop) + m.height * 0.45;
+  ringY = -(markCentre - H / 2) * worldPerPx;
+
+  for (const s of [back, front]) {
+    s.renderer.setSize(W, H, false);
+    s.composer.setSize(W, H);
+  }
+}
+
+/* == turnover: one session ends, another starts ==========================
+   Karim's dial. 5 to 10 seconds between events, and an event takes about
+   0.83s end to end (0.23s to collapse at lambda 16, 0.60s to bloom back at
+   lambda 7), so roughly one globe is mid-turnover at any moment. */
+let nextEvent = 3;
+function turnover(t) {
+  if (REDUCED || t < nextEvent) return;
+  nextEvent = t + 5 + Math.random() * 5;
+  const alive = globes.filter((g) => g.phase === 'alive');
+  if (!alive.length) return;
+  alive[Math.floor(Math.random() * alive.length)].phase = 'imploding';
+}
+
+/* == loop ================================================================ */
+let last = performance.now() / 1000;
+let visible = true;
+new IntersectionObserver(([e]) => { visible = e.isIntersecting; }, { threshold: 0 }).observe(ORBIT);
+
+function frame() {
+  requestAnimationFrame(frame);
+  const now = performance.now() / 1000;
+  const dt = Math.min(now - last, 0.05);
+  last = now;
+  if (!visible) return;
+
+  const t = now;
+  turnover(t);
+
+  const spin = REDUCED ? 0 : (t / PERIOD) * Math.PI * 2;
+  const radiusUnit = R * 0.097;
+  for (let i = 0; i < globes.length; i++) {
+    const g = globes[i];
+    g.theta = (i / COUNT) * Math.PI * 2 + spin;
+    updateGlobe(g, t, dt, ringY, radiusUnit);
+    /* the depth sandwich: a globe nearer the camera than the wordmark plane
+       is drawn on the canvas ABOVE the <h1>, one behind it on the canvas
+       below. Reparenting is how a globe crosses the word. */
+    const target = g.group.position.z >= 0 ? front : back;
+    if (g.group.parent !== target.scene) {
+      target.scene.add(g.group);
+      target.scene.add(g.occ);
+    }
+    g.occ.visible = target === front;
+  }
+
+  back.composer.render();
+  front.composer.render();
+}
+
+resize();
+window.addEventListener('resize', resize);
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(resize);
+requestAnimationFrame(frame);
 })();
 </script>
 </body>
