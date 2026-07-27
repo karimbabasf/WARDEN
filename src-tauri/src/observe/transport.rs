@@ -336,7 +336,17 @@ impl HostShare {
             .context("bind observation endpoint")?;
         let identity = identity_of(ep.id());
 
-        // Seed the allow set from grants that were already redeemed in a previous run, so
+        // Kill anything the previous run claimed but never approved. A redeemed grant with
+        // no `approved_at` means the app died between the peer's claim and the host's
+        // answer, so nobody ever allowed that peer in. Sweeping here, before the allow set
+        // is seeded, is what stops a grant orphaned by a crash from being resurrected.
+        let swept = self.inner.grants.revoke_unapproved()?;
+        if swept > 0 {
+            tracing::info!(count = swept, "revoked grants claimed but never approved");
+            (self.inner.events)(ObserveEvent::Grants);
+        }
+
+        // Seed the allow set from grants that were already approved in a previous run, so
         // a friend reconnects after a restart without needing a new token.
         {
             let active = self.inner.grants.active_endpoints()?;
@@ -595,6 +605,25 @@ async fn handle_incoming(inner: Arc<HostInner>, incoming: iroh::endpoint::Incomi
             (inner.events)(ObserveEvent::Grants);
             return Ok(());
         }
+
+        // Commit the approval to disk BEFORE anyone is let in. The `await_approval` above
+        // is memory only (a oneshot and the in-memory `allow` set), so without this write
+        // the only durable trace of this whole exchange would be the redemption, which the
+        // peer drove. That is the wrong default: a host that quits or crashes inside the
+        // approval deadline would leave a claimed grant behind, and the next `start()`
+        // would seed it into the allow set as a permanently authorised observer.
+        //
+        // A false answer means the grant stopped being approvable while the prompt was up
+        // (revoked from the Access tab, most likely), so the connection is refused.
+        if !inner
+            .grants
+            .approve(&grant.grant_id, chrono::Utc::now().timestamp())?
+        {
+            conn.close(VarInt::from_u32(CODE_REVOKED), b"grant is no longer valid");
+            (inner.events)(ObserveEvent::Grants);
+            return Ok(());
+        }
+        (inner.events)(ObserveEvent::Grants);
 
         inner
             .allow
@@ -1067,8 +1096,15 @@ mod tests {
     }
 
     fn test_host(dir: &std::path::Path) -> (HostShare, Arc<Mutex<Vec<ObserveEvent>>>) {
-        let store = Store::memory().unwrap();
-        let grants = GrantStore::new(store);
+        test_host_with(dir, GrantStore::new(Store::memory().unwrap()))
+    }
+
+    /// A host over a caller-supplied grant store, so a test can restart the host across a
+    /// database that outlives it.
+    fn test_host_with(
+        dir: &std::path::Path,
+        grants: GrantStore,
+    ) -> (HostShare, Arc<Mutex<Vec<ObserveEvent>>>) {
         let frames: FrameSource = Arc::new(|_salt: &[u8; 16]| {
             Some(ObservedState {
                 generated_at: "2026-07-26T00:00:00Z".to_string(),
@@ -1117,6 +1153,96 @@ mod tests {
 
         host.stop().await.unwrap();
         assert!(host.bound_addr().await.is_none());
+    }
+
+    /// The crash path: a peer redeems a token, and the host dies before it ever answers
+    /// the approval prompt. That peer must not come back as an authorised observer.
+    ///
+    /// Denial was always durable (the refusal revokes the grant), but a host that quits or
+    /// crashes inside `APPROVAL_DEADLINE` writes nothing at all. Redemption is driven by
+    /// the PEER, so if it were the only durable trace of the exchange then the default on
+    /// disk would be allow, and the next `start()` would seed that peer straight into the
+    /// allow set: no token, no prompt, and permanent, since an approved grant deliberately
+    /// outlives its token expiry.
+    #[tokio::test]
+    async fn a_grant_redeemed_but_never_approved_does_not_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("warden.db");
+        let observer = [42u8; 32];
+
+        // Run one: sharing is on, and a peer claims a token. This is `handle_incoming`
+        // exactly as far as its `redeem` call, the last thing that happens before the host
+        // is asked to approve.
+        let (host, _) = test_host_with(dir.path(), GrantStore::new(Store::open(&db).unwrap()));
+        host.start().await.unwrap();
+        let host_id = host.endpoint_id().await.unwrap();
+        let (grant, token_str) = host
+            .grants()
+            .create(host_id, "Mark", 900, Profile::Shapes, 1000)
+            .unwrap();
+        let secret = *ObserverToken::parse(&token_str).unwrap().secret;
+        assert!(matches!(
+            host.grants().redeem(&secret, observer, 1001).unwrap(),
+            RedeemOutcome::Claimed(_)
+        ));
+
+        // ...and the app goes away with the prompt still up. `stop()` runs only because a
+        // test cannot leave a bound endpoint behind for the restart below; it writes
+        // nothing about approval, so the bytes on disk here are what a tray Quit, a
+        // Cmd+Q, or a power loss would leave, which the next two asserts pin down.
+        host.stop().await.unwrap();
+        let orphan = host.grants().list().unwrap();
+        assert_eq!(orphan[0].state, crate::observe::GrantState::Redeemed);
+        assert_eq!(
+            orphan[0].approved_at, None,
+            "nothing may record an approval the host never gave"
+        );
+        drop(host);
+
+        // Run two: a fresh process over the same database.
+        let (restarted, _) = test_host_with(dir.path(), GrantStore::new(Store::open(&db).unwrap()));
+        restarted.start().await.unwrap();
+
+        assert!(
+            !restarted
+                .inner
+                .allow
+                .read()
+                .unwrap()
+                .contains(&observer),
+            "an unapproved peer must not be seeded into the allow set"
+        );
+        assert!(
+            !restarted
+                .grants()
+                .active_endpoints()
+                .unwrap()
+                .contains(&observer),
+            "an unapproved peer must never count as an active endpoint"
+        );
+        // The `known` branch of `handle_incoming` resolves the salt and profile through
+        // this call, so a `None` here is what makes the token-free, prompt-free reconnect
+        // impossible rather than merely unlikely.
+        assert!(
+            restarted
+                .grants()
+                .grant_for_endpoint(&observer)
+                .unwrap()
+                .is_none(),
+            "an unapproved peer must not be able to take the reconnect branch"
+        );
+
+        // The orphan is durably dead, not just filtered out of one query, so nothing can
+        // promote it later. Its token stays spent: a replay is not a second chance.
+        let listed = restarted.grants().list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].grant_id, grant.grant_id);
+        assert_eq!(listed[0].state, crate::observe::GrantState::Revoked);
+        assert_eq!(
+            restarted.grants().redeem(&secret, observer, 1002).unwrap(),
+            RedeemOutcome::NotPending
+        );
+        restarted.stop().await.unwrap();
     }
 
     /// The end-to-end test: a real grant redeemed over a real QUIC connection between two
@@ -1171,6 +1297,11 @@ mod tests {
         let listed = host.grants().list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].state, crate::observe::GrantState::Redeemed);
+        assert!(
+            listed[0].approved_at.is_some(),
+            "the host's approval must be on disk before any frame goes out, or a restart \
+             would either lock the friend out or, worse, let them back in unapproved"
+        );
         assert_eq!(
             listed[0].redeemed_by,
             Some(*observer_ep.id().as_bytes()),

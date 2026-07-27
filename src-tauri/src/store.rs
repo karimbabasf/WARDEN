@@ -101,7 +101,8 @@ impl Store {
             redeemed_by BLOB,
             redeemed_at INTEGER,
             profile TEXT NOT NULL,
-            last_seen_at INTEGER
+            last_seen_at INTEGER,
+            approved_at INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_observer_grants_state ON observer_grants(state);
         CREATE TABLE IF NOT EXISTS observer_peers(
@@ -109,6 +110,52 @@ impl Store {
             host_label TEXT NOT NULL,
             added_at INTEGER NOT NULL
         );
+        "#,
+        )?;
+        // Remote observation: `approved_at` separates "the peer claimed a token" from "the
+        // host said yes". Redeeming is something the PEER does; approving is something only
+        // the HOST does, and only the second one may grant access. Same `table_info` guard
+        // as `parent_session_id` above, since SQLite has no `ADD COLUMN IF NOT EXISTS`.
+        //
+        // A row written by the older schema gets NULL here, which reads as NOT approved.
+        // That is deliberate: an existing `redeemed` row carries no record of whether the
+        // host ever approved it, so it fails closed and the friend re-approves once.
+        let has_approved_col: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('observer_grants') WHERE name='approved_at'")?
+            .query_row([], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !has_approved_col {
+            c.execute_batch("ALTER TABLE observer_grants ADD COLUMN approved_at INTEGER;")?;
+        }
+        // Armed compaction: one row per agent the user asked WARDEN to compact when
+        // it next goes idle. This table IS the feature's entire footprint on the
+        // machine. Arming writes here and touches nothing else, which is what makes
+        // cancelling free: the row disappears and no request was ever in flight.
+        //
+        // `agent_id` is the PRIMARY KEY so re-arming the same agent replaces rather
+        // than queues, and so the fire path can claim a record with a conditional
+        // UPDATE and lose that race to a cancel by design. `pid` is nullable because
+        // a Codex thread is observed through rollout files and has no process WARDEN
+        // can name. Every read and write of this table lives in `compact::arm`.
+        c.execute_batch(
+            r#"
+        CREATE TABLE IF NOT EXISTS compact_arms(
+            agent_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            pid INTEGER,
+            harness TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            mode_reason TEXT NOT NULL,
+            idle_source TEXT NOT NULL,
+            label TEXT NOT NULL,
+            baseline_status TEXT NOT NULL,
+            armed_at INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            fired_at INTEGER,
+            detail TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_compact_arms_state ON compact_arms(state);
         "#,
         )?;
         Ok(())

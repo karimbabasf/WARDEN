@@ -216,6 +216,12 @@ pub fn salt_of(verifier: &[u8; 32]) -> [u8; 16] {
     salt
 }
 
+/// The lifecycle of a grant ROW. Note what this enum deliberately does not encode:
+/// `Redeemed` means a peer proved possession of the token, NOT that the host allowed them
+/// in. Approval is a second, separate durable fact (`GrantRecord::approved_at`), because
+/// the peer drives redemption and only the host drives approval. Anything that decides
+/// access must check both, which is why [`GrantStore::active_endpoints`] and
+/// [`GrantStore::grant_for_endpoint`] are the only two readers of that pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantState {
@@ -257,6 +263,11 @@ pub struct GrantRecord {
     pub expires_at: i64,
     pub redeemed_by: Option<[u8; 32]>,
     pub redeemed_at: Option<i64>,
+    /// When the HOST approved this observer, or `None` if it never did. Redemption alone
+    /// sets this to `None`, so a grant claimed by a peer the host never answered for (the
+    /// app quit or crashed inside the approval prompt) is durably unapproved and cannot be
+    /// resurrected on the next launch.
+    pub approved_at: Option<i64>,
     pub last_seen_at: Option<i64>,
     pub profile: Profile,
 }
@@ -311,8 +322,8 @@ impl GrantStore {
 
         self.store.with_conn(|c| {
             c.execute(
-                "INSERT INTO observer_grants(token_id,verifier,friend_label,created_at,expires_at,state,redeemed_by,redeemed_at,profile,last_seen_at) \
-                 VALUES(?,?,?,?,?,'pending',NULL,NULL,?,NULL)",
+                "INSERT INTO observer_grants(token_id,verifier,friend_label,created_at,expires_at,state,redeemed_by,redeemed_at,profile,last_seen_at,approved_at) \
+                 VALUES(?,?,?,?,?,'pending',NULL,NULL,?,NULL,NULL)",
                 params![
                     token_id.as_slice(),
                     verifier.as_slice(),
@@ -335,6 +346,7 @@ impl GrantStore {
                 expires_at,
                 redeemed_by: None,
                 redeemed_at: None,
+                approved_at: None,
                 last_seen_at: None,
                 profile,
             },
@@ -343,6 +355,12 @@ impl GrantStore {
     }
 
     /// Claim a grant for `observer`, single use.
+    ///
+    /// Claiming grants NOTHING on its own. The row lands in `redeemed` with `approved_at`
+    /// still NULL, which every access check reads as denied, and only [`Self::approve`]
+    /// clears it. The peer drives this call, so if it were also the thing that authorised
+    /// access then a host that never answered the prompt (quit, crash, power loss inside
+    /// the approval deadline) would leave behind a row that grants access forever.
     ///
     /// The verifier is compared in constant time via [`subtle`] before the claim, because
     /// `token_id` is only 64 bits: without this check an attacker who brute-forced a
@@ -387,9 +405,13 @@ impl GrantStore {
             // THE claim. Everything above is a courtesy that produces a better error
             // message; this statement is what actually enforces single use, and it
             // re-checks state and expiry so nothing decided above can go stale.
+            //
+            // `approved_at` is cleared explicitly rather than left alone: a pending row can
+            // only ever hold NULL there, so this is belt and braces, but it means the claim
+            // statement itself states the invariant that a fresh claim is never approved.
             let rows = c
                 .execute(
-                    "UPDATE observer_grants SET state='redeemed', redeemed_by=?, redeemed_at=? \
+                    "UPDATE observer_grants SET state='redeemed', redeemed_by=?, redeemed_at=?, approved_at=NULL \
                      WHERE token_id=? AND state='pending' AND expires_at>?",
                     params![observer.as_slice(), now, token_id.as_slice(), now],
                 )
@@ -405,11 +427,58 @@ impl GrantStore {
         })
     }
 
+    /// Record the host's approval of a redeemed grant, durably.
+    ///
+    /// This is the ONLY statement in the crate that turns a claimed grant into an allowed
+    /// one, so it is the single place the "default deny" rule has to hold. Returns whether
+    /// the grant is approved once this call returns, which is not the same as whether this
+    /// call did the writing:
+    ///
+    /// * revoked while the host was deciding: no row matches, the grant is not approved,
+    ///   and the caller must refuse the connection rather than trust its stale read.
+    /// * a second connection from the same peer racing the first: the row is already
+    ///   approved, nothing to write, and the answer is still yes.
+    pub fn approve(&self, grant_id: &str, now: i64) -> Result<bool> {
+        let token_id = decode_grant_id(grant_id)?;
+        self.store.with_conn(|c| {
+            c.execute(
+                "UPDATE observer_grants SET approved_at=? \
+                 WHERE token_id=? AND state='redeemed' AND approved_at IS NULL",
+                params![now, token_id.as_slice()],
+            )
+            .context("approve observer grant")?;
+            // Re-read rather than trust the row count: the answer we owe the caller is the
+            // persisted state, not whether this particular statement was the one to set it.
+            let Some(record) = read_grant(c, &token_id)? else {
+                return Ok(false);
+            };
+            Ok(record.state == GrantState::Redeemed && record.approved_at.is_some())
+        })
+    }
+
+    /// Revoke every grant that was claimed but never approved. Returns the number killed.
+    ///
+    /// Run at host startup. A redeemed row with no `approved_at` is the fingerprint of a
+    /// process that died between the claim and the host's answer, so its peer was never
+    /// allowed in by anyone. Revoking rather than reverting to `pending` is deliberate: the
+    /// token was spent, and a second attempt on it must fail, not succeed quietly. The
+    /// friend gets a fresh token, which costs one message and is the safe direction.
+    pub fn revoke_unapproved(&self) -> Result<usize> {
+        self.store.with_conn(|c| {
+            c.execute(
+                "UPDATE observer_grants SET state='revoked' \
+                 WHERE state='redeemed' AND approved_at IS NULL",
+                [],
+            )
+            .context("revoke unapproved grants")
+        })
+    }
+
     pub fn list(&self) -> Result<Vec<GrantRecord>> {
         self.store.with_conn(|c| {
             let mut st = c
                 .prepare(
-                    "SELECT token_id,friend_label,state,created_at,expires_at,redeemed_by,redeemed_at,last_seen_at,profile \
+                    "SELECT token_id,friend_label,state,created_at,expires_at,redeemed_by,redeemed_at,last_seen_at,profile,approved_at \
                      FROM observer_grants ORDER BY created_at DESC",
                 )
                 .context("prepare grant list")?;
@@ -454,13 +523,18 @@ impl GrantStore {
 
     /// Every observer endpoint currently allowed to receive frames.
     ///
-    /// A redeemed grant stays valid past `expires_at`: the token expires, the grant does
+    /// An APPROVED grant stays valid past `expires_at`: the token expires, the grant does
     /// not. That is what lets a friend keep watching for an hour, and what lets a
     /// reconnect after a wifi drop re-authenticate by public key with no token involved.
+    ///
+    /// `approved_at IS NOT NULL` is what keeps that generosity from applying to a grant the
+    /// host never said yes to. Since this seeds the in-memory allow set at startup, an
+    /// unapproved row reaching this query would promote a peer to permanent observer with
+    /// no prompt, no token, and no way for the host to notice.
     pub fn active_endpoints(&self) -> Result<Vec<[u8; 32]>> {
         self.store.with_conn(|c| {
             let mut st = c
-                .prepare("SELECT redeemed_by FROM observer_grants WHERE state='redeemed' AND redeemed_by IS NOT NULL")
+                .prepare("SELECT redeemed_by FROM observer_grants WHERE state='redeemed' AND approved_at IS NOT NULL AND redeemed_by IS NOT NULL")
                 .context("prepare active endpoints")?;
             let rows = st
                 .query_map([], |r| r.get::<_, Vec<u8>>(0))
@@ -475,12 +549,17 @@ impl GrantStore {
         })
     }
 
-    /// The redeemed grant bound to `observer`, if it is still active.
+    /// The approved grant bound to `observer`, if it is still active.
+    ///
+    /// The transport calls this to resolve a reconnect that skips the token, so the same
+    /// `approved_at IS NOT NULL` gate as [`Self::active_endpoints`] applies: a claimed but
+    /// unapproved grant must not be able to answer "who is this peer" either.
     pub fn grant_for_endpoint(&self, observer: &[u8; 32]) -> Result<Option<GrantRecord>> {
         self.store.with_conn(|c| {
             let token_id: Option<Vec<u8>> = c
                 .query_row(
-                    "SELECT token_id FROM observer_grants WHERE state='redeemed' AND redeemed_by=? \
+                    "SELECT token_id FROM observer_grants \
+                     WHERE state='redeemed' AND approved_at IS NOT NULL AND redeemed_by=? \
                      ORDER BY redeemed_at DESC LIMIT 1",
                     params![observer.as_slice()],
                     |r| r.get(0),
@@ -527,7 +606,8 @@ impl GrantStore {
     pub fn touch_last_seen(&self, observer: &[u8; 32], now: i64) -> Result<()> {
         self.store.with_conn(|c| {
             c.execute(
-                "UPDATE observer_grants SET last_seen_at=? WHERE state='redeemed' AND redeemed_by=?",
+                "UPDATE observer_grants SET last_seen_at=? \
+                 WHERE state='redeemed' AND approved_at IS NOT NULL AND redeemed_by=?",
                 params![now, observer.as_slice()],
             )
             .context("touch grant last_seen")?;
@@ -557,7 +637,7 @@ fn to_endpoint_id(raw: &[u8]) -> Option<[u8; 32]> {
 
 fn read_grant(c: &rusqlite::Connection, token_id: &[u8; 8]) -> Result<Option<GrantRecord>> {
     c.query_row(
-        "SELECT token_id,friend_label,state,created_at,expires_at,redeemed_by,redeemed_at,last_seen_at,profile \
+        "SELECT token_id,friend_label,state,created_at,expires_at,redeemed_by,redeemed_at,last_seen_at,profile,approved_at \
          FROM observer_grants WHERE token_id=?",
         params![token_id.as_slice()],
         row_to_record,
@@ -578,6 +658,7 @@ fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<GrantRecord> {
         expires_at: r.get(4)?,
         redeemed_by: redeemed_by.as_deref().and_then(to_endpoint_id),
         redeemed_at: r.get(6)?,
+        approved_at: r.get(9)?,
         last_seen_at: r.get(7)?,
         // An unparseable profile falls back to the narrowest one. Failing closed here
         // means a corrupted row reveals less, never more.
@@ -878,6 +959,7 @@ mod tests {
         let (rec, token) = gs.create(HOST, "Mark", 900, Profile::Shapes, 1000).unwrap();
         let secret = *ObserverToken::parse(&token).unwrap().secret;
         gs.redeem(&secret, OBSERVER, 1001).unwrap();
+        assert!(gs.approve(&rec.grant_id, 1002).unwrap());
         assert_eq!(gs.active_endpoints().unwrap(), vec![OBSERVER]);
 
         assert_eq!(gs.revoke(&rec.grant_id).unwrap(), Some(OBSERVER));
@@ -906,9 +988,10 @@ mod tests {
     #[test]
     fn last_seen_tracks_the_bound_observer() {
         let gs = store();
-        let (_, token) = gs.create(HOST, "Mark", 900, Profile::Shapes, 1000).unwrap();
+        let (rec, token) = gs.create(HOST, "Mark", 900, Profile::Shapes, 1000).unwrap();
         let secret = *ObserverToken::parse(&token).unwrap().secret;
         gs.redeem(&secret, OBSERVER, 1001).unwrap();
+        gs.approve(&rec.grant_id, 1002).unwrap();
         gs.touch_last_seen(&OBSERVER, 1234).unwrap();
         assert_eq!(
             gs.grant_for_endpoint(&OBSERVER).unwrap().unwrap().last_seen_at,
@@ -921,12 +1004,165 @@ mod tests {
         // The token expires; the grant does not. This is what lets a friend keep watching
         // for an hour after a 15-minute token, and what lets a reconnect after a wifi drop
         // re-authenticate by public key with no token involved.
+        //
+        // Approval is part of the setup, not the thing under test: this generosity is
+        // deliberate for a grant the host said yes to, and `redeem_alone_never_authorises`
+        // below is what pins that it does NOT extend to one the host never answered for.
         let gs = store();
-        let (_, token) = gs.create(HOST, "Mark", 60, Profile::Shapes, 1000).unwrap();
+        let (rec, token) = gs.create(HOST, "Mark", 60, Profile::Shapes, 1000).unwrap();
         let secret = *ObserverToken::parse(&token).unwrap().secret;
         gs.redeem(&secret, OBSERVER, 1001).unwrap();
+        gs.approve(&rec.grant_id, 1002).unwrap();
         gs.sweep_expired(9_999_999).unwrap();
         assert_eq!(gs.active_endpoints().unwrap(), vec![OBSERVER]);
+        // And a restart does not undo it: the startup sweep only kills unapproved grants.
+        assert_eq!(gs.revoke_unapproved().unwrap(), 0);
+        assert_eq!(gs.active_endpoints().unwrap(), vec![OBSERVER]);
+    }
+
+    /// The invariant the whole `approved_at` column exists for: redemption is something
+    /// the PEER drives, so on its own it must authorise nothing at all.
+    #[test]
+    fn redeem_alone_never_authorises() {
+        let gs = store();
+        let (rec, token) = gs.create(HOST, "Mark", 900, Profile::Shapes, 1000).unwrap();
+        let secret = *ObserverToken::parse(&token).unwrap().secret;
+        assert!(matches!(
+            gs.redeem(&secret, OBSERVER, 1001).unwrap(),
+            RedeemOutcome::Claimed(_)
+        ));
+
+        // Claimed, and still not allowed anywhere.
+        assert!(gs.active_endpoints().unwrap().is_empty());
+        assert!(gs.grant_for_endpoint(&OBSERVER).unwrap().is_none());
+        let listed = gs.list().unwrap();
+        assert_eq!(listed[0].state, GrantState::Redeemed);
+        assert_eq!(listed[0].approved_at, None);
+
+        // The host says yes, and only now does anything open.
+        assert!(gs.approve(&rec.grant_id, 1002).unwrap());
+        assert_eq!(gs.active_endpoints().unwrap(), vec![OBSERVER]);
+        assert_eq!(
+            gs.grant_for_endpoint(&OBSERVER).unwrap().unwrap().approved_at,
+            Some(1002)
+        );
+    }
+
+    #[test]
+    fn approve_refuses_a_grant_revoked_while_the_prompt_was_up() {
+        let gs = store();
+        let (rec, token) = gs.create(HOST, "Mark", 900, Profile::Shapes, 1000).unwrap();
+        let secret = *ObserverToken::parse(&token).unwrap().secret;
+        gs.redeem(&secret, OBSERVER, 1001).unwrap();
+        gs.revoke(&rec.grant_id).unwrap();
+
+        assert!(
+            !gs.approve(&rec.grant_id, 1002).unwrap(),
+            "a revoked grant must not become approved, whatever the prompt returns"
+        );
+        assert!(gs.active_endpoints().unwrap().is_empty());
+        // An unknown grant id is likewise a no, not an error the caller might swallow.
+        assert!(!gs.approve(&hex::encode([0u8; 8]), 1002).unwrap());
+    }
+
+    #[test]
+    fn approving_twice_is_idempotent_and_keeps_the_first_timestamp() {
+        // Two connections from the same peer can race the prompt. The second must get a
+        // yes rather than be refused for having nothing to write.
+        let gs = store();
+        let (rec, token) = gs.create(HOST, "Mark", 900, Profile::Shapes, 1000).unwrap();
+        let secret = *ObserverToken::parse(&token).unwrap().secret;
+        gs.redeem(&secret, OBSERVER, 1001).unwrap();
+        assert!(gs.approve(&rec.grant_id, 1002).unwrap());
+        assert!(gs.approve(&rec.grant_id, 5555).unwrap());
+        assert_eq!(
+            gs.grant_for_endpoint(&OBSERVER).unwrap().unwrap().approved_at,
+            Some(1002)
+        );
+    }
+
+    #[test]
+    fn revoke_unapproved_kills_orphans_and_spares_approved_grants() {
+        let gs = store();
+        let (orphan, orphan_token) = gs.create(HOST, "crashed", 900, Profile::Shapes, 1000).unwrap();
+        let (good, good_token) = gs.create(HOST, "Mark", 900, Profile::Shapes, 1000).unwrap();
+        let (pending, _) = gs.create(HOST, "unused", 900, Profile::Shapes, 1000).unwrap();
+        let orphan_secret = *ObserverToken::parse(&orphan_token).unwrap().secret;
+        let good_secret = *ObserverToken::parse(&good_token).unwrap().secret;
+
+        gs.redeem(&orphan_secret, [1u8; 32], 1001).unwrap();
+        gs.redeem(&good_secret, OBSERVER, 1001).unwrap();
+        gs.approve(&good.grant_id, 1002).unwrap();
+
+        assert_eq!(gs.revoke_unapproved().unwrap(), 1);
+        let by_id = |id: &str| {
+            gs.list()
+                .unwrap()
+                .into_iter()
+                .find(|g| g.grant_id == id)
+                .unwrap()
+        };
+        assert_eq!(by_id(&orphan.grant_id).state, GrantState::Revoked);
+        assert_eq!(by_id(&good.grant_id).state, GrantState::Redeemed);
+        // An untouched pending grant is not collateral: it can still be redeemed.
+        assert_eq!(by_id(&pending.grant_id).state, GrantState::Pending);
+        assert_eq!(gs.active_endpoints().unwrap(), vec![OBSERVER]);
+
+        // And the orphan's token is spent, so the peer cannot simply redeem it again.
+        assert_eq!(
+            gs.redeem(&orphan_secret, [1u8; 32], 1003).unwrap(),
+            RedeemOutcome::NotPending
+        );
+    }
+
+    /// A real `~/.warden/warden.db` written before `approved_at` existed. Its `redeemed`
+    /// rows carry no record of whether the host ever approved them, so the migration must
+    /// read them as unapproved rather than assume the friendly answer.
+    #[test]
+    fn an_old_schema_redeemed_row_migrates_to_unapproved() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("warden.db");
+
+        // The pre-`approved_at` DDL, verbatim, with one redeemed row bound to an observer.
+        {
+            let c = rusqlite::Connection::open(&db).unwrap();
+            c.execute_batch(
+                "CREATE TABLE observer_grants(
+                    token_id BLOB PRIMARY KEY,
+                    verifier BLOB NOT NULL,
+                    friend_label TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    redeemed_by BLOB,
+                    redeemed_at INTEGER,
+                    profile TEXT NOT NULL,
+                    last_seen_at INTEGER
+                );",
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO observer_grants(token_id,verifier,friend_label,created_at,expires_at,state,redeemed_by,redeemed_at,profile,last_seen_at) \
+                 VALUES(?,?,'legacy',1000,1060,'redeemed',?,1001,'\"shapes\"',NULL)",
+                params![[3u8; 8].as_slice(), [4u8; 32].as_slice(), OBSERVER.as_slice()],
+            )
+            .unwrap();
+        }
+
+        // Opening the store runs the migration.
+        let gs = GrantStore::new(Store::open(&db).unwrap());
+        let listed = gs.list().unwrap();
+        assert_eq!(listed.len(), 1, "the row must survive the migration");
+        assert_eq!(listed[0].approved_at, None, "unknown approval reads as none");
+        assert!(
+            gs.active_endpoints().unwrap().is_empty(),
+            "a legacy redeemed row must not authorise anyone on the strength of its state alone"
+        );
+        assert!(gs.grant_for_endpoint(&OBSERVER).unwrap().is_none());
+
+        // And migrating twice is a no-op, not an error.
+        let gs = GrantStore::new(Store::open(&db).unwrap());
+        assert_eq!(gs.list().unwrap().len(), 1);
     }
 
     /// The test the whole atomic-claim design exists for: two threads, two SEPARATE
@@ -989,6 +1225,7 @@ mod tests {
         let all = gs.list().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].state, GrantState::Redeemed);
+        gs.approve(&all[0].grant_id, 1002).unwrap();
         assert_eq!(gs.active_endpoints().unwrap().len(), 1);
     }
 }
