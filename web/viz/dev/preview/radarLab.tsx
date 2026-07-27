@@ -52,6 +52,26 @@ const RAW_FOREST = {
       role: null,
       model: 'claude-opus-4-8',
       status: 'working',
+      // The harness's own session name, plus a live in-flight action and team
+      // membership, so the studio exercises the hero, the Finder-reveal affordance and
+      // the roster join rather than only their empty states.
+      title: 'Set up warden project',
+      currentAction: {
+        kind: 'write',
+        tool: 'Edit',
+        label: 'Edit assemble.rs',
+        target: '~/Developer/Apps/WARDEN/src-tauri/src/radar/assemble.rs',
+        startedAt: iso(42),
+        elapsedMs: 42000,
+      },
+      team: {
+        id: 'session-f3e4ef77',
+        name: 'warden build',
+        memberName: 'team-lead',
+        memberType: null,
+        memberCount: 4,
+        isLead: true,
+      },
       contextTokens: 188000, // near-full → blazing white-hot core
       maxTokens: 200000,
       fillPct: 0.94,

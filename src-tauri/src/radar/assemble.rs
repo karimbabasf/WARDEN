@@ -254,6 +254,10 @@ pub fn assemble(
         }
     }
 
+    // Agent-team rosters, read once per recompute rather than once per agent. Absent on
+    // machines with no teams, which collapses every join below to `None`.
+    let team_index = super::teams::TeamIndex::load();
+
     // Build one agent per kept session. Depth is the parent-chain length within the
     // (kept) tree (root = 0). Iterate `sessions` for a stable, source-ordered forest.
     let mut agents = Vec::with_capacity(keep.len());
@@ -276,13 +280,45 @@ pub fn assemble(
             *child_count.get(&s.id).unwrap_or(&0),
             status,
         );
-        agent.label = display_label(
-            depth,
-            agent.cwd.as_deref(),
-            subagent_ordinal.get(&s.id).copied(),
-            root_dup_ordinal.get(&s.id).copied(),
-            &agent.label,
-        );
+        // Team join. A subagent transcript is named `agent-<name>@session-<hex>.jsonl`,
+        // so its own file stem carries the membership; a lead is matched by session id.
+        let stem = s
+            .source_path
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let member = team_index.team_for_member_stem(&stem);
+        agent.team = match &member {
+            Some((team, name)) => Some(super::teams::radar_team(team, Some(name), false)),
+            None => team_index.team_for_lead(&s.external_id).map(|team| {
+                super::teams::radar_team(team, team.lead_member_name.as_deref(), true)
+            }),
+        };
+
+        // Label precedence, most specific first:
+        //   1. a name the user set in WARDEN (they renamed it; nothing may override that),
+        //   2. the agent's own team-roster name, the name its operator actually uses,
+        //   3. the derived positional label (cwd basename, or `subagent N`).
+        // Without (2) every teammate reads as an interchangeable `subagent 3`, which is
+        // the naming complaint this addresses.
+        let user_name = s
+            .meta
+            .get("warden_display_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| crate::util::truncate_chars(v, 120));
+        agent.label = match (user_name, &member) {
+            (Some(name), _) => name,
+            (None, Some((_, member_name))) => member_name.clone(),
+            (None, None) => display_label(
+                depth,
+                agent.cwd.as_deref(),
+                subagent_ordinal.get(&s.id).copied(),
+                root_dup_ordinal.get(&s.id).copied(),
+                &agent.label,
+            ),
+        };
         agents.push(agent);
     }
 

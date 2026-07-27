@@ -108,6 +108,14 @@ pub struct FileEdit {
     pub old_hash: Option<String>,
     pub new_hash: Option<String>,
     pub lines_changed: Option<u32>,
+    /// The tool call this edit completes, when the harness reports one.
+    ///
+    /// Codex's native `apply_patch` never emits a `function_call_output`: verified against
+    /// real rollouts, 0 of 26 calls had one while 24 had a `patch_apply_end` sharing this
+    /// call id. Without this field a finished patch looks like a tool call that never
+    /// returned, so the radar would render it as forever in-flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

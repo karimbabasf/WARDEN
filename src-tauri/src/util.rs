@@ -33,6 +33,30 @@ pub fn expand_tilde(p: &str) -> PathBuf {
         PathBuf::from(p)
     }
 }
+/// The inverse of [`expand_tilde`]: fold a leading `$HOME` back to `~` for display.
+///
+/// Every absolute path the harnesses record starts with the user's home directory, so
+/// showing one verbatim puts the account name on screen (and, if the radar state is ever
+/// transmitted, on the wire). Folding to `~` keeps the path readable and recognisable
+/// while dropping the only personally identifying segment. Paths outside home are
+/// returned unchanged: they carry no account name to hide.
+pub fn display_path(p: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return p.to_string();
+    };
+    let home = home.to_string_lossy();
+    // Guard the empty/`/` home case, where a naive prefix strip would mangle every path.
+    if home.is_empty() || home == "/" {
+        return p.to_string();
+    }
+    let home_slash = format!("{home}/");
+    match p.strip_prefix(&home_slash) {
+        Some(rest) => format!("~/{rest}"),
+        None if p == home => "~".to_string(),
+        None => p.to_string(),
+    }
+}
+
 pub fn default_db_path() -> PathBuf {
     std::env::var("WARDEN_DB_PATH")
         .map(|s| expand_tilde(&s))

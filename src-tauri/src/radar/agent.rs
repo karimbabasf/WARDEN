@@ -7,7 +7,7 @@ use super::composition::{
 use super::context::{context_breakdown, est_cost_usd, estimate_for_session};
 use super::identity::{first_task, identity};
 use super::liveness::AgentStatus;
-use super::model::{RadarActivity, RadarAgent, RadarComposition, RadarExact};
+use super::model::{RadarAction, RadarActivity, RadarAgent, RadarComposition, RadarExact};
 use crate::ir::{Event, Harness, Session};
 use crate::store::Store;
 
@@ -84,6 +84,14 @@ pub(crate) fn build_agent(
     );
 
     let recent_activity = recent_activity(&events);
+    let current_action = current_action(&events, &status, chrono::Utc::now());
+    // The harness's own title for this session, recorded by whichever adapter found one.
+    let title = s
+        .meta
+        .get("session_title")
+        .and_then(|v| v.as_str())
+        .map(|t| crate::util::truncate_chars(t.trim(), 120))
+        .filter(|t| !t.is_empty());
     let est_cost_usd = est_cost_usd(&model, &exact);
     let task = first_task(&events);
     let (label, nickname, role, origin) = identity(s, task);
@@ -104,6 +112,11 @@ pub(crate) fn build_agent(
         cwd,
         role,
         model,
+        title,
+        current_action,
+        // Team membership is joined in `assemble`, which reads the roster once per
+        // recompute instead of once per agent.
+        team: None,
         status: status.as_str().to_string(),
         context_tokens: size.context_tokens,
         max_tokens: size.max_tokens,
@@ -202,13 +215,155 @@ pub(crate) fn recent_activity(
             // `result <call_id>` row was pure noise, so it is dropped here.
             _ => continue,
         };
+        let target = match &e.event {
+            Event::ToolCall { tool, input, .. } => {
+                tool_call_abs_path(tool, input).as_deref().map(crate::util::display_path)
+            }
+            // A single-file snapshot has an unambiguous target; a multi-file apply does not.
+            Event::FileSnapshot { files } => match files.as_slice() {
+                [one] => absolute_or_none(&one.path).as_deref().map(crate::util::display_path),
+                _ => None,
+            },
+            _ => None,
+        };
         out.push(RadarActivity {
             ts: e.ts.to_rfc3339(),
             kind: kind.to_string(),
             label,
+            target,
         });
     }
     out
+}
+
+/// The single file a tool call targets, as an ABSOLUTE path, or `None` when the call
+/// touches no file or touches several.
+///
+/// Both harnesses record absolute paths verbatim: Claude in `input.file_path` (and the
+/// `path` / `notebook_path` spellings), Codex in the `*** Update File:` headers of an
+/// `apply_patch` DSL body. Neither is joined against the session cwd anywhere upstream,
+/// so what is stored is already absolute; a relative path here is a harness quirk we do
+/// not guess about, and returning `None` is the honest answer.
+pub(crate) fn tool_call_abs_path(tool: &str, input: &serde_json::Value) -> Option<String> {
+    let s = |k: &str| input.get(k).and_then(|v| v.as_str());
+    if let Some(p) = s("file_path").or_else(|| s("path")).or_else(|| s("notebook_path")) {
+        return absolute_or_none(p);
+    }
+    // Codex `apply_patch` carries raw patch DSL as a string rather than JSON. One header
+    // line per file; a multi-file patch has no single target, so it yields None.
+    if tool == "apply_patch" || input.get("codex_tool").and_then(|v| v.as_str()) == Some("apply_patch") {
+        let body = input
+            .as_str()
+            .or_else(|| s("patch"))
+            .or_else(|| s("input"))
+            .unwrap_or_default();
+        let mut found: Option<&str> = None;
+        for line in body.lines() {
+            let line = line.trim();
+            for tag in ["*** Update File:", "*** Add File:", "*** Delete File:"] {
+                if let Some(rest) = line.strip_prefix(tag) {
+                    if found.is_some() {
+                        return None; // several files touched: no single target
+                    }
+                    found = Some(rest.trim());
+                }
+            }
+        }
+        return found.and_then(absolute_or_none);
+    }
+    None
+}
+
+/// Keep only absolute paths. A bare basename or a relative fragment cannot be revealed
+/// in Finder without guessing a base directory, and a wrong guess opens the wrong file.
+fn absolute_or_none(p: &str) -> Option<String> {
+    let p = p.trim();
+    (!p.is_empty() && p.starts_with('/')).then(|| p.to_string())
+}
+
+/// How long an unresolved tool call may sit before the radar stops calling it current.
+/// Generous enough for a genuinely slow build or test run, short enough that an abandoned
+/// call does not haunt the panel.
+const CURRENT_ACTION_MAX_MS: u64 = 10 * 60 * 1000;
+
+/// The tool call this agent has started and not yet finished, if any.
+///
+/// A `ToolCall` whose `call_id` never gets a matching `ToolResult` is in flight. Gated on
+/// `Working`: a closed or terminated session's last call is unfinished only because the
+/// session died mid-call, and rendering "editing foo.rs" for an agent that is gone would
+/// be exactly the fabricated signal the honest-viz rule forbids.
+pub(crate) fn current_action(
+    events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+    status: &AgentStatus,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<RadarAction> {
+    if !matches!(status, AgentStatus::Working) {
+        return None;
+    }
+    let mut resolved: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (_, e) in events {
+        match &e.event {
+            Event::ToolResult { call_id, .. } => {
+                resolved.insert(call_id.as_str());
+            }
+            // Codex's native `apply_patch` never produces a ToolResult: its ONLY
+            // completion signal is the patch snapshot carrying the same call id.
+            // Verified against real rollouts (0 of 26 calls had a function_call_output,
+            // 24 had a patch_apply_end). Without this arm every finished Codex patch
+            // would read as permanently in flight.
+            Event::FileSnapshot { files } => {
+                for f in files {
+                    if let Some(cid) = f.call_id.as_deref() {
+                        resolved.insert(cid);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // A Codex `apply_patch` is completed by its `patch_apply_end` FileSnapshot, which
+    // shares the call_id, so it is already covered by the ToolResult sweep above where
+    // the pair exists. Walk newest-first and take the first unresolved call.
+    let mut ordered: Vec<_> = events.iter().collect();
+    ordered.sort_by(|(_, a), (_, b)| {
+        b.ts.cmp(&a.ts)
+            .then(b.raw_ref.offset.cmp(&a.raw_ref.offset))
+            .then(b.id.cmp(&a.id))
+    });
+    for (_, e) in ordered {
+        let Event::ToolCall {
+            tool, input, call_id, ..
+        } = &e.event
+        else {
+            continue;
+        };
+        if resolved.contains(call_id.as_str()) {
+            continue;
+        }
+        // Unlike the activity feed, an in-flight apply_patch is NOT deduped away: the
+        // FileSnapshot that would replace it has not arrived yet, so this is the only
+        // evidence the write is happening.
+        let (kind, label) = tool_activity(tool, input)
+            .unwrap_or_else(|| ("write", format!("Edit {}", short_tool_name(tool))));
+        let abs = tool_call_abs_path(tool, input);
+        let elapsed_ms = (now - e.ts).num_milliseconds().max(0) as u64;
+        // A call with no completion record at all (an aborted turn, a harness crash, a
+        // record shape we do not parse) would otherwise sit on screen as "editing X"
+        // forever. Past the cap we report nothing rather than something false: an absent
+        // current action means idle, and that promise is what makes it safe to render big.
+        if elapsed_ms > CURRENT_ACTION_MAX_MS {
+            return None;
+        }
+        return Some(RadarAction {
+            kind: kind.to_string(),
+            tool: short_tool_name(tool),
+            label,
+            target: abs.as_deref().map(crate::util::display_path),
+            started_at: e.ts.to_rfc3339(),
+            elapsed_ms,
+        });
+    }
+    None
 }
 
 /// Classify a tool call into `(kind, label)`. Codex funnels every action through the
@@ -430,6 +585,147 @@ mod tests {
         (turn, rec)
     }
 
+    fn tool_call(offset: u64, tool: &str, call_id: &str) -> (Turn, EventRecord) {
+        ev(
+            offset,
+            Event::ToolCall {
+                tool: tool.into(),
+                input: serde_json::json!({ "file_path": "/Users/x/proj/main.rs" }),
+                call_id: call_id.into(),
+                kind: ToolKind::Unknown,
+            },
+        )
+    }
+
+    #[test]
+    fn current_action_reports_an_unresolved_call() {
+        let events = vec![tool_call(1, "Edit", "c1")];
+        let a = current_action(&events, &AgentStatus::Working, Utc::now())
+            .expect("an unresolved call is current");
+        assert_eq!(a.kind, "write");
+        assert_eq!(a.tool, "Edit");
+        assert_eq!(a.target.as_deref(), Some("/Users/x/proj/main.rs"));
+    }
+
+    #[test]
+    fn current_action_is_none_once_a_tool_result_lands() {
+        let events = vec![
+            tool_call(1, "Edit", "c1"),
+            ev(
+                2,
+                Event::ToolResult {
+                    call_id: "c1".into(),
+                    status: crate::ir::ToolStatus::Ok,
+                    bytes: 0,
+                    summary: None,
+                },
+            ),
+        ];
+        assert!(current_action(&events, &AgentStatus::Working, Utc::now()).is_none());
+    }
+
+    /// The Codex case: apply_patch emits NO ToolResult, only a snapshot carrying the same
+    /// call id. Verified against real rollouts (0 of 26 had a function_call_output).
+    #[test]
+    fn a_codex_patch_snapshot_resolves_its_apply_patch_call() {
+        let events = vec![
+            tool_call(1, "apply_patch", "c9"),
+            ev(
+                2,
+                Event::FileSnapshot {
+                    files: vec![FileEdit {
+                        path: "/Users/x/proj/main.rs".into(),
+                        call_id: Some("c9".into()),
+                        ..Default::default()
+                    }],
+                },
+            ),
+        ];
+        assert!(
+            current_action(&events, &AgentStatus::Working, Utc::now()).is_none(),
+            "a finished Codex patch must not read as in flight"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_for_a_different_call_does_not_resolve_this_one() {
+        let events = vec![
+            tool_call(1, "apply_patch", "c9"),
+            ev(
+                2,
+                Event::FileSnapshot {
+                    files: vec![FileEdit {
+                        path: "/Users/x/other.rs".into(),
+                        call_id: Some("SOMETHING_ELSE".into()),
+                        ..Default::default()
+                    }],
+                },
+            ),
+        ];
+        assert!(current_action(&events, &AgentStatus::Working, Utc::now()).is_some());
+    }
+
+    #[test]
+    fn a_stale_unresolved_call_is_dropped_rather_than_shown_forever() {
+        let events = vec![tool_call(1, "Edit", "c1")];
+        // Comfortably past the cap: `ev` stamps its own `now`, so a one-millisecond
+        // margin would land exactly on the boundary.
+        let long_after =
+            Utc::now() + chrono::Duration::milliseconds(CURRENT_ACTION_MAX_MS as i64 + 60_000);
+        assert!(
+            current_action(&events, &AgentStatus::Working, long_after).is_none(),
+            "an abandoned call must not haunt the panel"
+        );
+    }
+
+    #[test]
+    fn only_a_working_agent_has_a_current_action() {
+        let events = vec![tool_call(1, "Edit", "c1")];
+        for s in [
+            AgentStatus::Idle,
+            AgentStatus::Closed,
+            AgentStatus::Terminated,
+        ] {
+            assert!(
+                current_action(&events, &s, Utc::now()).is_none(),
+                "a non-working agent must not claim to be mid-edit"
+            );
+        }
+    }
+
+    #[test]
+    fn current_action_picks_the_newest_unresolved_call() {
+        let events = vec![tool_call(1, "Read", "c1"), tool_call(5, "Edit", "c2")];
+        let a = current_action(&events, &AgentStatus::Working, Utc::now()).expect("current");
+        assert_eq!(a.tool, "Edit");
+    }
+
+    #[test]
+    fn apply_patch_target_is_extracted_from_the_patch_dsl() {
+        let body = serde_json::json!(
+            "*** Begin Patch\n*** Update File: /Users/x/proj/a.rs\n@@\n-old\n+new\n*** End Patch"
+        );
+        assert_eq!(
+            tool_call_abs_path("apply_patch", &body).as_deref(),
+            Some("/Users/x/proj/a.rs")
+        );
+    }
+
+    #[test]
+    fn a_multi_file_patch_has_no_single_target() {
+        let body = serde_json::json!(
+            "*** Update File: /Users/x/a.rs\n*** Update File: /Users/x/b.rs\n"
+        );
+        assert_eq!(tool_call_abs_path("apply_patch", &body), None);
+    }
+
+    #[test]
+    fn relative_paths_are_refused_rather_than_guessed_at() {
+        // Revealing the wrong file is worse than revealing none.
+        let rel = serde_json::json!({ "file_path": "src/main.rs" });
+        assert_eq!(tool_call_abs_path("Edit", &rel), None);
+    }
+
     #[test]
     fn recent_activity_surfaces_writes_reads_and_runs() {
         let events = vec![
@@ -451,6 +747,7 @@ mod tests {
                         old_hash: None,
                         new_hash: None,
                         lines_changed: None,
+                        call_id: None,
                     }],
                 },
             ),

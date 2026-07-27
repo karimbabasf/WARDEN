@@ -664,6 +664,20 @@ fn parse_slice(
                     },
                 });
             }
+            // The session's human title. Claude APPENDS a fresh `custom-title` record
+            // every time the title changes, so the file holds the whole history and the
+            // current title is simply the last one. Records arrive in file order here,
+            // so overwriting on each hit leaves exactly that.
+            "custom-title" => {
+                if let Some(t) = v
+                    .get("customTitle")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    meta["session_title"] = json!(t);
+                }
+            }
             other => {
                 let obj = meta
                     .get_mut("ignored_record_types")
@@ -905,6 +919,9 @@ fn parse_snapshot(v: Option<&Value>) -> Vec<FileEdit> {
                 old_hash: None,
                 new_hash: None,
                 lines_changed: None,
+                // Claude resolves its tool calls with a real ToolResult, so a snapshot
+                // here carries no completion duty and needs no call id.
+                call_id: None,
             })
             .collect(),
         Some(Value::Array(a)) => a
@@ -915,6 +932,7 @@ fn parse_snapshot(v: Option<&Value>) -> Vec<FileEdit> {
                     old_hash: None,
                     new_hash: None,
                     lines_changed: None,
+                    call_id: None,
                 })
             })
             .collect(),

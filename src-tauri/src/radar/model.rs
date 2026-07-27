@@ -24,6 +24,16 @@ pub struct RadarAgent {
     pub cwd: Option<String>,
     pub role: Option<String>,
     pub model: Option<String>,
+    /// The harness's OWN human-readable session title, when it has one: Claude's
+    /// `custom-title` record, or the H1 of a Codex plan. Distinct from `label` (which
+    /// the radar derives) and from `nickname`. `None` when the harness never named it.
+    pub title: Option<String>,
+    /// What this agent is doing RIGHT NOW: the newest tool call with no result yet.
+    /// `None` when the agent is between calls, which is what makes it honest to render
+    /// large: an absent value means genuinely idle, not "we could not tell".
+    pub current_action: Option<RadarAction>,
+    /// Agent-team membership, when the harness groups agents into a named team.
+    pub team: Option<RadarTeam>,
     pub status: String,
     pub context_tokens: u64,
     pub max_tokens: u64,
@@ -87,6 +97,54 @@ pub struct RadarActivity {
     pub ts: String,
     pub kind: String,
     pub label: String,
+    /// The file this row touched, as a DISPLAY path with `$HOME` folded to `~`
+    /// (e.g. `~/Developer/Apps/WARDEN/src-tauri/src/radar/agent.rs`). `None` for rows
+    /// with no single file target (a shell run, a message, thinking).
+    ///
+    /// Deliberately NOT the absolute path: this struct is the exact shape a remote
+    /// observer receives, and `$HOME` carries the account name. The absolute path is
+    /// re-derived host-side by `reveal_activity_path` when the user clicks it, so it
+    /// never has to be transmitted at all.
+    pub target: Option<String>,
+}
+
+/// The single in-flight action: a tool call the harness has started and not yet
+/// returned a result for. Rendered as the hero of the detail panel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RadarAction {
+    /// read / write / search / run / tool, the same closed vocabulary as `RadarActivity.kind`.
+    pub kind: String,
+    /// The tool as the harness named it (`Edit`, `Bash`, `exec_command`).
+    pub tool: String,
+    /// A short human label, e.g. `Edit agent.rs`.
+    pub label: String,
+    /// Display path (`~`-folded) of the file being touched, when there is exactly one.
+    pub target: Option<String>,
+    pub started_at: String,
+    /// Milliseconds this call has been outstanding as of `RadarState.generated_at`.
+    /// Lets the FACE age a long-running action without re-deriving clock skew.
+    pub elapsed_ms: u64,
+}
+
+/// Membership in a named agent team. Claude Code writes a roster per team; Codex has
+/// no team concept, so this stays `None` there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RadarTeam {
+    /// Stable team key, e.g. `session-f3e4ef77`.
+    pub id: String,
+    /// Human team name from the roster.
+    pub name: String,
+    /// This agent's own name within the team (`ClaudeFormat`), which is what the
+    /// operator actually recognises, unlike a positional `subagent 3`.
+    pub member_name: Option<String>,
+    /// The agent type the team recorded for this member (`Explore`, `general-purpose`).
+    pub member_type: Option<String>,
+    /// Total roster size, including the lead.
+    pub member_count: u32,
+    /// True when this agent is the team lead.
+    pub is_lead: bool,
 }
 
 /// The full live forest, emitted as event `radar_state` and returned by the

@@ -185,14 +185,17 @@ fn parse_file(path: &Path, bytes: &[u8], raw_hash: u64) -> Result<SessionBatch> 
 
 /// Resolve a Codex tool call's input into a structured value the activity feed can read.
 ///
-/// `function_call` tools (spawn_agent, wait_agent, and friends) carry a JSON-encoded
-/// `arguments` string. The `exec` meta-tool (a `custom_tool_call`) instead carries JS in
-/// `input` that drives an inner tool: `tools.exec_command({cmd:"..."})` for a shell
-/// command, `tools.web__run({...})` for web. Reading only `arguments` (the old behaviour)
-/// left every `exec` with a Null input, so the radar could not tell reading from running
-/// from writing: it only ever showed a bare "exec". Normalize to `{cmd}` for a shell
-/// exec, `{codex_tool}` for another inner tool, or the parsed/raw value otherwise. Never
-/// Null when the record carried an input.
+/// Most calls are `function_call`s (`exec_command`, `spawn_agent`, `wait_agent`, and
+/// friends) carrying a JSON-encoded `arguments` string, handled below with no unwrapping
+/// needed. The `exec` meta-tool (a `custom_tool_call`, a minority path today) instead
+/// carries JS in `input` that drives an inner tool: `tools.exec_command({cmd:"..."})` for
+/// a shell command, `tools.web__run({...})` for web. Reading only `arguments` (the old
+/// behaviour) left every `exec` with a Null input, so the radar could not tell reading
+/// from running from writing: it only ever showed a bare "exec". `apply_patch` is its own
+/// native tool (not JS-nested in `exec`) whose `input` is raw patch-DSL text, not JS; see
+/// `codex_apply_patch_input`. Normalize to `{cmd}` for a shell exec, `{codex_tool}` for
+/// another inner tool, the patch-DSL shape for `apply_patch`, or the parsed/raw value
+/// otherwise. Never Null when the record carried an input.
 fn codex_tool_call_input(payload: &Value) -> Value {
     if let Some(args) = payload.get("arguments") {
         return args
@@ -200,11 +203,44 @@ fn codex_tool_call_input(payload: &Value) -> Value {
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
             .unwrap_or_else(|| args.clone());
     }
+    let is_apply_patch = payload.get("name").and_then(Value::as_str) == Some("apply_patch");
     match payload.get("input") {
+        Some(Value::String(js)) if is_apply_patch => codex_apply_patch_input(js),
         Some(Value::String(js)) => normalize_codex_exec_js(js),
         Some(other) => other.clone(),
         None => Value::Null,
     }
+}
+
+/// Extract the target file path(s) from a native Codex `apply_patch` call.
+///
+/// Unlike the `exec` meta-tool, `apply_patch` is its own top-level tool whose `input` is
+/// raw patch-DSL TEXT (not JS, not JSON): one `*** Add File: <path>` / `*** Update File:
+/// <path>` / `*** Delete File: <path>` header line per file touched (a `Move to:` rename
+/// directive exists in the DSL but is unseen in practice). A multi-file patch has several
+/// header lines; every one is collected into `paths`, not just the first (multi-file
+/// calls touching over a hundred files have been observed). When there is exactly one
+/// path it is also copied to `file_path`, so `tool_call_abs_path` (radar/agent.rs) finds
+/// it the same way it already does Claude's `file_path`/`path`/`notebook_path` inputs.
+/// The raw text is kept under `patch` (the key `tool_call_abs_path` already falls back to
+/// for a single-file re-scan) so the detail view still has the full diff, not just the
+/// path list.
+fn codex_apply_patch_input(body: &str) -> Value {
+    let paths: Vec<&str> = body
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
+                .iter()
+                .find_map(|tag| line.strip_prefix(tag))
+        })
+        .map(str::trim)
+        .collect();
+    let file_path = match paths.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    };
+    json!({ "paths": paths, "file_path": file_path, "patch": body })
 }
 
 /// Extract the real action from the `exec` meta-tool's JS wrapper: the shell `cmd`, else
@@ -608,8 +644,52 @@ fn parse_slice(
                         });
                     }
                 }
+                "item_completed" => {
+                    // The only real session-title source Codex has: no session_meta field
+                    // is a title (checked; `turn_context.summary` is always the literal
+                    // string "auto"). A completed Plan item's markdown body starts with an
+                    // H1 heading a human actually wrote, e.g. "# Resume Tailoring V2 Plan".
+                    // Radar reads it back at meta["session_title"] (radar/agent.rs). Any
+                    // other item type keeps going through the schema-drift path below so
+                    // it is still tallied.
+                    if payload.pointer("/item/type").and_then(Value::as_str) == Some("Plan") {
+                        if let Some(title) = payload
+                            .pointer("/item/text")
+                            .and_then(Value::as_str)
+                            .and_then(plan_title)
+                        {
+                            if let Some(obj) = meta.as_object_mut() {
+                                // Last Plan to complete in the file wins: later records are
+                                // folded over earlier ones as the file is read in order.
+                                obj.insert("session_title".to_string(), json!(title));
+                            }
+                        }
+                    } else {
+                        record_unknown(
+                            &mut meta,
+                            &mut events,
+                            &mut turns,
+                            &mut cur_turn,
+                            &mut idx,
+                            &sid,
+                            ts,
+                            raw,
+                            rec_type,
+                            pt,
+                            &payload,
+                        );
+                    }
+                }
                 "patch_apply_end" => {
                     let tid = current_or_open(&mut cur_turn, &mut turns, &mut idx, &sid, ts);
+                    // Carry the originating call id so the radar can tell that the
+                    // matching `apply_patch` tool call has FINISHED. Codex emits no
+                    // function_call_output for apply_patch, so this snapshot is the only
+                    // completion signal there is.
+                    let patch_call_id = payload
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     let files = payload
                         .get("changes")
                         .and_then(Value::as_object)
@@ -618,6 +698,7 @@ fn parse_slice(
                                 .take(500)
                                 .map(|k| FileEdit {
                                     path: k.clone(),
+                                    call_id: patch_call_id.clone(),
                                     ..Default::default()
                                 })
                                 .collect()
@@ -805,6 +886,19 @@ fn remember_model_context_window(meta: &mut Value, payload: &Value) {
     if let Some(obj) = meta.as_object_mut() {
         obj.insert("model_context_window".to_string(), json!(window));
     }
+}
+
+/// The title line of a completed Codex Plan item: the markdown's first line, when it is
+/// an H1 heading (`# Title`, exactly one leading `#`). A second `#` means H2+, i.e. not a
+/// title line, so that yields `None` rather than a mis-stripped fragment.
+fn plan_title(markdown: &str) -> Option<String> {
+    let first = markdown.lines().next()?.trim();
+    let rest = first.strip_prefix('#')?;
+    if rest.starts_with('#') {
+        return None;
+    }
+    let title = rest.trim();
+    (!title.is_empty()).then(|| title.to_string())
 }
 
 /// Return the currently-open turn id, opening a fresh assistant turn if none is
@@ -1443,5 +1537,151 @@ mod tests {
         });
         let v = codex_tool_call_input(&payload);
         assert_eq!(v.get("task_name").and_then(Value::as_str), Some("x"));
+    }
+
+    /// A native single-file `apply_patch` call (its own top-level tool, `input` is raw
+    /// patch-DSL text, not JS) must resolve `file_path` so `tool_call_abs_path`
+    /// (radar/agent.rs) finds it the same way it finds Claude's `file_path` inputs.
+    #[test]
+    fn codex_apply_patch_input_extracts_single_file_path() {
+        let payload = serde_json::json!({
+            "type": "function_call",
+            "name": "apply_patch",
+            "call_id": "call_1",
+            "input": "*** Begin Patch\n*** Update File: /repo/src/app.rs\n@@\n-old\n+new\n*** End Patch",
+        });
+        let v = codex_tool_call_input(&payload);
+        assert_eq!(
+            v.get("file_path").and_then(Value::as_str),
+            Some("/repo/src/app.rs")
+        );
+        assert_eq!(
+            v.get("paths").and_then(Value::as_array).map(Vec::len),
+            Some(1)
+        );
+        assert!(
+            v.get("patch")
+                .and_then(Value::as_str)
+                .unwrap()
+                .contains("Update File"),
+            "raw patch body must still be available, not just the path"
+        );
+    }
+
+    /// A multi-file `apply_patch` call has no single target (133/773 real calls touch more
+    /// than one file), but every path must still be collected into `paths`, not just the
+    /// first, and `file_path` must be absent since there is no unambiguous target.
+    #[test]
+    fn codex_apply_patch_input_collects_all_paths_for_multi_file_patch() {
+        let payload = serde_json::json!({
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "call_id": "call_2",
+            "input": "*** Begin Patch\n*** Add File: /repo/a.rs\n+hi\n*** Update File: /repo/b.rs\n@@\n-x\n+y\n*** Delete File: /repo/c.rs\n*** End Patch",
+        });
+        let v = codex_tool_call_input(&payload);
+        let paths: Vec<&str> = v
+            .get("paths")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["/repo/a.rs", "/repo/b.rs", "/repo/c.rs"]);
+        assert!(
+            v.get("file_path").is_none_or(|f| f.is_null()),
+            "a multi-file patch has no single target"
+        );
+    }
+
+    /// An `exec` call whose JS embeds "apply_patch" text is a DIFFERENT case (the JS
+    /// meta-tool wrapper), not the native tool: it must still go through the exec-JS
+    /// normalizer, not the patch-DSL scanner (no `name == "apply_patch"` on that record).
+    #[test]
+    fn codex_exec_js_apply_patch_mention_is_not_treated_as_native_patch() {
+        let payload = serde_json::json!({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "const r = await tools.apply_patch({patch:\"*** Begin Patch\"}); text(r.output);"
+        });
+        let v = codex_tool_call_input(&payload);
+        assert_eq!(
+            v.get("codex_tool").and_then(Value::as_str),
+            Some("apply_patch"),
+            "JS-nested apply_patch mentions still resolve via the inner-tool-name fallback"
+        );
+    }
+
+    /// `event_msg/item_completed` where `item.type == "Plan"` is Codex's only real
+    /// session-title source: the markdown's first H1 line becomes `meta.session_title`,
+    /// the exact key `radar/agent.rs` reads for `RadarAgent.title`.
+    #[test]
+    fn item_completed_plan_sets_session_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("rollout-plan.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                "{\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"abc\",\"cwd\":\"/tmp\",\"model_provider\":\"openai\"}}\n",
+                "{\"timestamp\":\"2026-01-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"Plan\",\"id\":\"p1\",\"text\":\"# AMC-040 First Visible Session Card Plan\\n\\n## Summary\\nbuild it\"}}}\n",
+            ),
+        )
+        .unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        let b = parse_file(&p, &bytes, hash64(&bytes)).unwrap();
+        assert_eq!(
+            b.session.meta.get("session_title").and_then(Value::as_str),
+            Some("AMC-040 First Visible Session Card Plan")
+        );
+    }
+
+    /// Several Plans completing in one session: the LAST one wins, matching a fold over
+    /// the file in order.
+    #[test]
+    fn item_completed_plan_last_title_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("rollout-plan2.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                "{\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"abc\",\"cwd\":\"/tmp\",\"model_provider\":\"openai\"}}\n",
+                "{\"timestamp\":\"2026-01-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"Plan\",\"id\":\"p1\",\"text\":\"# First Plan\"}}}\n",
+                "{\"timestamp\":\"2026-01-01T00:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"Plan\",\"id\":\"p2\",\"text\":\"# Second Plan\"}}}\n",
+            ),
+        )
+        .unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        let b = parse_file(&p, &bytes, hash64(&bytes)).unwrap();
+        assert_eq!(
+            b.session.meta.get("session_title").and_then(Value::as_str),
+            Some("Second Plan")
+        );
+    }
+
+    /// A non-Plan `item_completed` (none observed on disk today, but the DSL allows other
+    /// item types) sets no title and still goes through the schema-drift path, so it is
+    /// not silently invisible to `ignored_record_types`.
+    #[test]
+    fn item_completed_non_plan_is_tallied_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("rollout-plan3.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                "{\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"abc\",\"cwd\":\"/tmp\",\"model_provider\":\"openai\"}}\n",
+                "{\"timestamp\":\"2026-01-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"Message\",\"id\":\"m1\",\"text\":\"hi\"}}}\n",
+            ),
+        )
+        .unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        let b = parse_file(&p, &bytes, hash64(&bytes)).unwrap();
+        assert!(b.session.meta.get("session_title").is_none());
+        assert_eq!(
+            b.session
+                .meta
+                .pointer("/ignored_record_types/event_msg~1item_completed")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
     }
 }

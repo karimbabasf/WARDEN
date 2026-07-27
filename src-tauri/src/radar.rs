@@ -15,6 +15,7 @@
 //! * [`context`] — context-window breakdown + cost estimation.
 //! * [`identity`] — agent naming/identity + subagent-termination decisions.
 //! * [`agent`] — per-agent construction + recent-activity tailing.
+//! * [`teams`] — Claude agent-team rosters, the source of real member names.
 //! * [`assemble`] — the pure top-level forest join ([`assemble()`]).
 //! * [`live`] — live transcript refresh + open-session scanning ([`recompute_radar_state`]).
 
@@ -29,12 +30,13 @@ mod identity;
 mod live;
 mod model;
 mod status;
+mod teams;
 
 // ── public API (kept byte-identical to the pre-split `crate::radar` surface) ──
 pub use assemble::assemble;
 pub use live::{recompute_radar_state, refresh_live_context};
 pub use liveness::{AgentStatus, LiveSession};
 pub use model::{
-    RadarActivity, RadarAgent, RadarComposition, RadarContextBreakdown, RadarContextRow,
-    RadarEstimated, RadarExact, RadarState,
+    RadarAction, RadarActivity, RadarAgent, RadarComposition, RadarContextBreakdown,
+    RadarContextRow, RadarEstimated, RadarExact, RadarState, RadarTeam,
 };
