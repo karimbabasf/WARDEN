@@ -27,9 +27,20 @@ import { StarCatalog } from '@/viz/shared/scene/StarCatalog';
 import { FoldGroup } from '@/viz/shared/scene/Transition';
 import { CameraRig } from '@/viz/shared/scene/CameraRig';
 import { frameloopFor } from '@/viz/shared/scene/frameloop';
-import { reconcileLifecycle, pruneGone, isVisible, type LifecycleEntry, type LifecycleMap, type LiveId } from './radarLifecycle';
+import {
+  reconcileLifecycle,
+  pruneGone,
+  isVisible,
+  linkDrawProgress,
+  type LifecycleEntry,
+  type LifecycleMap,
+  type LinkEndpointState,
+  type LiveId,
+} from './radarLifecycle';
+import { globeSpinRate } from './radarMotion';
 import { RadarHoverCard } from './RadarHoverCard';
 import { radarCanvasCamera } from '@/viz/shared/scene/useOrbCamera';
+import { useReducedMotion } from '@/viz/shared/scene/reducedMotion';
 import { targetDim, matchesFilter, type EmphasisFilter } from '@/viz/shared/lib/emphasis';
 
 const BG = '#020403';
@@ -103,10 +114,7 @@ export function radarLivenessColorScale(liveK: number): number {
   return 0.62 + k * 0.38;
 }
 
-type LinkFadeEndpoint = {
-  entry?: LifecycleEntry;
-  gone?: boolean;
-};
+type LinkFadeEndpoint = LinkEndpointState;
 
 function endpointFadeFactor({ entry, gone = false }: LinkFadeEndpoint): number {
   if (gone || entry?.phase === 'gone') return 0;
@@ -166,6 +174,8 @@ function RadarGlobe({
   dimmed,
   dimTarget = 0,
   emphasis = false,
+  reduced = false,
+  interactive = true,
   lifecycleRef,
   onHover,
   onLeave,
@@ -182,6 +192,11 @@ function RadarGlobe({
   /** This globe MATCHES the active legend harness filter — give it a gentle extra
    *  glow so the selection POPS, not just dims everything else. */
   emphasis?: boolean;
+  /** prefers-reduced-motion: hold the resting spin rate whatever the status is. */
+  reduced?: boolean;
+  /** Mount the hit-sphere? A peer's board is a read-only frame, so it raycasts
+   *  nothing: no hover, no cursor change, no click, and no raycast cost either. */
+  interactive?: boolean;
   /** Live read of the reconciler's per-id scale (no re-render on tween). */
   lifecycleRef: MutableRefObject<LifecycleMap>;
   onHover: (node: LayoutNode) => void;
@@ -314,7 +329,9 @@ function RadarGlobe({
     const breathe = 1 + idleBreath * (1 - liveK) + pulse * 0.045;
     group.current.scale.setScalar(s.scale * breathe);
     group.current.position.set(s.pos.x, s.pos.y + Math.sin(t * 0.6 + seed * 6.28) * 0.05, s.pos.z);
-    group.current.rotation.y += dt * (isRoot ? 0.08 : 0.14);
+    // spin: a working globe turns faster. `liveK` is already damped, so the rate
+    // GLIDES between resting and working and never snaps on a status flip.
+    group.current.rotation.y += dt * globeSpinRate(isRoot, liveK, reduced);
 
     // halo: comes alive with liveness, then breathes IN and OUT on the slow pulse —
     // the soft aura swelling and receding is the most visible "this is working" tell.
@@ -370,26 +387,29 @@ function RadarGlobe({
     <group ref={group} position={[node.position.x, node.position.y, node.position.z]}>
       {/* tight invisible hit-sphere — the only interactive object (R3F raycasts
           only handler-bearing meshes); sized inside the lattice so clicks land on
-          the globe, not the empty space around it. */}
-      <mesh
-        onPointerOver={(e) => {
-          e.stopPropagation();
-          document.body.style.cursor = 'pointer';
-          onHover(node);
-        }}
-        onPointerOut={(e) => {
-          e.stopPropagation();
-          document.body.style.cursor = '';
-          onLeave(node);
-        }}
-        onClick={(e) => {
-          e.stopPropagation();
-          onSelect(node);
-        }}
-      >
-        <sphereGeometry args={[0.8, 16, 16]} />
-        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
-      </mesh>
+          the globe, not the empty space around it. Dropped entirely on a read-only
+          board (a watched peer), so there is nothing to raycast and nothing to click. */}
+      {interactive && (
+        <mesh
+          onPointerOver={(e) => {
+            e.stopPropagation();
+            document.body.style.cursor = 'pointer';
+            onHover(node);
+          }}
+          onPointerOut={(e) => {
+            e.stopPropagation();
+            document.body.style.cursor = '';
+            onLeave(node);
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect(node);
+          }}
+        >
+          <sphereGeometry args={[0.8, 16, 16]} />
+          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+        </mesh>
+      )}
 
       {/* outer glowing network shell — root = solid lattice, sub = dashed */}
       <group ref={shellGroup}>
@@ -472,19 +492,38 @@ function RadarGlobe({
   );
 }
 
+// Mutable scratch endpoints, reused for every link on every frame. The lifecycle
+// helpers take a shaped endpoint (readable, and how their tests call them), and this
+// is what keeps that from meaning two object literals per link per frame.
+const linkSrcScratch: LinkEndpointState = {};
+const linkDstScratch: LinkEndpointState = {};
+
 // ── parent -> child glowing links (depth-N), mirroring Habits' AnimatedLinks but
-// flowing parent → child and radar-tinted by the PARENT's heat colour. Each link's
-// brightness is multiplied every frame by min(parentScale, childScale) read live
-// from the SAME lifecycle map the globes use, so a link to an imploding/gone globe
-// fades out in lockstep with it (no dangling full-brightness glow to an empty point).
+// flowing parent → child and radar-tinted by the PARENT's heat colour.
+//
+// A link ANIMATES ALONG ITS LENGTH, in lockstep with the child globe: it draws out
+// from the parent as the child blooms and is reeled back into the parent as the child
+// implodes, so a subagent arrives on a tether and leaves on one instead of a
+// full-length line blinking out around it. `linkDrawProgress` (pure, tested) is the
+// drawn fraction; the SAME fixed segments are just redistributed over
+// [parent, parent + progress * (child - parent)], so nothing is allocated and no
+// geometry is rebuilt. Because the colour ramp is not redistributed with them, the
+// gradient compresses into the drawn part and the head always carries the child's
+// hue, which is what makes the stroke read as travelling toward the child.
+//
+// Claude agent-teams and Codex subagents are different concepts upstream and share
+// this path exactly: nothing below branches on harness.
 function RadarLinks({
   layout,
   lifecycleRef,
   goneIdsRef,
+  reduced = false,
 }: {
   layout: OrbLayout;
   lifecycleRef: MutableRefObject<LifecycleMap>;
   goneIdsRef: MutableRefObject<Set<string>>;
+  /** prefers-reduced-motion: the link snaps between drawn and absent, never travels. */
+  reduced?: boolean;
 }) {
   const byId = useMemo(() => new Map(layout.nodes.map((n) => [n.id, n])), [layout]);
   const links = useMemo(() => layout.links.filter((l) => byId.has(l.source) && byId.has(l.target)), [layout, byId]);
@@ -498,9 +537,16 @@ function RadarLinks({
   // brightest at the parent anchor and easing toward the child, so the tether reads as
   // a clean, direct "this spawned that" line (no bowed cable, no travelling mote).
   const SEG = 6;
-  const { lineGeo, meta } = useMemo(() => {
+  const { lineGeo, meta, anchors, lastDrawn, lastLit } = useMemo(() => {
     const linePos = new Float32Array(links.length * SEG * 6);
     const lineCol = new Float32Array(links.length * SEG * 6);
+    // Both endpoints per link, so the per-frame redraw can re-lerp the strand without
+    // walking back into the layout (or allocating a Vector3 to do it).
+    const anchors = new Float32Array(links.length * 6);
+    // Last progress / brightness actually written, so a settled link costs no writes.
+    // -1 is unreachable for both, so the first frame always draws.
+    const lastDrawn = new Float32Array(links.length).fill(-1);
+    const lastLit = new Float32Array(links.length).fill(-1);
     const a = new THREE.Vector3();
     const b = new THREE.Vector3();
     const meta = links.map((link, idx) => {
@@ -512,6 +558,9 @@ function RadarLinks({
       const cParent = new THREE.Color(radarNodeColor(parent.radarAgent!));
       const cChild = new THREE.Color(radarNodeColor(child.radarAgent!));
       const base = idx * SEG * 6;
+      const an = idx * 6;
+      anchors[an] = h.x; anchors[an + 1] = h.y; anchors[an + 2] = h.z;
+      anchors[an + 3] = c.x; anchors[an + 4] = c.y; anchors[an + 5] = c.z;
       for (let s = 0; s < SEG; s++) {
         const ta = s / SEG;
         const tb = (s + 1) / SEG;
@@ -533,7 +582,7 @@ function RadarLinks({
     const lineGeo = new THREE.BufferGeometry();
     lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
     lineGeo.setAttribute('color', new THREE.BufferAttribute(lineCol, 3));
-    return { lineGeo, meta };
+    return { lineGeo, meta, anchors, lastDrawn, lastLit };
   }, [links, byId]);
 
   const lineMat = useRef<THREE.LineBasicMaterial>(null);
@@ -543,24 +592,59 @@ function RadarLinks({
   useFrame((state) => {
     const t = state.clock.elapsedTime;
     const lc = lifecycleRef.current;
-    const lineColAttr = lineGeo.getAttribute('color') as THREE.BufferAttribute;
+    const gone = goneIdsRef.current;
+    const posAttr = lineGeo.getAttribute('position') as THREE.BufferAttribute;
+    const colAttr = lineGeo.getAttribute('color') as THREE.BufferAttribute;
+    const posArr = posAttr.array as Float32Array;
+    const colArr = colAttr.array as Float32Array;
     const baseLine = baseLineColors.current;
-    const lineArr = lineColAttr.array as Float32Array;
     const stride = SEG * 6;
+    let posDirty = false;
+    let colDirty = false;
 
     for (let i = 0; i < meta.length; i++) {
       const m = meta[i];
-      // fade a link out in lockstep with whichever endpoint globe is shrinking
-      // (imploding/gone). Live link (both endpoints alive) → factor 1 → unchanged.
-      const factor = radarLinkFadeFactor(
-        { entry: lc[m.sourceId], gone: goneIdsRef.current.has(m.sourceId) },
-        { entry: lc[m.targetId], gone: goneIdsRef.current.has(m.targetId) },
-      );
+      linkSrcScratch.entry = lc[m.sourceId];
+      linkSrcScratch.gone = gone.has(m.sourceId);
+      linkDstScratch.entry = lc[m.targetId];
+      linkDstScratch.gone = gone.has(m.targetId);
+
+      // LENGTH: how far along the parent→child vector the stroke currently reaches.
+      const drawn = linkDrawProgress(linkSrcScratch, linkDstScratch, reduced);
       const l = i * stride;
-      for (let k = 0; k < stride; k++) lineArr[l + k] = baseLine[l + k] * factor;
+      if (lastDrawn[i] !== drawn) {
+        lastDrawn[i] = drawn;
+        const an = i * 6;
+        const ax = anchors[an], ay = anchors[an + 1], az = anchors[an + 2];
+        const dx = (anchors[an + 3] - ax) * drawn;
+        const dy = (anchors[an + 4] - ay) * drawn;
+        const dz = (anchors[an + 5] - az) * drawn;
+        for (let s = 0; s < SEG; s++) {
+          const ta = s / SEG;
+          const tb = (s + 1) / SEG;
+          const k = l + s * 6;
+          posArr[k] = ax + dx * ta; posArr[k + 1] = ay + dy * ta; posArr[k + 2] = az + dz * ta;
+          posArr[k + 3] = ax + dx * tb; posArr[k + 4] = ay + dy * tb; posArr[k + 5] = az + dz * tb;
+        }
+        posDirty = true;
+      }
+
+      // BRIGHTNESS: the surviving stroke also dims with whichever endpoint globe is
+      // shrinking, so a retracting tether goes out as it goes home rather than
+      // snapping dark at the last frame. Live link (both alive) → factor 1 → untouched.
+      const lit = radarLinkFadeFactor(linkSrcScratch, linkDstScratch);
+      if (lastLit[i] !== lit) {
+        lastLit[i] = lit;
+        for (let k = 0; k < stride; k++) colArr[l + k] = baseLine[l + k] * lit;
+        colDirty = true;
+      }
     }
-    lineColAttr.needsUpdate = true;
-    if (lineMat.current) lineMat.current.opacity = 0.4 + Math.sin(t * 1.3) * 0.07;
+    // Only flag a re-upload when something actually moved: a settled board (every
+    // link fully drawn, nothing spawning or imploding) uploads zero bytes per frame.
+    if (posDirty) posAttr.needsUpdate = true;
+    if (colDirty) colAttr.needsUpdate = true;
+    // The slow opacity breath is motion for its own sake, so reduced motion holds it.
+    if (lineMat.current) lineMat.current.opacity = reduced ? 0.42 : 0.4 + Math.sin(t * 1.3) * 0.07;
   });
 
   if (links.length === 0) return null;
@@ -583,6 +667,8 @@ export type RadarConstellationProps = {
   emphasisFilter?: EmphasisFilter;
   /** Live fold scale for the constellation swap (1 = at rest). Omitted in the dev harness. */
   scaleRef?: { current: number };
+  /** Read-only board (a watched peer): no hit-spheres, no hover card, no rail clicks. */
+  interactive?: boolean;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -718,10 +804,13 @@ function RadarClusterLabels({ clusters, onPick }: { clusters: RadarCluster[]; on
 // the persistent scene shell (WarRoom's SceneShell), so a Habits↔Radar swap only ever
 // remounts this forest (already folded to nothing) and the void never flickers. The
 // standalone dev harness wraps this in `RadarSceneBody`, which adds its own shell.
-export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, onHover, onLeave, onSelect, onClear, onPickFolder }: RadarConstellationProps) {
+export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, interactive = true, onHover, onLeave, onSelect, onClear, onPickFolder }: RadarConstellationProps) {
   // The dev harness mounts the radar without a fold; default to a stable scale-1 ref.
   const fallbackScale = useRef(1);
   const sref = scaleRef ?? fallbackScale;
+  // One live subscription for the whole forest (never one per globe), passed down as
+  // a plain boolean so a mid-session flip of the OS setting re-renders every node.
+  const reduced = useReducedMotion();
   // Severity buckets are a Habits-only concept (radar globes carry no issue severity),
   // so only a HARNESS filter dims radar globes; a severity filter is a no-op here. The
   // colour-only dim itself is computed by the shared pure `emphasis.targetDim`.
@@ -738,8 +827,21 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
   const goneIdsRef = useRef<Set<string>>(new Set());
   const [renderTick, setRenderTick] = useState(0);
   const nodeCache = useRef<Map<string, LayoutNode>>(new Map());
-  const layoutModel = useMemo(() => radarModelWithoutGone(model, goneIdsRef.current), [model, renderTick]);
-  const layout = useMemo(() => layoutRadarScene(layoutModel), [layoutModel]);
+  // ONE layout, from the WHOLE model. This used to lay out `radarModelWithoutGone`,
+  // which quietly made the forest's geometry a different board from the one every
+  // consumer OUTSIDE the canvas computes (WarRoom lays out the full model to derive
+  // `selectedNode`, `sceneBounds` and `subtreeBounds`). The divergence was not
+  // cosmetic: `placeSubtree` centres a parent over its children, so the frame a
+  // subagent finished, dropping it re-centred its parent sideways, and the camera
+  // then framed a position the globe no longer occupied (measured: a root sliding
+  // 0.88 world units, about 235px, straight under the fleet rack).
+  //
+  // Dropping a dead node from the LAYOUT was never what unmounted it anyway:
+  // `renderNodes` below filters `goneIdsRef` out of the mount set, which is what
+  // actually removes the globe and its hit-sphere. So laying out the full model
+  // costs nothing and buys back the module's own stated law: position never depends
+  // on activity, and a globe never jumps because a sibling changed state.
+  const layout = useMemo(() => layoutRadarScene(model), [model]);
   // Intentional mid-render write: append-only + idempotent. We record each live
   // node's latest layout so an imploding node keeps its last position after it
   // leaves `model.agents`. Writing the same id twice with the current layout is a
@@ -794,8 +896,9 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
       {/* The whole forest folds as one on a tab swap (Transition.tsx). */}
       <FoldGroup scaleRef={sref}>
         <group onPointerMissed={onClear}>
-          {/* the ONLY linking cue: a subtle parent -> child tether per subagent */}
-          <RadarLinks layout={layout} lifecycleRef={lifecycleRef} goneIdsRef={goneIdsRef} />
+          {/* the ONLY linking cue: a subtle parent -> child tether per subagent,
+              drawn out and reeled back in with the child it belongs to */}
+          <RadarLinks layout={layout} lifecycleRef={lifecycleRef} goneIdsRef={goneIdsRef} reduced={reduced} />
           {renderNodes.map((node) => (
             <RadarGlobe
               key={node.id}
@@ -809,6 +912,8 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
               // …and a matching globe POPS (gentle extra glow) rather than only the
               // others dimming, so the selection reads as "these light up".
               emphasis={radarFilter !== null && matchesFilter({ harness: node.harness }, radarFilter)}
+              reduced={reduced}
+              interactive={interactive}
               lifecycleRef={lifecycleRef}
               onHover={onHover}
               onLeave={onLeave}
@@ -818,9 +923,9 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
         </group>
 
         {/* one "this is the WARDEN folder" tag at each rail head; click frames the rail */}
-        <RadarClusterLabels clusters={layout.clusters} onPick={onPickFolder} />
+        <RadarClusterLabels clusters={layout.clusters} onPick={interactive ? onPickFolder : undefined} />
 
-        <RadarHoverLayer node={hoveredNode} suppressed={Boolean(hoveredId && hoveredId === selectedId)} />
+        <RadarHoverLayer node={hoveredNode} suppressed={!interactive || Boolean(hoveredId && hoveredId === selectedId)} />
       </FoldGroup>
     </>
   );

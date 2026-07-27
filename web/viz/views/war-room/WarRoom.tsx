@@ -21,7 +21,12 @@ import { PeersPanel } from '@/viz/modules/observe/PeersPanel';
 import { ApprovalModal } from '@/viz/modules/observe/ApprovalModal';
 import { FilterBar } from './FilterBar';
 import { Breadcrumb } from './Breadcrumb';
+import { FleetRail } from './FleetRail';
 import { layoutRadarScene, isFlatAgent } from '@/viz/modules/radar/radarLayout';
+import { PeerConstellation } from '@/viz/modules/radar/PeerConstellation';
+import { peerWorldPlacement } from '@/viz/modules/radar/peerFraming';
+import { observedToScene } from '@/viz/modules/observe/observedToScene';
+import type { ObservedState } from '@/viz/shared/types/observedTypes';
 import type { RadarAgent, RadarSceneModel } from '@/viz/shared/types/radarTypes';
 import type { EmphasisFilter } from '@/viz/shared/lib/emphasis';
 import type { LayoutNode } from '@/viz/shared/types/orbTypes';
@@ -44,6 +49,49 @@ export function activeFor(
 ): boolean {
   if (minimized) return false;
   return Boolean(summoned) || !visHidden;
+}
+
+/**
+ * How many CSS pixels of the canvas each rail is sitting on top of.
+ *
+ * The canvas is full-bleed (the starfield should reach the window edge), so the
+ * rails float over it and the camera has to be told which horizontal band is
+ * actually free, or the constellation frames against the whole viewport and half
+ * of it ends up underneath the fleet rack.
+ *
+ * Measured from the real elements rather than parsed out of the CSS custom
+ * properties: `--rail-w` is a clamp() and the rails are hidden entirely by a
+ * media query below 980px, so the DOM is the only thing that knows the truth.
+ * A fixed-position element always reports `offsetParent === null`, so visibility
+ * is judged by measured width instead.
+ */
+function useRailInsets(dockOpen: boolean): { left: number; right: number } {
+  const [insets, setInsets] = useState({ left: 0, right: 0 });
+
+  useEffect(() => {
+    const measure = () => {
+      const rail = document.querySelector('.wd-fleet') as HTMLElement | null;
+      const dock = document.querySelector('.wd-radar-dock') as HTMLElement | null;
+      const railBox = rail?.getBoundingClientRect();
+      const dockBox = dock?.getBoundingClientRect();
+      const left = railBox && railBox.width > 0 ? railBox.right : 0;
+      const right = dockOpen && dockBox && dockBox.width > 0 ? window.innerWidth - dockBox.left : 0;
+      setInsets((cur) => (cur.left === left && cur.right === right ? cur : { left, right }));
+    };
+    // Two frames: the dock animates its width in, so a single synchronous read
+    // right after a selection would measure the pre-transition box.
+    measure();
+    const raf = window.requestAnimationFrame(measure);
+    const t = window.setTimeout(measure, 300);
+    window.addEventListener('resize', measure);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.clearTimeout(t);
+      window.removeEventListener('resize', measure);
+    };
+  }, [dockOpen]);
+
+  return insets;
 }
 
 export function isDiscoveryHomeDoubleClickAllowed({
@@ -74,6 +122,9 @@ function SceneShell({
   homeSignal,
   sceneBounds,
   scaleRef,
+  railInsets,
+  peerModel,
+  peerLabel,
   onHover,
   onLeave,
   onSelect,
@@ -92,6 +143,11 @@ function SceneShell({
   /** Bounding sphere of the forest; scales the camera's zoom + framing. */
   sceneBounds: Bounds | null;
   scaleRef: { current: number };
+  /** CSS pixels of canvas each rail covers, so the camera frames the free channel. */
+  railInsets: { left: number; right: number };
+  /** A watched peer's redacted board, or null when watching nobody. */
+  peerModel: RadarSceneModel | null;
+  peerLabel: string;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -99,6 +155,14 @@ function SceneShell({
   /** Click a folder tag to frame that rail. */
   onPickFolder: (key: string) => void;
 }) {
+  // Where the peer's board is parked in world space. BOTH constellations stay
+  // mounted: watching someone else is a lateral truck of the camera, never an
+  // implode-and-rebloom, so your own board is still there when you come back.
+  const peerPlacement = useMemo(
+    () => peerWorldPlacement(peerModel, sceneBounds),
+    [peerModel, sceneBounds],
+  );
+
   const { gl } = useThree();
   useEffect(() => {
     gl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -135,6 +199,10 @@ function SceneShell({
         focusBounds={focusBounds}
         homeSignal={homeSignal}
         sceneBounds={sceneBounds}
+        framingInsetLeft={railInsets.left}
+        framingInsetRight={railInsets.right}
+        peerBounds={peerPlacement.bounds}
+        viewTarget={peerModel ? 'peer' : 'local'}
         // The radar board locks the rig (no rotate/pan, straight-on framing).
         locked
       />
@@ -151,6 +219,10 @@ function SceneShell({
         onClear={onClear}
         onPickFolder={onPickFolder}
       />
+
+      {peerModel ? (
+        <PeerConstellation model={peerModel} placement={peerPlacement} label={peerLabel} scaleRef={scaleRef} />
+      ) : null}
 
       {/* multisampling AA on the composer input stops the thin bright lattice lines
           from sub-pixel shimmering into the bloom pass (the flicker). High smoothing
@@ -179,6 +251,25 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
   const active = activeFor(scene.summoned, visHidden, scene.minimized);
   // The board never folds (no tab swap), so the forest scale is a constant 1.
   const foldScale = useRef(1);
+  const railInsets = useRailInsets(selectedId !== null);
+  // The peer board you are currently watching, lifted out of the observer dock.
+  const [watched, setWatched] = useState<{ peer: { id: string; label: string }; state: ObservedState | null } | null>(
+    null,
+  );
+  const onWatchedPeer = useCallback(
+    (peer: { id: string; label: string } | null, state: ObservedState | null) => {
+      setWatched(peer ? { peer, state } : null);
+    },
+    [],
+  );
+  // Only a peer that has actually SENT a frame gets a board. A selected-but-silent
+  // peer must not produce an empty constellation the camera then slides to: that
+  // would read as "they have no agents" when the truth is "no frame yet".
+  const peerModel = useMemo(
+    () => (watched?.state ? observedToScene(watched.state) : null),
+    [watched],
+  );
+  const peerHasAgents = (peerModel?.agents.length ?? 0) > 0;
 
   useEffect(() => bridge.subscribe(setScene), [bridge]);
 
@@ -415,6 +506,9 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
           homeSignal={homeSignal}
           sceneBounds={sceneBounds}
           scaleRef={foldScale}
+          railInsets={railInsets}
+          peerModel={peerHasAgents ? peerModel : null}
+          peerLabel={watched?.peer.label ?? ''}
           onHover={onHover}
           onLeave={onLeave}
           onSelect={onSelect}
@@ -425,10 +519,17 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
 
       {/* Slim brand mark, top-left. Orients a first-time viewer and carries the live
           agent count without competing with the board. */}
-      <header className="wd-brand" aria-label="WARDEN">
-        <span className="wd-brand-name">WARDEN</span>
+      {/* The count is spelled out as agents AND sessions because the fleet rail
+          counts roots while the forest counts every node: "5 live" next to
+          "3 sessions" reads as a contradiction unless both numbers are named. */}
+      <header className="wd-brand">
+        {/* A real h1, not a styled span. The whole interface is one canvas board,
+            so without it a screen reader lands in an unlabelled document. */}
+        <h1 className="wd-brand-name">WARDEN</h1>
         <span className="wd-brand-tag">the radar for your coding agents</span>
-        <span className="wd-brand-count">{radarModel.agents.length} live</span>
+        <span className="wd-brand-count">
+          {radarModel.agents.length} agent{radarModel.agents.length === 1 ? '' : 's'}
+        </span>
       </header>
 
       <Breadcrumb
@@ -440,12 +541,24 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
 
       <FilterBar agents={radarModel.agents} filter={emphasisFilter} onFilter={onFilter} />
 
-      {/* Remote observation chrome: the host's share/access menu and the observer's
-          watch trigger, tucked into the opposite corner from the brand mark so neither
-          collides with the radar detail dock (which only opens at var(--top-safe)). */}
+      {/* The board is the page's main content. The <main> landmark gives keyboard
+          and screen-reader users a way to skip the chrome straight to it. */}
+      <main className="wd-main" aria-label="Live agent radar" />
+
+      {/* Left rail: the fleet rack. Every live session as a progress strip, with
+          the observer dock ("watch someone else's swarm") docked under it, so the
+          two things that answer "whose agents am I looking at" sit together. */}
+      <FleetRail
+        agents={radarModel.agents}
+        selectedId={selectedId}
+        onSelect={onRadarJump}
+        footer={<PeersPanel onWatchedPeer={onWatchedPeer} />}
+      />
+
+      {/* The host's share/access menu keeps the opposite corner from the brand
+          mark. It sits above var(--top-safe), so it clears the right rail. */}
       <div className="wd-observe-chrome">
         <ShareMenu />
-        <PeersPanel />
       </div>
 
       {/* Unmissable host-side gate: nothing is sent to a new connection until this
@@ -467,12 +580,16 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
       </div>
 
       {/* Honest empty state: the radar is live and watching, there is just nothing
-          running yet. Never reads as broken; it says what to do to populate it. */}
+          running yet. Never reads as broken; it says what to do to populate it.
+          Class is `wd-radar-void`, NOT `wd-radar-empty`: that name is also used by
+          the detail panel's inline "no rows" line, and since the full-screen rules
+          were defined later they won the cascade and dragged the panel's little
+          empty line into the middle of the screen. */}
       {radarModel.agents.length === 0 ? (
-        <div className="wd-radar-empty" aria-live="polite">
-          <span className="wd-radar-empty-pulse" aria-hidden />
-          <span className="wd-radar-empty-title">Watching for live agents</span>
-          <span className="wd-radar-empty-sub">Open Claude Code or Codex and your sessions appear here.</span>
+        <div className="wd-radar-void" aria-live="polite">
+          <span className="wd-radar-void-pulse" aria-hidden />
+          <span className="wd-radar-void-title">Watching for live agents</span>
+          <span className="wd-radar-void-sub">Open Claude Code or Codex and your sessions appear here.</span>
         </div>
       ) : null}
     </div>

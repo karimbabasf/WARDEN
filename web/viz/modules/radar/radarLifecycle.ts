@@ -12,7 +12,8 @@
 // It is a reducer over (prevMap, liveIds, dt) — zero Three.js — so the whole
 // spawn→grow→implode behaviour is unit-tested deterministically. `RadarConstellation`
 // multiplies each mesh's scale by the entry's `scale`. `crossfadeFactor` is the
-// equally-pure tab cross-fade (one overlay, two scenes).
+// equally-pure tab cross-fade (one overlay, two scenes), and `linkDrawProgress` is
+// the equally-pure draw/retract of a parent→child tether (see its own note below).
 
 import { dampValue } from '@/viz/shared/scene/useOrbCamera';
 
@@ -112,6 +113,71 @@ export function reconcileLifecycle(prev: LifecycleMap, live: LiveId[], dt: numbe
 export function isVisible(entry: LifecycleEntry | undefined): boolean {
   if (!entry) return true;
   return entry.phase !== 'gone';
+}
+
+// ── link draw / retract ───────────────────────────────────────────────────────
+// A parent->child tether is not a static rod that blinks out with its child: it is
+// DRAWN along its own length. `linkDrawProgress` is the fraction of the parent->child
+// vector that is currently rendered (0 = fully retracted into the parent, 1 = fully
+// drawn to the child), so the renderer redistributes its existing segments over
+// [parent, parent + progress * (child - parent)] instead of building new geometry:
+//
+//   • spawn: the stroke reaches out FROM the parent and lands on the child just as
+//     the child finishes blooming (it arrives, it does not fade up in place);
+//   • despawn: the stroke is REELED BACK into the parent while the child implodes,
+//     so the child is pulled home rather than orphaned at the end of a dead line.
+//
+// It is one pure value per link, derived from the same lifecycle entries the globes
+// read, so the two are in lockstep by construction. Claude agent-teams and Codex
+// subagents are different upstream concepts and deliberately share this exact path:
+// nothing here may branch on harness.
+
+/** One end of a link: its lifecycle entry, plus whether it was pruned as `gone`. */
+export type LinkEndpointState = { entry?: LifecycleEntry; gone?: boolean };
+
+// The stroke is fully home at 82% of the child's bloom, so the line ARRIVES a beat
+// before the globe settles instead of chasing it forever down the damped tail.
+const LINK_ARRIVE_AT = 0.82;
+// Retract slightly AHEAD of the child's collapse (>1 exponent ⇒ progress < scale), so
+// the last of the line is inside the parent by the time the globe reaches zero.
+const LINK_RETRACT_EXP = 1.25;
+// Reduced motion: one clean state flip at the halfway mark, never a travelling draw.
+const LINK_INSTANT_AT = 0.5;
+
+function clamp01(v: number): number {
+  return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+}
+
+/** How much of a link one endpoint permits to be drawn. */
+function endpointDraw({ entry, gone = false }: LinkEndpointState): number {
+  if (gone || entry?.phase === 'gone') return 0;
+  if (!entry) return 1;
+  const scale = clamp01(entry.scale);
+  if (entry.phase === 'imploding') return Math.pow(scale, LINK_RETRACT_EXP);
+  // The child's own bloom is already an exp-damped ease-out, so the draw rides it
+  // LINEARLY: the head decelerates exactly as the globe settles, which is what puts
+  // the two in lockstep. Easing on top of an ease would front-load the whole stroke
+  // into the first few frames and read as a snap.
+  if (entry.phase === 'spawning') return clamp01(scale / LINK_ARRIVE_AT);
+  return 1;
+}
+
+/**
+ * Drawn fraction of a parent->child link, 0..1. The shorter of the two endpoints
+ * wins, so a link is never longer than either globe it hangs between.
+ *
+ * `instant` (prefers-reduced-motion) collapses the travelling draw to a single
+ * on/off flip at the halfway mark: the link still tracks the child's lifecycle, it
+ * just never animates along its length.
+ */
+export function linkDrawProgress(
+  parent: LinkEndpointState,
+  child: LinkEndpointState,
+  instant = false,
+): number {
+  const p = Math.min(endpointDraw(parent), endpointDraw(child));
+  if (!instant) return p;
+  return p >= LINK_INSTANT_AT ? 1 : 0;
 }
 
 /**

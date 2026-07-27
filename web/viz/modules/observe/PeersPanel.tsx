@@ -41,7 +41,19 @@ function PeerRowView({ peer, onSelect, onRemove }: { peer: PeerRow; onSelect: ()
   );
 }
 
-export function PeersPanel() {
+export type PeersPanelProps = {
+  /**
+   * Lifts the currently-watched peer out of this dock so the war room can park
+   * their constellation beside the local one and truck the camera across to it.
+   *
+   * Called with `(null, null)` when no peer is selected. The dock keeps owning
+   * the LIST and the token form; only the "which board am I looking at" question
+   * is lifted, because that answer belongs to the scene, not to a sidebar.
+   */
+  onWatchedPeer?: (peer: { id: string; label: string } | null, state: ObservedState | null) => void;
+};
+
+export function PeersPanel({ onWatchedPeer }: PeersPanelProps = {}) {
   const [open, setOpen] = useState(false);
   const [peers, setPeers] = useState<PeerRow[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -73,6 +85,18 @@ export function PeersPanel() {
   }, [refreshPeers]);
 
   const selected = peers.find((p) => p.peerId === selectedId) ?? null;
+
+  // Publish the watched peer upward whenever the selection or its frame changes.
+  // Keyed on the frame itself, so every push (`observe:frame`) slides fresh data
+  // into the scene without the dock having to know a constellation exists.
+  useEffect(() => {
+    if (!onWatchedPeer) return;
+    if (!selected) {
+      onWatchedPeer(null, null);
+      return;
+    }
+    onWatchedPeer({ id: selected.peerId, label: selected.hostLabel }, peerState);
+  }, [onWatchedPeer, selected, peerState]);
 
   const fetchPeerState = useCallback((peerId: string) => {
     invoke('observe_peer_state', { peerId })

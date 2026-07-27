@@ -9,13 +9,15 @@
          hardcoded mock forest, free camera. Isolated from the live app so it never
          collides with backend work. The panel pulls its own look from style.css
          (imported by radarLab.tsx); only the dev picker/HUD is styled here. */
+      /* Only the dev picker's own accents live here. --bg, --green and --mono used
+         to be redefined in this block, so the harness kept rendering the OLD
+         phosphor palette and the old system mono after style.css moved on: the one
+         surface built for eyeballing the theme was the one showing a stale one.
+         They now fall through to style.css, which is the point of the harness. */
       :root {
-        --bg: #020403;
-        --green: #76ff9d;
         --orange: #ff8c42;
         --violet: #b98cff;
         --slate: #8fa0b8;
-        --mono: "SF Mono", "WardenMono", Menlo, Consolas, monospace;
       }
       html, body { height: 100%; margin: 0; background: var(--bg); overflow: hidden; }
       #orb-root { position: fixed; inset: 0; }

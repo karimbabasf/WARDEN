@@ -44,7 +44,7 @@ export function PreviewModal({ onClose }: { onClose: () => void }) {
     <div className="wd-observe-preview-scrim" onClick={onClose} role="presentation">
       <div className="wd-observe-preview" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <button type="button" className="wd-observe-preview-close" onClick={onClose} aria-label="Close preview">
-          ✕
+          ×
         </button>
         {error ? (
           <p className="wd-observe-error" role="alert">

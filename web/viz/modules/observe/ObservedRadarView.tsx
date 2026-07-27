@@ -29,10 +29,10 @@ const ACTION_KIND_GLYPH: Record<string, string> = {
   read: '▤',
   write: '◆',
   search: '⌕',
-  run: '❯',
-  tool: '⚙',
-  message: '✎',
-  thinking: '✶',
+  run: '»',
+  tool: '◈',
+  message: '≡',
+  thinking: '◌',
 };
 
 function actionGlyph(kind: string): string {

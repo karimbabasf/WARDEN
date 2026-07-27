@@ -15,8 +15,10 @@
 import type { CSSProperties, KeyboardEvent } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { RadarAgent, RadarContextRow, RadarCurrentAction } from '@/viz/shared/types/radarTypes';
+import type { RadarActivity, RadarAgent, RadarContextRow, RadarCurrentAction } from '@/viz/shared/types/radarTypes';
 import { radarSubtitle, formatTokens as tokens } from '@/viz/shared/types/radarTypes';
+import { FilePreview } from '@/viz/shared/ui/FilePreview';
+import { CompactControl } from '@/viz/shared/ui/CompactControl';
 import { radarHarness } from './radarTheme';
 
 // ── small pure formatters ──────────────────────────────────────────────────────
@@ -83,6 +85,21 @@ function basename(path: string): string {
 }
 
 /**
+ * Split a display path into the directory prefix and the filename.
+ *
+ * A path in a narrow rail always overflows, and plain `text-overflow: ellipsis`
+ * eats the RIGHT end, which is the filename: the one part you actually needed.
+ * Rendering the two spans separately lets the DIRECTORY absorb the truncation
+ * while the filename stays whole, with no `direction: rtl` trick (which reorders
+ * leading punctuation like "~/" and reads wrong).
+ */
+export function splitPath(path: string): { dir: string; base: string } {
+  const cut = path.lastIndexOf('/');
+  if (cut < 0) return { dir: '', base: path };
+  return { dir: path.slice(0, cut + 1), base: path.slice(cut + 1) || path };
+}
+
+/**
  * Reveal a `~`-folded display path in Finder. Fire-and-forget: the caller is a
  * click handler, not an async flow, so a rejection (path moved/deleted since the
  * radar snapshot) is logged and swallowed rather than left as an unhandled
@@ -133,10 +150,10 @@ const ACTIVITY_KIND: Record<string, { glyph: string; label: string }> = {
   read: { glyph: '▤', label: 'Read' },
   write: { glyph: '◆', label: 'Write' },
   search: { glyph: '⌕', label: 'Search' },
-  run: { glyph: '❯', label: 'Run' },
-  tool: { glyph: '⚙', label: 'Tool' },
-  message: { glyph: '✎', label: 'Message' },
-  thinking: { glyph: '✶', label: 'Thinking' },
+  run: { glyph: '»', label: 'Run' },
+  tool: { glyph: '◈', label: 'Tool' },
+  message: { glyph: '≡', label: 'Message' },
+  thinking: { glyph: '◌', label: 'Thinking' },
 };
 function activityKind(kind: string): { glyph: string; label: string } {
   return ACTIVITY_KIND[kind] ?? { glyph: '•', label: kind || 'Event' };
@@ -149,6 +166,15 @@ function activityKind(kind: string): { glyph: string; label: string } {
 // "waiting" spinner implying activity that is not there (honest-viz).
 function CurrentActionSection({ action }: { action: RadarCurrentAction | null }) {
   const now = useTick(action != null);
+  const [open, setOpen] = useState(false);
+  // Collapse the viewer whenever the in-flight call changes target, otherwise the
+  // panel keeps showing the previous file under a new action's heading.
+  const target = action?.target ?? null;
+  const prevTargetRef = useRef(target);
+  if (prevTargetRef.current !== target) {
+    prevTargetRef.current = target;
+    if (open) setOpen(false);
+  }
 
   if (!action) {
     return (
@@ -190,18 +216,34 @@ function CurrentActionSection({ action }: { action: RadarCurrentAction | null })
           </div>
           <div className="wd-action-hero-verb">{action.label || k.label}</div>
           {action.target ? (
-            <button
-              type="button"
-              className="wd-action-hero-target"
-              onClick={() => revealInFinder(action.target as string)}
-              aria-label={`Reveal ${basename(action.target)} in Finder`}
-              title="Reveal in Finder"
-            >
-              <span className="wd-action-hero-target-glyph" aria-hidden>
+            <div className="wd-action-hero-target-row">
+              {/* Two distinct verbs, so neither is a mystery meat icon: OPEN reads
+                  the file inside WARDEN, REVEAL hands it to Finder. */}
+              <button
+                type="button"
+                className="wd-action-hero-target"
+                onClick={() => setOpen((o) => !o)}
+                aria-expanded={open}
+                aria-label={`${open ? 'Hide' : 'View'} ${basename(action.target)}`}
+              >
+                <span className="wd-action-hero-target-glyph" aria-hidden>
+                  {open ? '▾' : '▸'}
+                </span>
+                <span className="wd-path" title={action.target}>
+                  <span className="wd-path-dir">{splitPath(action.target).dir}</span>
+                  <span className="wd-path-base">{splitPath(action.target).base}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="wd-icon-btn"
+                onClick={() => revealInFinder(action.target as string)}
+                aria-label={`Reveal ${basename(action.target)} in Finder`}
+                title="Reveal in Finder"
+              >
                 ⌖
-              </span>
-              <span className="wd-action-hero-target-path">{action.target}</span>
-            </button>
+              </button>
+            </div>
           ) : null}
         </div>
         <div className="wd-action-hero-elapsed">
@@ -209,6 +251,7 @@ function CurrentActionSection({ action }: { action: RadarCurrentAction | null })
           <span className="wd-action-hero-elapsed-label">Elapsed</span>
         </div>
       </div>
+      {open && action.target ? <FilePreview path={action.target} onClose={() => setOpen(false)} /> : null}
     </section>
   );
 }
@@ -261,20 +304,53 @@ function ContextSection({ agent }: { agent: RadarAgent }) {
   const fill = breakdown?.fillPct ?? agent.fillPct;
   const rows = contextRows(agent);
 
+  // The head carried a caret glyph but was a plain div, so it advertised an
+  // expander that did not exist. It is now a real disclosure button, and the
+  // exact API-anchored token split lives behind it: a number worth having, but
+  // not worth spending four permanent rows of a narrow rail on.
+  const [open, setOpen] = useState(false);
+  const exact = agent.composition.exact;
+  const hot = fill >= 0.85;
+
   return (
-    <section className="wd-radar-section wd-context-window" data-context-window style={{ '--heat': heat } as CSSProperties}>
-      <div className="wd-context-head">
+    <section
+      className={`wd-radar-section wd-context-window${hot ? ' is-hot' : ''}`}
+      data-context-window
+      style={{ '--heat': heat } as CSSProperties}
+    >
+      <button
+        type="button"
+        className="wd-context-head"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
         <span className="wd-context-head-label">Context window</span>
         <span className="wd-context-head-value">
           {tokens(used)} / {max > 0 ? tokens(max) : '∞'} ({pct(fill)})
         </span>
         <span className="wd-context-head-caret" aria-hidden>
-          ˅
+          {open ? '▾' : '▸'}
         </span>
-      </div>
+      </button>
       <div className="wd-context-track" aria-hidden>
         <div className="wd-context-fill" style={{ width: `${Math.round(fill * 100)}%` }} />
       </div>
+      {open ? (
+        <dl className="wd-context-exact">
+          <div>
+            <dt>Cache read</dt>
+            <dd>{tokens(exact.cacheRead)}</dd>
+          </div>
+          <div>
+            <dt>Fresh input</dt>
+            <dd>{tokens(exact.fresh)}</dd>
+          </div>
+          <div>
+            <dt>Output</dt>
+            <dd>{tokens(exact.output)}</dd>
+          </div>
+        </dl>
+      ) : null}
       <ul className="wd-context-rows">
         {rows.map((row) => (
           <li
@@ -291,6 +367,10 @@ function ContextSection({ agent }: { agent: RadarAgent }) {
           </li>
         ))}
       </ul>
+      {/* The ARM switch belongs ON the meter: the number you are reacting to and
+          the action you take about it should not be in two different places. */}
+      <CompactControl agentId={agent.id} />
+
       <div className="wd-context-source">
         <span>Live</span>
         <span>{radarHarness(agent.harness).label}</span>
@@ -303,7 +383,89 @@ function ContextSection({ agent }: { agent: RadarAgent }) {
 // No cap: the backend ships the agent's full action history and we render all of
 // it. ~10 rows are visible at once and the feed scrolls (CSS .wd-radar-feed) so
 // you can scroll back to the very first action.
+/**
+ * One feed row, expandable.
+ *
+ * Collapsed it is a single truncated line, which is what makes a 200-row feed
+ * skimmable. Expanded it gives the whole label WRAPPED (a shell command is often
+ * the interesting part and truncation hides exactly the tail you want), the exact
+ * timestamp, and the two file verbs.
+ *
+ * Only ONE row is open at a time (the open key lives on the section, not the row),
+ * so the feed cannot accordion into an unreadable stack.
+ */
+function ActivityRow({
+  row,
+  rowKey,
+  expandedKey,
+  onToggle,
+}: {
+  row: RadarActivity;
+  rowKey: string;
+  expandedKey: string | null;
+  onToggle: (key: string | null) => void;
+}) {
+  const k = activityKind(row.kind);
+  const rel = relativeTime(row.ts);
+  const open = expandedKey === rowKey;
+  const [viewing, setViewing] = useState(false);
+
+  return (
+    <li className={`wd-radar-feed-row${open ? ' is-open' : ''}`} data-activity-row data-kind={row.kind}>
+      <button
+        type="button"
+        className="wd-radar-feed-main"
+        aria-expanded={open}
+        onClick={() => {
+          onToggle(open ? null : rowKey);
+          if (open) setViewing(false);
+        }}
+      >
+        <span className={`wd-radar-feed-glyph is-${row.kind}`} title={k.label} aria-hidden>
+          {k.glyph}
+        </span>
+        <span className="wd-radar-feed-label">
+          <span className="wd-radar-feed-kind">{k.label}</span>
+          {row.label}
+        </span>
+        {rel ? <time className="wd-radar-feed-time">{rel}</time> : null}
+        <span className="wd-radar-feed-caret" aria-hidden>
+          {open ? '▾' : '▸'}
+        </span>
+      </button>
+
+      {open ? (
+        <div className="wd-radar-feed-detail">
+          <p className="wd-radar-feed-full">{row.label || k.label}</p>
+          <div className="wd-radar-feed-meta">
+            {row.ts ? <span>{row.ts}</span> : null}
+            {row.target ? (
+              <>
+                <button type="button" className="wd-mini-btn" onClick={() => setViewing((v) => !v)}>
+                  {viewing ? 'Hide file' : 'View file'}
+                </button>
+                <button
+                  type="button"
+                  className="wd-mini-btn"
+                  onClick={() => revealInFinder(row.target as string)}
+                  aria-label={`Reveal ${basename(row.target)} in Finder`}
+                >
+                  Reveal
+                </button>
+              </>
+            ) : (
+              <span className="wd-radar-feed-nofile">No single file for this row</span>
+            )}
+          </div>
+          {viewing && row.target ? <FilePreview path={row.target} onClose={() => setViewing(false)} /> : null}
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
 function ActivitySection({ agent }: { agent: RadarAgent }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   // Newest-first. Sort by parsed ts desc; entries with an unparseable ts keep
   // their original order and sink to the end (stable, never throws on bad data).
   const ordered = agent.recentActivity
@@ -321,33 +483,9 @@ function ActivitySection({ agent }: { agent: RadarAgent }) {
         <div className="wd-radar-empty wd-radar-feed-empty">No recent activity</div>
       ) : (
         <ul className="wd-radar-feed">
-          {ordered.map(({ a, i }) => {
-            const k = activityKind(a.kind);
-            const rel = relativeTime(a.ts);
-            return (
-              <li key={`${a.ts}-${i}`} className="wd-radar-feed-row" data-activity-row data-kind={a.kind}>
-                <span className={`wd-radar-feed-glyph is-${a.kind}`} title={k.label} aria-hidden>
-                  {k.glyph}
-                </span>
-                <span className="wd-radar-feed-label">
-                  <span className="wd-radar-feed-kind">{k.label}</span>
-                  {a.label}
-                </span>
-                {rel ? <time className="wd-radar-feed-time">{rel}</time> : null}
-                {a.target ? (
-                  <button
-                    type="button"
-                    className="wd-radar-feed-reveal"
-                    onClick={() => revealInFinder(a.target as string)}
-                    aria-label={`Reveal ${basename(a.target)} in Finder`}
-                    title="Reveal in Finder"
-                  >
-                    ⌖
-                  </button>
-                ) : null}
-              </li>
-            );
-          })}
+          {ordered.map(({ a, i }) => (
+            <ActivityRow key={`${a.ts}-${i}`} row={a} rowKey={`${a.ts}-${i}`} expandedKey={expanded} onToggle={setExpanded} />
+          ))}
         </ul>
       )}
     </section>
@@ -551,7 +689,9 @@ function EditableTitle({ agentId, heading }: { agentId: string; heading: string 
             aria-label={`Rename ${shown}`}
             title="Rename"
           >
-            ✎
+            {/* The word, not a pencil glyph. It only appears on header hover, and a
+                label is unambiguous where an icon has to be learned. */}
+            Rename
           </button>
         ) : null}
         {error ? (
@@ -619,7 +759,7 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
         </div>
         {onClose ? (
           <button className="wd-detail-close" type="button" onClick={onClose} aria-label="Close detail">
-            ✕
+            ×
           </button>
         ) : null}
       </div>
