@@ -100,6 +100,25 @@ pub enum ToolKind {
 pub enum ToolStatus {
     Ok,
     Error,
+    /// Started and not finished. Every harness models a tool call as a start record
+    /// and a separate end record joined by an id, so "in flight" was previously only
+    /// derivable at render time by subtracting the ends from the starts (see
+    /// `radar::agent::in_flight_tool_call`). This makes it a first-class value of the
+    /// IR instead, so a harness that reports the state DIRECTLY has somewhere to put
+    /// it: Cursor mutates one row in place and carries `toolFormerData.status`, whose
+    /// `loading` maps here with no join at all. No adapter emits it today, since
+    /// neither Claude nor Codex writes an in-flight record.
+    Running,
+}
+
+impl ToolStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Running => "running",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]

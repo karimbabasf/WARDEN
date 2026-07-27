@@ -85,13 +85,7 @@ pub(crate) fn build_agent(
 
     let recent_activity = recent_activity(&events);
     let current_action = current_action(&events, &status, chrono::Utc::now());
-    // The harness's own title for this session, recorded by whichever adapter found one.
-    let title = s
-        .meta
-        .get("session_title")
-        .and_then(|v| v.as_str())
-        .map(|t| crate::util::truncate_chars(t.trim(), 120))
-        .filter(|t| !t.is_empty());
+    let title = session_title(s);
     let est_cost_usd = est_cost_usd(&model, &exact);
     let task = first_task(&events);
     let (label, nickname, role, origin) = identity(s, task);
@@ -135,6 +129,23 @@ pub(crate) fn build_agent(
         started_at: s.started_at.to_rfc3339(),
         est_cost_usd,
     }
+}
+
+/// The harness's OWN name for this session, recorded by whichever adapter found one.
+///
+/// Precedence is by AUTHORITY, not recency: a title the operator typed
+/// (`session_title_custom`, Claude's `custom-title` record) outranks the one the
+/// harness generated for itself (`session_title_ai`, Claude's `ai-title` record, and
+/// Codex's thread name), which outranks the legacy single-slot key. The two Claude
+/// sources are stored under separate meta keys precisely so this order survives
+/// incremental ingest: a tail slice that carries only a fresh `ai-title` merges into
+/// meta on its own key and cannot clobber a custom title set in an earlier slice.
+pub(crate) fn session_title(s: &Session) -> Option<String> {
+    ["session_title_custom", "session_title_ai", "session_title"]
+        .iter()
+        .filter_map(|k| s.meta.get(*k).and_then(|v| v.as_str()))
+        .map(|t| crate::util::truncate_chars(t.trim(), 120))
+        .find(|t| !t.is_empty())
 }
 
 fn first_non_empty_model_id(s: &Session) -> Option<String> {
@@ -271,7 +282,35 @@ pub(crate) fn tool_call_abs_path(tool: &str, input: &serde_json::Value) -> Optio
         }
         return found.and_then(absolute_or_none);
     }
+    // Codex has NO read tool. It reads a file by shelling out (`sed -n '1,240p' <path>`,
+    // `cat <path>`) and searches with `rg`/`grep`, so the only place the file being read
+    // is written down is the command string. Without this, every Codex read and search
+    // renders as "reading" with no target, which is the "it does not catch what it is
+    // reading" gap. Restricted to the verbs `classify_shell_command` already calls read
+    // or search: a `run` command's arguments are not a file it is opening.
+    if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
+        return shell_command_read_path(cmd);
+    }
     None
+}
+
+/// The file a read/search shell command targets, as an absolute path, or `None`.
+///
+/// Takes the LAST absolute-looking token, which is where the path sits in every real
+/// form of these commands (`sed -n '1,240p' /a/b.rs`, `rg -n pattern /a/src`), and only
+/// for commands whose verb is already classified read or search. Redirections and pipes
+/// end the search: in `cat a.txt > /tmp/out` the trailing path is a destination, not the
+/// file being read, and guessing wrong here means revealing the wrong file.
+fn shell_command_read_path(cmd: &str) -> Option<String> {
+    let kind = classify_shell_command(cmd).map(|(k, _)| k)?;
+    if kind != "read" && kind != "search" {
+        return None;
+    }
+    cmd.split_whitespace()
+        .take_while(|tok| !matches!(*tok, "|" | ">" | ">>" | "2>" | "&&" | ";"))
+        .filter(|tok| !tok.starts_with('-'))
+        .filter_map(|tok| absolute_or_none(tok.trim_matches(['\'', '"', '`'])))
+        .last()
 }
 
 /// Keep only absolute paths. A bare basename or a relative fragment cannot be revealed
@@ -281,25 +320,43 @@ fn absolute_or_none(p: &str) -> Option<String> {
     (!p.is_empty() && p.starts_with('/')).then(|| p.to_string())
 }
 
-/// How long an unresolved tool call may sit before the radar stops calling it current.
-/// Generous enough for a genuinely slow build or test run, short enough that an abandoned
-/// call does not haunt the panel.
-const CURRENT_ACTION_MAX_MS: u64 = 10 * 60 * 1000;
+/// Past this an in-flight call is presented as LONG RUNNING (its label carries an age,
+/// e.g. `Read big.log (12m)`) instead of vanishing. A slow build, a big `Bash`, or a
+/// slow MCP call reading as idle is exactly the "it does not catch what the agent is
+/// doing" failure, so a slow call must degrade to a duration, never to silence.
+const CURRENT_ACTION_LONG_RUNNING_MS: u64 = 10 * 60 * 1000;
 
-/// The tool call this agent has started and not yet finished, if any.
+/// How long a call may sit as the NEWEST thing in a transcript before the radar stops
+/// treating it as in flight. Silence this long is better explained by a wedged harness
+/// than by a call still running, and claiming "reading X" for an agent that is gone is
+/// the fabricated signal the honest-viz rule forbids.
 ///
-/// A `ToolCall` whose `call_id` never gets a matching `ToolResult` is in flight. Gated on
-/// `Working`: a closed or terminated session's last call is unfinished only because the
-/// session died mid-call, and rendering "editing foo.rs" for an agent that is gone would
-/// be exactly the fabricated signal the honest-viz rule forbids.
-pub(crate) fn current_action(
+/// Deliberately hours, not minutes. It is only reached when NOTHING was written after
+/// the call (a long call inside a busy session is anchored by the events around it), and
+/// the one call that legitimately runs that long is a synchronous subagent spawn: the
+/// parent transcript goes silent for the child's whole run, and "Agent build the radar
+/// (1h20m)" is true for every minute of it. The dead-session case this guards against is
+/// already covered upstream, where a dead PID and an archived rollout both leave the
+/// live set entirely.
+const CURRENT_ACTION_WEDGED_MS: u64 = 4 * 60 * 60 * 1000;
+
+/// The tool call this agent has started and not yet finished, if any: the newest
+/// `ToolCall` whose `call_id` never got a matching `ToolResult`, and which the turn has
+/// not visibly moved past.
+///
+/// This is a FACT read off the transcript, not an inference from timers, so it is the
+/// primary liveness evidence rather than something gated behind a liveness verdict
+/// (`super::status::agent_status` promotes an otherwise-idle session on the strength of
+/// it). Two guards keep it honest:
+/// * a later `AssistantText`/`UserPrompt` means the turn moved on without the call ever
+///   returning (an aborted turn, an unparsed record shape) so the call is not current.
+///   A later `ToolResult` for a DIFFERENT call is fine: Claude issues parallel calls in
+///   one assistant record and resolves them independently;
+/// * past [`CURRENT_ACTION_WEDGED_MS`] of total transcript silence the call is wedged.
+pub(crate) fn in_flight_tool_call(
     events: &[(crate::ir::Turn, crate::ir::EventRecord)],
-    status: &AgentStatus,
     now: chrono::DateTime<chrono::Utc>,
-) -> Option<RadarAction> {
-    if !matches!(status, AgentStatus::Working) {
-        return None;
-    }
+) -> Option<&crate::ir::EventRecord> {
     let mut resolved: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (_, e) in events {
         match &e.event {
@@ -321,6 +378,20 @@ pub(crate) fn current_action(
             _ => {}
         }
     }
+    // The newest point at which the conversation visibly moved past a tool call: a
+    // final assistant message or a fresh operator prompt. A call older than this never
+    // returned and is not what the agent is doing now.
+    let turn_advanced_at = events
+        .iter()
+        .filter(|(_, e)| {
+            matches!(
+                e.event,
+                Event::AssistantText { .. } | Event::UserPrompt { .. }
+            )
+        })
+        .map(|(_, e)| e.ts)
+        .max();
+
     // A Codex `apply_patch` is completed by its `patch_apply_end` FileSnapshot, which
     // shares the call_id, so it is already covered by the ToolResult sweep above where
     // the pair exists. Walk newest-first and take the first unresolved call.
@@ -331,39 +402,76 @@ pub(crate) fn current_action(
             .then(b.id.cmp(&a.id))
     });
     for (_, e) in ordered {
-        let Event::ToolCall {
-            tool, input, call_id, ..
-        } = &e.event
-        else {
+        let Event::ToolCall { call_id, .. } = &e.event else {
             continue;
         };
         if resolved.contains(call_id.as_str()) {
             continue;
         }
-        // Unlike the activity feed, an in-flight apply_patch is NOT deduped away: the
-        // FileSnapshot that would replace it has not arrived yet, so this is the only
-        // evidence the write is happening.
-        let (kind, label) = tool_activity(tool, input)
-            .unwrap_or_else(|| ("write", format!("Edit {}", short_tool_name(tool))));
-        let abs = tool_call_abs_path(tool, input);
-        let elapsed_ms = (now - e.ts).num_milliseconds().max(0) as u64;
-        // A call with no completion record at all (an aborted turn, a harness crash, a
-        // record shape we do not parse) would otherwise sit on screen as "editing X"
-        // forever. Past the cap we report nothing rather than something false: an absent
-        // current action means idle, and that promise is what makes it safe to render big.
-        if elapsed_ms > CURRENT_ACTION_MAX_MS {
+        if turn_advanced_at.is_some_and(|ts| ts > e.ts) {
             return None;
         }
-        return Some(RadarAction {
-            kind: kind.to_string(),
-            tool: short_tool_name(tool),
-            label,
-            target: abs.as_deref().map(crate::util::display_path),
-            started_at: e.ts.to_rfc3339(),
-            elapsed_ms,
-        });
+        let elapsed_ms = (now - e.ts).num_milliseconds().max(0) as u64;
+        if elapsed_ms > CURRENT_ACTION_WEDGED_MS {
+            return None;
+        }
+        return Some(e);
     }
     None
+}
+
+/// The in-flight call rendered for the detail panel.
+///
+/// Gated on the agent still being present: a closed or terminated session's last call is
+/// unfinished only because the session died mid-call, and rendering "editing foo.rs" for
+/// an agent that is gone is fabricated signal. `Idle` is deliberately NOT gated out: an
+/// unresolved call is itself the evidence the agent is mid-step (it is what
+/// `agent_status` promotes on), so refusing to render one here would hide the live read
+/// or edit this whole path exists to show.
+pub(crate) fn current_action(
+    events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+    status: &AgentStatus,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<RadarAction> {
+    if matches!(status, AgentStatus::Closed | AgentStatus::Terminated) {
+        return None;
+    }
+    let e = in_flight_tool_call(events, now)?;
+    let Event::ToolCall { tool, input, .. } = &e.event else {
+        return None;
+    };
+    // Unlike the activity feed, an in-flight apply_patch is NOT deduped away: the
+    // FileSnapshot that would replace it has not arrived yet, so this is the only
+    // evidence the write is happening.
+    let (kind, label) = tool_activity(tool, input)
+        .unwrap_or_else(|| ("write", format!("Edit {}", short_tool_name(tool))));
+    let elapsed_ms = (now - e.ts).num_milliseconds().max(0) as u64;
+    Some(RadarAction {
+        kind: kind.to_string(),
+        tool: short_tool_name(tool),
+        label: long_running_label(label, elapsed_ms),
+        target: tool_call_abs_path(tool, input)
+            .as_deref()
+            .map(crate::util::display_path),
+        started_at: e.ts.to_rfc3339(),
+        elapsed_ms,
+    })
+}
+
+/// Append a coarse age to a call that has outlived [`CURRENT_ACTION_LONG_RUNNING_MS`],
+/// so `Read big.log` becomes `Read big.log (12m)`. Shorter calls are left alone: an age
+/// on every row is noise, and `RadarAction.elapsed_ms` already carries the exact number
+/// for a face that wants to render its own timer.
+fn long_running_label(label: String, elapsed_ms: u64) -> String {
+    if elapsed_ms <= CURRENT_ACTION_LONG_RUNNING_MS {
+        return label;
+    }
+    let minutes = elapsed_ms / 60_000;
+    if minutes < 60 {
+        format!("{label} ({minutes}m)")
+    } else {
+        format!("{label} ({}h{}m)", minutes / 60, minutes % 60)
+    }
 }
 
 /// Classify a tool call into `(kind, label)`. Codex funnels every action through the
@@ -434,12 +542,46 @@ fn classify_codex_inner_tool(inner: &str) -> Option<(&'static str, String)> {
 fn classify_named_tool(tool: &str, input: &serde_json::Value) -> (&'static str, String) {
     let kind = match tool {
         "Read" | "NotebookRead" => "read",
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "write",
-        "Grep" | "Glob" | "LS" => "search",
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "Artifact" => "write",
+        // WebSearch/WebFetch/ToolSearch are lookups, the same act as a Grep over the
+        // repo, so they share the search glyph rather than the nondescript tool bucket.
+        "Grep" | "Glob" | "LS" | "WebSearch" | "WebFetch" | "ToolSearch" => "search",
         "Bash" | "BashOutput" => "run",
+        // Launching a subagent is a STRUCTURAL event (a new node in the forest), not a
+        // nondescript tool call, so it gets its own kind. `Task` is the older spelling.
+        "Agent" | "Task" => "spawn",
+        "Skill" => "skill",
         _ => "tool",
     };
-    (kind, tool_target_label(tool, input))
+    (kind, named_tool_label(tool, input))
+}
+
+/// A label for the tool names whose target does not live in `file_path`/`command`/
+/// `pattern`: a subagent spawn is named by WHAT it was asked to do, a skill by which
+/// skill, a web lookup by its query or URL. Everything else falls through to the
+/// generic file/command/pattern label.
+fn named_tool_label(tool: &str, input: &serde_json::Value) -> String {
+    let s = |k: &str| {
+        input
+            .get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    let named = match tool {
+        // `description` is the 3-to-5 word task the operator gave the subagent, and
+        // `name` is the handle it is addressable by: both beat "Agent".
+        "Agent" | "Task" => s("description").or_else(|| s("name")).or_else(|| s("subagent_type")),
+        "Skill" => s("skill"),
+        "ToolSearch" => s("query"),
+        "WebSearch" => s("query"),
+        "WebFetch" => s("url"),
+        _ => None,
+    };
+    match named {
+        Some(t) => format!("{} {}", short_tool_name(tool), crate::util::truncate_chars(t, 64)),
+        None => tool_target_label(tool, input),
+    }
 }
 
 /// A short label for a file-write snapshot: the edited file, plus a count when several
@@ -666,31 +808,90 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_unresolved_call_is_dropped_rather_than_shown_forever() {
+    fn a_wedged_unresolved_call_is_dropped_rather_than_shown_forever() {
         let events = vec![tool_call(1, "Edit", "c1")];
         // Comfortably past the cap: `ev` stamps its own `now`, so a one-millisecond
         // margin would land exactly on the boundary.
         let long_after =
-            Utc::now() + chrono::Duration::milliseconds(CURRENT_ACTION_MAX_MS as i64 + 60_000);
+            Utc::now() + chrono::Duration::milliseconds(CURRENT_ACTION_WEDGED_MS as i64 + 60_000);
         assert!(
             current_action(&events, &AgentStatus::Working, long_after).is_none(),
             "an abandoned call must not haunt the panel"
         );
     }
 
+    /// The old behaviour dropped a call the moment it passed 10 minutes, so a slow build
+    /// or a big Read read as idle. It now degrades to an age instead of to silence.
     #[test]
-    fn only_a_working_agent_has_a_current_action() {
+    fn a_long_running_call_is_shown_with_its_age_not_dropped() {
+        let events = vec![tool_call(1, "Bash", "c1")];
+        // `ev` stamps its own `now`, so add a second of slack to land inside the minute
+        // rather than on its boundary.
+        let later = Utc::now() + chrono::Duration::milliseconds(12 * 60 * 1000 + 1_000);
+        let a = current_action(&events, &AgentStatus::Working, later)
+            .expect("a slow call must still be reported");
+        assert!(a.label.ends_with("(12m)"), "got {:?}", a.label);
+        assert!(a.elapsed_ms >= 12 * 60 * 1000);
+
+        let much_later = Utc::now() + chrono::Duration::milliseconds(95 * 60 * 1000 + 1_000);
+        let a = current_action(&events, &AgentStatus::Working, much_later).expect("still current");
+        assert!(a.label.ends_with("(1h35m)"), "got {:?}", a.label);
+    }
+
+    /// An unresolved call is the evidence the agent is mid-step, so it must render for an
+    /// `Idle` verdict too (`agent_status` promotes on exactly this). A CLOSED or
+    /// TERMINATED agent is gone, and its dangling call must never claim it is editing.
+    #[test]
+    fn only_a_present_agent_has_a_current_action() {
         let events = vec![tool_call(1, "Edit", "c1")];
-        for s in [
-            AgentStatus::Idle,
-            AgentStatus::Closed,
-            AgentStatus::Terminated,
-        ] {
+        assert!(
+            current_action(&events, &AgentStatus::Idle, Utc::now()).is_some(),
+            "an in-flight call must survive a stale idle verdict"
+        );
+        for s in [AgentStatus::Closed, AgentStatus::Terminated] {
             assert!(
                 current_action(&events, &s, Utc::now()).is_none(),
-                "a non-working agent must not claim to be mid-edit"
+                "an agent that is gone must not claim to be mid-edit"
             );
         }
+    }
+
+    /// A tool call the turn already moved past (a final assistant message landed after
+    /// it) never returned. Reporting it would pin a dead action to the panel.
+    #[test]
+    fn a_call_the_turn_moved_past_is_not_current() {
+        let events = vec![
+            tool_call(1, "Edit", "c1"),
+            ev(
+                2,
+                Event::AssistantText {
+                    text: "done".into(),
+                },
+            ),
+        ];
+        assert!(current_action(&events, &AgentStatus::Working, Utc::now()).is_none());
+    }
+
+    /// Claude issues parallel calls in ONE assistant record and resolves them
+    /// independently, so a result for a sibling call must not retire the one still open.
+    #[test]
+    fn a_sibling_result_does_not_retire_a_parallel_call() {
+        let events = vec![
+            tool_call(1, "Read", "c1"),
+            tool_call(1, "Read", "c2"),
+            ev(
+                3,
+                Event::ToolResult {
+                    call_id: "c1".into(),
+                    status: crate::ir::ToolStatus::Ok,
+                    bytes: 0,
+                    summary: None,
+                },
+            ),
+        ];
+        let a = current_action(&events, &AgentStatus::Working, Utc::now())
+            .expect("the unresolved sibling is still in flight");
+        assert_eq!(a.tool, "Read");
     }
 
     #[test]

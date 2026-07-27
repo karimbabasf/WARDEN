@@ -13,6 +13,8 @@
 //! * [`composition`] — exact + estimated context composition (pure).
 //! * [`status`] — per-session working/idle/terminated verdict from conversation state.
 //! * [`context`] — context-window breakdown + cost estimation.
+//! * `pricing` — model price/context-window ground truth (a data table, no
+//!   `radar_state` types of its own; used by `context` and `composition`).
 //! * [`identity`] — agent naming/identity + subagent-termination decisions.
 //! * [`agent`] — per-agent construction + recent-activity tailing.
 //! * [`teams`] — Claude agent-team rosters, the source of real member names.
@@ -29,6 +31,7 @@ mod context;
 mod identity;
 mod live;
 mod model;
+mod pricing;
 mod status;
 mod teams;
 

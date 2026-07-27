@@ -4,6 +4,7 @@
 
 use super::composition::{estimate_composition, tokenize_len, ContextSize, ExactComposition};
 use super::model::{RadarContextBreakdown, RadarContextRow, RadarEstimated};
+use super::pricing;
 use crate::ir::{Event, Harness, Session, ToolKind};
 use crate::store::Store;
 use std::collections::HashMap;
@@ -421,27 +422,76 @@ fn memory_file_count(events: &[(crate::ir::Turn, crate::ir::EventRecord)]) -> u3
     count.min(u32::MAX as usize) as u32
 }
 
-/// Rough USD cost for the turn's tokens from a small per-model price table
-/// ($/1M tokens). `None` when the model is unknown — honest, never fabricated.
+/// Rough USD cost for the turn's tokens, from the model pricing table in
+/// `pricing.rs`. `None` only when the model carries no recognizable vendor
+/// signature at all (honest, never fabricated); a recognized vendor with an
+/// unrecognized specific id still gets a same-tier approximate estimate rather
+/// than vanishing (see `pricing::price_for_model`'s fallback policy).
 pub(crate) fn est_cost_usd(model: &Option<String>, exact: &ExactComposition) -> Option<f64> {
-    let m = model.as_deref()?.to_ascii_lowercase();
-    // (input $/1M, output $/1M).
-    let (in_rate, out_rate) = if m.contains("opus") {
-        (15.0, 75.0)
-    } else if m.contains("sonnet") {
-        (3.0, 15.0)
-    } else if m.contains("haiku") {
-        (0.80, 4.0)
-    } else if m.contains("gpt-5") || m.contains("codex") {
-        (1.25, 10.0)
-    } else {
-        return None;
-    };
-    // Cache reads bill ~10× cheaper than fresh input across these providers, so
-    // split the bill: cache_read at the cache-read rate, fresh at the input rate.
-    const CACHE_READ_FACTOR: f64 = 0.1;
-    let cost = (exact.cache_read as f64 / 1_000_000.0) * in_rate * CACHE_READ_FACTOR
-        + (exact.fresh as f64 / 1_000_000.0) * in_rate
-        + (exact.output as f64 / 1_000_000.0) * out_rate;
+    let model = model.as_deref()?;
+    let resident = exact.cache_read.saturating_add(exact.fresh);
+    let lookup = pricing::price_for_model(model, resident)?;
+    let rate = lookup.pricing;
+    let cache_read_rate = rate.input * pricing::CACHE_READ_MULTIPLIER;
+
+    // `exact.fresh` merges genuinely new input tokens with cache-WRITE
+    // (`cache_creation`) tokens (see `ExactComposition` / `exact_composition` in
+    // composition.rs): the pipeline does not carry that split this far
+    // downstream, so cache-write tokens still bill at the plain input rate here,
+    // not the real 1.25x (5-minute TTL) premium `pricing.rs` now models.
+    // Fixing this needs a new field threaded from `agent.rs`'s
+    // `exact_composition` call site, outside this module's file ownership;
+    // reported rather than worked around here.
+    let cost = (exact.cache_read as f64 / 1_000_000.0) * cache_read_rate
+        + (exact.fresh as f64 / 1_000_000.0) * rate.input
+        + (exact.output as f64 / 1_000_000.0) * rate.output;
     Some(cost)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage(cache_read: u64, fresh: u64, output: u64) -> ExactComposition {
+        ExactComposition { cache_read, fresh, output }
+    }
+
+    /// The corrected Opus rate ($5.00 / $25.00, not the retired $15.00 / $75.00
+    /// the old table used for every "opus" match): cache reads bill at 0.1x
+    /// input ($0.50 for 1M cache-read tokens), fresh input at the full input
+    /// rate ($5.00 for 1M fresh tokens), and cache reads stay strictly cheaper
+    /// than the same volume of fresh input.
+    #[test]
+    fn est_cost_bills_the_corrected_opus_5_rate() {
+        let model = Some("claude-opus-4-8".to_string());
+
+        let cache_only = usage(1_000_000, 0, 0);
+        let cost = est_cost_usd(&model, &cache_only).expect("opus is priced");
+        assert!((cost - 0.50).abs() < 1e-6, "1M cache-read tokens at the corrected $5 input rate, got {cost}");
+
+        let fresh_only = usage(0, 1_000_000, 0);
+        let fresh_cost = est_cost_usd(&model, &fresh_only).expect("opus is priced");
+        assert!((fresh_cost - 5.0).abs() < 1e-6, "1M fresh tokens at the corrected $5 input rate, got {fresh_cost}");
+
+        assert!(cost < fresh_cost, "cache reads must stay cheaper than fresh input");
+    }
+
+    /// Defect: claude-fable-5 used to return NO cost estimate at all. It must
+    /// now price like any other known model.
+    #[test]
+    fn est_cost_prices_fable_5() {
+        let model = Some("claude-fable-5".to_string());
+        let exact = usage(0, 1_000_000, 0);
+        let cost = est_cost_usd(&model, &exact).expect("fable 5 must be priced");
+        assert!((cost - 10.0).abs() < 1e-6, "1M fresh tokens at the $10 input rate, got {cost}");
+    }
+
+    /// A model with no recognizable vendor signature at all stays nullable, and
+    /// a session with no model at all stays nullable too.
+    #[test]
+    fn est_cost_is_none_for_a_truly_unknown_model_or_no_model() {
+        let exact = usage(1_000_000, 0, 0);
+        assert_eq!(est_cost_usd(&Some("mystery".into()), &exact), None);
+        assert_eq!(est_cost_usd(&None, &exact), None);
+    }
 }

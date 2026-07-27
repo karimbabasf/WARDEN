@@ -29,7 +29,7 @@ use crate::util::{
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -439,6 +439,12 @@ fn parse_slice(
     // (e.g. turn_context before task_started) open a fresh synthetic turn.
     let mut cur_turn: Option<String> = None;
     let mut meta = json!({"ignored_record_types": {}});
+    // The name Codex itself gave this thread, from its session index. Stored under the
+    // harness-generated tier so it outranks the plan-H1 fallback below and is outranked
+    // by anything the operator typed (ranked in `radar::agent::session_title`).
+    if let Some(name) = codex_thread_name(&external_id) {
+        meta["session_title_ai"] = json!(name);
+    }
 
     // Open a new Turn and make it current. `role` is Assistant for model turns,
     // System for mode/boundary turns.
@@ -886,6 +892,76 @@ fn remember_model_context_window(meta: &mut Value, payload: &Value) {
     if let Some(obj) = meta.as_object_mut() {
         obj.insert("model_context_window".to_string(), json!(window));
     }
+}
+
+/// `~/.codex/session_index.jsonl`: one `{id, thread_name, updated_at}` line per thread,
+/// where `id` is the rollout uuid this adapter uses as `external_id`. Sits next to the
+/// `sessions/` directory, so it follows the `WARDEN_CODEX_SESSIONS` override.
+fn codex_session_index_path() -> PathBuf {
+    default_codex_sessions()
+        .parent()
+        .map(|p| p.join("session_index.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("session_index.jsonl"))
+}
+
+/// The memoized session index: the file mtime it was parsed at, plus `id -> thread_name`.
+type CodexTitleCache = std::sync::Mutex<Option<(std::time::SystemTime, HashMap<String, String>)>>;
+
+/// The name Codex gave a thread, from its session index.
+///
+/// This is the PRIMARY Codex session name. A rollout carries no title of its own:
+/// `session_meta` has no title field and `turn_context.summary` is the literal string
+/// "auto" in every record (the reasoning-summary setting, not a name), so the only
+/// in-transcript candidate is the H1 of a completed Plan item, which is both rare and
+/// late. The index is plain JSONL, is written early in a thread's life, and on this
+/// machine names every thread it lists.
+///
+/// The parsed index is memoized and invalidated by mtime: a backfill parses hundreds of
+/// rollouts against one small file, while a live thread that gets named mid-session is
+/// still picked up on the next ingest.
+fn codex_thread_name(external_id: &str) -> Option<String> {
+    static INDEX: std::sync::OnceLock<CodexTitleCache> = std::sync::OnceLock::new();
+    let path = codex_session_index_path();
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+    let cell = INDEX.get_or_init(|| std::sync::Mutex::new(None));
+    // A poisoned lock means another thread panicked mid-parse. A missing title is a
+    // cosmetic loss, never a reason to take the ingest down with it.
+    let Ok(mut guard) = cell.lock() else {
+        return None;
+    };
+    if guard.as_ref().map(|(cached, _)| *cached) != Some(mtime) {
+        *guard = Some((mtime, parse_codex_session_index(&path)));
+    }
+    guard
+        .as_ref()
+        .and_then(|(_, map)| map.get(external_id).cloned())
+}
+
+/// Parse the session index into `id -> thread_name`. Unreadable file or unparseable
+/// line yields no entry rather than an error: this is a naming nicety layered on top of
+/// the transcripts, and it must never block a session from being ingested.
+fn parse_codex_session_index(path: &Path) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let (Some(id), Some(name)) = (
+            v.get("id").and_then(Value::as_str),
+            v.get("thread_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|n| !n.is_empty()),
+        ) else {
+            continue;
+        };
+        // Last line wins: the index is append-friendly and a renamed thread reappears.
+        out.insert(id.to_string(), truncate_chars(name, 120));
+    }
+    out
 }
 
 /// The title line of a completed Codex Plan item: the markdown's first line, when it is

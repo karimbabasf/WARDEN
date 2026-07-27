@@ -40,20 +40,35 @@ fn clean_task_label(raw: &str) -> String {
     crate::util::truncate_chars(cleaned, 60)
 }
 
-/// The radar display label. Roots are named by their project folder; subagents by a
-/// per-parent ordinal ("subagent N"). `root_dup_ordinal` is `Some(n)` only when
-/// several live roots share `cwd_basename` — `n == 1` (the oldest) keeps the bare
-/// name, `n >= 2` gets a circled disambiguator. `fallback` is the identity-derived
-/// label, used only for a root with no project folder.
+/// The radar display label.
+///
+/// `title` is the harness's OWN name for the session and wins whenever it exists: the
+/// operator's `custom-title`, else the auto-generated `ai-title` / Codex thread name
+/// (ranked in `super::agent::session_title`). It is what the operator actually recognises
+/// ("build frontier website"), and without it two agents in one repo read as "WARDEN" and
+/// "WARDEN ②" even when the harness has already named them distinctly.
+///
+/// Otherwise roots are named by their project folder and subagents by a per-parent
+/// ordinal ("subagent N"). `root_dup_ordinal` is `Some(n)` only when several live roots
+/// share `cwd_basename`: `n == 1` (the oldest) keeps the bare name, `n >= 2` gets a
+/// circled disambiguator. `fallback` is the identity-derived label, used only for a root
+/// with no project folder.
 pub(crate) fn display_label(
     depth: u32,
+    title: Option<&str>,
     cwd_basename: Option<&str>,
     subagent_ordinal: Option<u32>,
     root_dup_ordinal: Option<u32>,
     fallback: &str,
 ) -> String {
+    // Subagents keep their positional naming: a title record belongs to the SESSION, and
+    // a subagent sharing its parent's transcript title would make every child read as the
+    // parent. Their real names come from the team roster / sidecar description upstream.
     if depth >= 1 {
         return format!("subagent {}", subagent_ordinal.unwrap_or(1));
+    }
+    if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        return title.to_string();
     }
     match cwd_basename {
         Some(name) if !name.is_empty() => match root_dup_ordinal {
@@ -156,9 +171,16 @@ pub(crate) fn identity(
         .get("agent_nickname")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    // Which SURFACE this agent is being driven from. Codex records it as `originator`
+    // ("Codex Desktop", "codex_vscode"); Claude records the same idea per envelope as
+    // `entrypoint` (`cli`, `claude-vscode`, `claude-desktop`, `sdk-*`), which the adapter
+    // lifts onto meta. Both land here so the face can say terminal vs IDE panel with one
+    // field, whichever harness it is. Values pass through verbatim rather than being
+    // mapped to a house vocabulary: the harness's own word is the honest one.
     let origin = s
         .meta
         .get("originator")
+        .or_else(|| s.meta.get("entrypoint"))
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
