@@ -14,8 +14,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { invoke } from '@tauri-apps/api/core';
 import { RadarDetailPanel, relativeTime, uptime } from './RadarDetailPanel';
-import type { RadarActivity, RadarAgent, RadarComposition } from '@/viz/shared/types/radarTypes';
+import type {
+  RadarActivity,
+  RadarAgent,
+  RadarComposition,
+  RadarCurrentAction,
+  RadarTeam,
+} from '@/viz/shared/types/radarTypes';
+
+// reveal_path is a real Tauri IPC call; stub it so clicking a Finder-reveal
+// button in a test never touches the filesystem.
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve(undefined)) }));
 
 function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
   const composition: RadarComposition = {
@@ -76,6 +87,7 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  vi.mocked(invoke).mockClear();
 });
 
 // ── Task 19: live context window ───────────────────────────────────────────────
@@ -275,5 +287,295 @@ describe('RadarDetailPanel — children roster + identity/cost', () => {
     const costCell = id2?.querySelector('[data-id="cost"]');
     expect((costCell?.textContent ?? '')).toContain('—');
     expect((costCell?.textContent ?? '')).not.toContain('$');
+  });
+});
+
+// ── current-action hero ─────────────────────────────────────────────────────────
+describe('RadarDetailPanel — current action hero', () => {
+  const action = (over: Partial<RadarCurrentAction> = {}): RadarCurrentAction => ({
+    kind: 'write',
+    tool: 'Edit',
+    label: 'Edit agent.rs',
+    target: '~/Developer/Apps/WARDEN/src-tauri/src/radar/agent.rs',
+    startedAt: '2026-06-23T22:00:00Z',
+    elapsedMs: 4_200,
+    ...over,
+  });
+
+  it('renders the in-flight action as the hero, above the context window', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
+    const hero = el.querySelector('[data-section="current-action"]');
+    expect(hero).toBeTruthy();
+    expect(hero?.getAttribute('data-current-action')).toBe('active');
+    expect(hero?.getAttribute('data-kind')).toBe('write');
+    expect((hero?.textContent ?? '')).toContain('Edit agent.rs');
+    expect((hero?.textContent ?? '')).toContain('Edit');
+    // it sits before the context window in DOM order, i.e. it IS the first thing
+    // under the header.
+    const sections = Array.from(el.querySelectorAll('.wd-radar-section'));
+    expect(sections[0]).toBe(hero);
+    expect(sections[1]?.hasAttribute('data-context-window')).toBe(true);
+  });
+
+  it('renders an honest idle state, not a fake spinner, when currentAction is null', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: null })} />);
+    const hero = el.querySelector('[data-section="current-action"]');
+    expect(hero?.getAttribute('data-current-action')).toBe('idle');
+    expect((hero?.textContent ?? '').toLowerCase()).toContain('no action in flight');
+    expect(hero?.querySelector('button')).toBeFalsy();
+  });
+
+  it('shows a clickable, accessibly-named Finder-reveal button when a target is present, and calls reveal_path with it', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
+    const btn = el.querySelector('[data-section="current-action"] button') as HTMLButtonElement;
+    expect(btn).toBeTruthy();
+    expect(btn.getAttribute('aria-label')).toBe('Reveal agent.rs in Finder');
+    act(() => btn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(invoke).toHaveBeenCalledWith('reveal_path', { path: '~/Developer/Apps/WARDEN/src-tauri/src/radar/agent.rs' });
+  });
+
+  it('renders no target button when the action has no single-file target (e.g. a shell run)', () => {
+    const el = render(
+      <RadarDetailPanel agent={agentFixture({ currentAction: action({ kind: 'run', tool: 'Bash', label: 'pnpm test', target: null }) })} />,
+    );
+    const hero = el.querySelector('[data-section="current-action"]');
+    expect(hero?.querySelector('button')).toBeFalsy();
+    expect((hero?.textContent ?? '')).toContain('pnpm test');
+  });
+
+  it('ticks the elapsed clock live while an action is in flight', () => {
+    vi.useFakeTimers();
+    try {
+      const start = new Date('2026-06-23T22:00:00.000Z');
+      vi.setSystemTime(start);
+      const el = render(
+        <RadarDetailPanel agent={agentFixture({ currentAction: action({ startedAt: start.toISOString() }) })} />,
+      );
+      const value = () => el.querySelector('.wd-action-hero-elapsed-value')?.textContent;
+      expect(value()).toBe('0s');
+      act(() => {
+        vi.advanceTimersByTime(3_000);
+      });
+      expect(value()).toBe('3s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('falls back to the backend elapsedMs when startedAt cannot be parsed', () => {
+    const el = render(
+      <RadarDetailPanel agent={agentFixture({ currentAction: action({ startedAt: 'not-a-date', elapsedMs: 42_000 }) })} />,
+    );
+    expect(el.querySelector('.wd-action-hero-elapsed-value')?.textContent).toBe('42s');
+  });
+
+  it('swallows a rejected reveal_path without throwing', async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error('no such path'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
+    const btn = el.querySelector('[data-section="current-action"] button') as HTMLButtonElement;
+    await act(async () => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+});
+
+// ── activity feed Finder reveal ──────────────────────────────────────────────────
+describe('RadarDetailPanel — activity feed Finder reveal', () => {
+  it('reveals a row with a target and calls reveal_path with its path', () => {
+    const recent: RadarActivity[] = [
+      { ts: '2026-06-23T22:00:00Z', kind: 'read', label: 'Read agent.rs', target: '~/WARDEN/agent.rs' },
+    ];
+    const el = render(<RadarDetailPanel agent={agentFixture({ recentActivity: recent })} />);
+    const row = el.querySelector('[data-activity-row]') as HTMLElement;
+    const btn = row.querySelector('button') as HTMLButtonElement;
+    expect(btn).toBeTruthy();
+    expect(btn.getAttribute('aria-label')).toBe('Reveal agent.rs in Finder');
+    act(() => btn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(invoke).toHaveBeenCalledWith('reveal_path', { path: '~/WARDEN/agent.rs' });
+  });
+
+  it('does not render a reveal control on a row with no target', () => {
+    const recent: RadarActivity[] = [{ ts: '2026-06-23T22:00:00Z', kind: 'run', label: 'pnpm test' }];
+    const el = render(<RadarDetailPanel agent={agentFixture({ recentActivity: recent })} />);
+    const row = el.querySelector('[data-activity-row]') as HTMLElement;
+    expect(row.querySelector('button')).toBeFalsy();
+  });
+});
+
+// ── session title + team membership ──────────────────────────────────────────────
+describe('RadarDetailPanel — session title + team membership', () => {
+  const team = (over: Partial<RadarTeam> = {}): RadarTeam => ({
+    id: 'session-f3e4ef77',
+    name: 'session-f3e4ef77',
+    memberName: 'BackendMap',
+    memberType: 'Explore',
+    memberCount: 6,
+    isLead: false,
+    ...over,
+  });
+
+  it("shows the harness's own session title in the header, distinct from the derived heading", () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ title: 'Rebuild the radar panel', label: 'warden' })} />);
+    expect(el.querySelector('.wd-detail-title')?.textContent).toBe('warden');
+    expect(el.querySelector('.wd-detail-session-name')?.textContent).toBe('Rebuild the radar panel');
+  });
+
+  it('omits the session-title line when the harness never named the session', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ title: null })} />);
+    expect(el.querySelector('.wd-detail-session-name')).toBeFalsy();
+  });
+
+  it('shows team name, member type, and lead status in Identity', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ team: team({ isLead: true }) })} />);
+    const id = el.querySelector('[data-id="team"]');
+    expect((id?.textContent ?? '')).toContain('session-f3e4ef77');
+    expect((id?.textContent ?? '')).toContain('Explore');
+    expect((id?.textContent ?? '')).toContain('lead');
+    expect(el.querySelector('[data-id="team-member"]')?.textContent).toContain('BackendMap');
+  });
+
+  it('omits the team rows when the agent has no team', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ team: null })} />);
+    expect(el.querySelector('[data-id="team"]')).toBeFalsy();
+    expect(el.querySelector('[data-id="team-member"]')).toBeFalsy();
+  });
+});
+
+// ── safe degradation: older backend omitting the new fields entirely ────────────
+describe('RadarDetailPanel — safe degradation without the new fields', () => {
+  it('renders without throwing when title/currentAction/team are absent from the agent object', () => {
+    const full = agentFixture();
+    const { title, currentAction, team, ...bare } = full;
+    void title;
+    void currentAction;
+    void team;
+    const el = render(<RadarDetailPanel agent={bare as RadarAgent} />);
+    expect(el.querySelector('[data-current-action="idle"]')).toBeTruthy();
+    expect(el.querySelector('.wd-detail-session-name')).toBeFalsy();
+    expect(el.querySelector('[data-id="team"]')).toBeFalsy();
+  });
+});
+
+// Renaming previously meant hand-editing a transcript, so these paths are the feature,
+// not a convenience. The subtle one is the poll guard: the radar refreshes on an
+// interval and must never overwrite a name while it is being typed.
+describe('RadarDetailPanel rename', () => {
+  function openEditor(el: HTMLElement): HTMLInputElement {
+    const pencil = el.querySelector<HTMLButtonElement>('.wd-detail-rename');
+    if (!pencil) throw new Error('rename control missing');
+    act(() => pencil.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    const input = el.querySelector<HTMLInputElement>('.wd-detail-title-input');
+    if (!input) throw new Error('rename input did not open');
+    return input;
+  }
+
+  function type(input: HTMLInputElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setter?.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  function press(input: HTMLInputElement, key: string) {
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    });
+  }
+
+  it('exposes an accessibly-named rename control', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ label: 'warden' })} />);
+    const pencil = el.querySelector<HTMLButtonElement>('.wd-detail-rename');
+    expect(pencil).not.toBeNull();
+    expect(pencil?.getAttribute('aria-label')).toBe('Rename warden');
+  });
+
+  it('commits on Enter, invoking rename_session with the trimmed name', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce('renamed board');
+    const el = render(<RadarDetailPanel agent={agentFixture({ id: 'a1', label: 'warden' })} />);
+    const input = openEditor(el);
+    type(input, '  renamed board  ');
+    press(input, 'Enter');
+    await act(async () => {});
+
+    expect(invoke).toHaveBeenCalledWith('rename_session', {
+      agentId: 'a1',
+      name: 'renamed board',
+    });
+    expect(el.querySelector('.wd-detail-title')?.textContent).toBe('renamed board');
+  });
+
+  it('shows the name Rust returned, not the raw typed string', async () => {
+    // The backend trims and truncates, so its answer is the source of truth.
+    vi.mocked(invoke).mockResolvedValueOnce('cleaned-by-rust');
+    const el = render(<RadarDetailPanel agent={agentFixture({ label: 'warden' })} />);
+    const input = openEditor(el);
+    type(input, 'whatever the user typed');
+    press(input, 'Enter');
+    await act(async () => {});
+    expect(el.querySelector('.wd-detail-title')?.textContent).toBe('cleaned-by-rust');
+  });
+
+  it('Escape cancels without invoking anything', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ label: 'warden' })} />);
+    const input = openEditor(el);
+    type(input, 'discard me');
+    press(input, 'Escape');
+    expect(invoke).not.toHaveBeenCalled();
+    expect(el.querySelector('.wd-detail-title')?.textContent).toBe('warden');
+  });
+
+  it('restores the previous name and surfaces the error when the backend rejects', async () => {
+    vi.mocked(invoke).mockRejectedValueOnce('name contains control characters');
+    const el = render(<RadarDetailPanel agent={agentFixture({ label: 'warden' })} />);
+    const input = openEditor(el);
+    type(input, 'badname');
+    press(input, 'Enter');
+    await act(async () => {});
+
+    expect(el.querySelector('.wd-detail-title')?.textContent).toBe('warden');
+    expect(el.querySelector('[role="alert"]')?.textContent).toContain('control characters');
+  });
+
+  it('does not invoke when the name is unchanged or blank', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ label: 'warden' })} />);
+    const input = openEditor(el);
+    press(input, 'Enter');
+    expect(invoke).not.toHaveBeenCalled();
+
+    const again = openEditor(el);
+    type(again, '   ');
+    press(again, 'Enter');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('a radar refresh arriving mid-edit does not clobber the in-progress text', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ id: 'a1', label: 'warden' })} />);
+    const input = openEditor(el);
+    type(input, 'half-typed nam');
+
+    // The radar polls on an interval; a fresh frame lands while the user is typing.
+    act(() => {
+      root!.render(
+        <RadarDetailPanel agent={agentFixture({ id: 'a1', label: 'server-renamed' })} />,
+      );
+    });
+
+    const still = el.querySelector<HTMLInputElement>('.wd-detail-title-input');
+    expect(still?.value).toBe('half-typed nam');
+  });
+
+  it('renders no rename affordance for an agent whose name cannot be resolved to an id', () => {
+    const el = render(<RadarDetailPanel agent={agentFixture({ id: '', label: 'warden' })} />);
+    expect(el.querySelector('.wd-detail-rename')).toBeFalsy();
+    expect(el.querySelector('.wd-detail-title')?.textContent).toBe('warden');
   });
 });

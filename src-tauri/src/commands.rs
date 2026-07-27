@@ -88,6 +88,130 @@ pub async fn get_radar_state(state: tauri::State<'_, AppState>) -> Result<RadarS
     Ok(fresh_radar_state_for_read(&state))
 }
 
+/// The longest session name WARDEN will store or write. Keeps a pathological paste out
+/// of both the SQLite row and the transcript line.
+const MAX_SESSION_NAME: usize = 120;
+
+/// Reject anything that would corrupt the JSONL transcript or the UI: newlines would
+/// split one record into two (the parser is line-delimited), and other control
+/// characters render as garbage. Returns the cleaned name.
+fn clean_session_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("name is empty".into());
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err("name contains control characters".into());
+    }
+    Ok(crate::util::truncate_chars(name, MAX_SESSION_NAME))
+}
+
+/// Rename a session as WARDEN displays it, and (for Claude) push that name back to the
+/// harness so its own UI agrees.
+///
+/// Two layers on purpose:
+/// 1. `warden_display_name` in the session's `meta_json` is WARDEN's own record. It is
+///    authoritative for the radar label, applies instantly, and survives re-ingest
+///    because the merge only overwrites keys the incoming batch actually carries.
+/// 2. For Claude, a `custom-title` record is APPENDED to the transcript. That is exactly
+///    how Claude itself records a title (the current title is the last such record), so a
+///    single atomic append is a well-formed edit rather than a rewrite. Nothing is ever
+///    truncated or modified in place, and no other harness is written to at all.
+///
+/// This is the one place WARDEN writes outside its own database. It writes only to the
+/// harness's session metadata, never to a watched project's files.
+#[tauri::command]
+pub async fn rename_session(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+    name: String,
+) -> Result<String, String> {
+    let name = clean_session_name(&name)?;
+
+    state
+        .store
+        .merge_session_meta(&agent_id, &serde_json::json!({ "warden_display_name": name }))
+        .map_err(|e| format!("store rename: {e}"))?;
+
+    // Best-effort push to Claude. A failure here must not lose the rename: layer 1 has
+    // already committed, so the radar shows the new name regardless.
+    if let Ok(sessions) = state.store.sessions() {
+        if let Some(s) = sessions.iter().find(|s| s.id == agent_id) {
+            if matches!(s.harness, crate::ir::Harness::ClaudeCode) {
+                let root = crate::util::default_claude_projects();
+                if let Err(e) =
+                    append_claude_custom_title(&root, &s.source_path, &s.external_id, &name)
+                {
+                    eprintln!("[WARDEN] rename stored, transcript push skipped: {e}");
+                }
+            }
+        }
+    }
+    Ok(name)
+}
+
+/// Append one `custom-title` record to a Claude transcript.
+///
+/// Safety rules, all load-bearing:
+/// * the target must be an existing `.jsonl` file under the Claude projects root, so a
+///   crafted id cannot make WARDEN append to an arbitrary file,
+/// * opened `O_APPEND`, one `write` of a single complete line. A lone append under
+///   `PIPE_BUF` cannot interleave with the harness's own appends,
+/// * nothing is read, truncated, or rewritten, so a concurrent writer cannot lose data.
+fn append_claude_custom_title(
+    root: &std::path::Path,
+    source_path: &std::path::Path,
+    external_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let canonical_root = root.canonicalize().map_err(|e| format!("claude root: {e}"))?;
+    let canonical = source_path
+        .canonicalize()
+        .map_err(|e| format!("transcript: {e}"))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err("transcript is outside the Claude projects root".into());
+    }
+    if canonical.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return Err("transcript is not a .jsonl file".into());
+    }
+
+    // serde_json does the escaping, so a name with quotes or backslashes stays valid.
+    let line = serde_json::to_string(&serde_json::json!({
+        "type": "custom-title",
+        "customTitle": name,
+        "sessionId": external_id,
+    }))
+    .map_err(|e| format!("encode: {e}"))?;
+
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&canonical)
+        .map_err(|e| format!("open: {e}"))?;
+    f.write_all(format!("{line}\n").as_bytes())
+        .map_err(|e| format!("append: {e}"))?;
+    Ok(())
+}
+
+/// Reveal a file in Finder, selecting it in its containing folder.
+///
+/// Takes the `~`-folded DISPLAY path carried on the radar state, so the absolute path
+/// never has to live in frontend state (and therefore can never be transmitted to a
+/// remote observer). Expands and canonicalizes it, and refuses anything that does not
+/// resolve to a real existing path.
+#[tauri::command]
+pub async fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let expanded = crate::util::expand_tilde(&path);
+    let canonical = expanded
+        .canonicalize()
+        .map_err(|e| format!("no such path: {e}"))?;
+    app.opener()
+        .reveal_item_in_dir(&canonical)
+        .map_err(|e| format!("reveal: {e}"))
+}
 fn fresh_radar_state_for_read(state: &AppState) -> RadarState {
     let sessions_dir = default_claude_sessions_dir();
     radar::refresh_live_context(&state.store, &sessions_dir);

@@ -390,7 +390,10 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
   }, [active, fetchRadar]);
 
   return (
-    <div className="viz-root wd-radar-root" onDoubleClick={onDiscoveryHomeDoubleClick}>
+    <div
+      className={`viz-root wd-radar-root${selectedRadarAgent ? ' has-dock' : ''}`}
+      onDoubleClick={onDiscoveryHomeDoubleClick}
+    >
       <Canvas
         dpr={[1, 2]}
         frameloop={frameloopFor(!active)}

@@ -2,7 +2,8 @@
 //
 // Mounted by WarRoom as a right-dock glass panel (the `wd-detail` / `wd-inspector`
 // look from the Habits inspector, NOT forked from it), opened when a radar globe is
-// selected and the camera has dived in. Four honest sections:
+// selected and the camera has dived in. Five honest sections:
+//   0. Current action (hero)        the in-flight tool call, or an honest idle line
 //   1. Live context window          (Task 19)
 //   2. Live activity feed           (Task 20)
 //   3. Children roster              (Task 21)
@@ -11,8 +12,10 @@
 // The context window is a static readout fed by live `radar_state`; rows come from
 // the backend when available, and fall back to honest occupancy/free-space rows.
 
-import type { CSSProperties } from 'react';
-import type { RadarAgent, RadarContextRow } from '@/viz/shared/types/radarTypes';
+import type { CSSProperties, KeyboardEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import type { RadarAgent, RadarContextRow, RadarCurrentAction } from '@/viz/shared/types/radarTypes';
 import { radarSubtitle, formatTokens as tokens } from '@/viz/shared/types/radarTypes';
 import { radarHarness } from './radarTheme';
 
@@ -73,6 +76,58 @@ function cost(usd: number | null): string {
   return `$${usd.toFixed(2)}`;
 }
 
+/** Last path segment, for a short accessible name ("Reveal agent.rs in Finder"). */
+function basename(path: string): string {
+  const parts = path.split('/');
+  return parts[parts.length - 1] || path;
+}
+
+/**
+ * Reveal a `~`-folded display path in Finder. Fire-and-forget: the caller is a
+ * click handler, not an async flow, so a rejection (path moved/deleted since the
+ * radar snapshot) is logged and swallowed rather than left as an unhandled
+ * rejection or thrown into React's render cycle.
+ */
+function revealInFinder(path: string): void {
+  invoke('reveal_path', { path }).catch((err) => {
+    console.error('reveal_path failed', err);
+  });
+}
+
+/**
+ * Push a rename to the backend. Returns the CLEANED name Rust actually stored
+ * (it trims and truncates), never the raw typed value, so the caller reconciles
+ * to the source of truth instead of assuming the typed string stuck.
+ */
+function renameSession(agentId: string, name: string): Promise<string> {
+  return invoke<string>('rename_session', { agentId, name });
+}
+
+/**
+ * Live stopwatch readout for an in-flight action ("42s", "1m 23s", "2h 5m") so a
+ * long-running call visibly ages rather than freezing at its first-seen elapsed.
+ */
+function elapsedClock(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ${String(sec % 60).padStart(2, '0')}s`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ${min % 60}m`;
+}
+
+/** Ticks once a second while `active`, so a mounted hero re-renders its elapsed
+ * time without polling the backend. Idle (no action) skips the interval entirely. */
+function useTick(active: boolean, intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [active, intervalMs]);
+  return now;
+}
+
 /** Per-kind glyph + readable word (colour is never the only signal). */
 const ACTIVITY_KIND: Record<string, { glyph: string; label: string }> = {
   read: { glyph: '▤', label: 'Read' },
@@ -85,6 +140,77 @@ const ACTIVITY_KIND: Record<string, { glyph: string; label: string }> = {
 };
 function activityKind(kind: string): { glyph: string; label: string } {
   return ACTIVITY_KIND[kind] ?? { glyph: '•', label: kind || 'Event' };
+}
+
+// ── Hero: the in-flight action, the first thing under the header ──────────────
+// The largest, highest-contrast element in the panel when present: a per-kind
+// accent (style.css keys off `[data-kind]`) makes a write/edit read heavier than
+// a read. `currentAction === null` renders an honest idle line, never a fake
+// "waiting" spinner implying activity that is not there (honest-viz).
+function CurrentActionSection({ action }: { action: RadarCurrentAction | null }) {
+  const now = useTick(action != null);
+
+  if (!action) {
+    return (
+      <section className="wd-radar-section wd-action-hero is-idle" data-section="current-action" data-current-action="idle">
+        <div className="wd-card-kicker">Current action</div>
+        <div className="wd-action-hero-idle">
+          <span className="wd-action-hero-idle-glyph" aria-hidden>
+            ·
+          </span>
+          No action in flight
+        </div>
+      </section>
+    );
+  }
+
+  const k = activityKind(action.kind);
+  // Re-derive elapsed from startedAt on every tick so it ages live between
+  // backend snapshots; fall back to the backend's own elapsedMs if the
+  // timestamp cannot be parsed rather than freezing at 0 or showing NaN.
+  const startMs = Date.parse(action.startedAt);
+  const elapsedMs = Number.isFinite(startMs) ? Math.max(0, now - startMs) : action.elapsedMs;
+
+  return (
+    <section
+      className="wd-radar-section wd-action-hero"
+      data-section="current-action"
+      data-current-action="active"
+      data-kind={action.kind}
+    >
+      <div className="wd-card-kicker">Current action</div>
+      <div className="wd-action-hero-body">
+        <span className={`wd-action-hero-glyph is-${action.kind}`} aria-hidden>
+          {k.glyph}
+        </span>
+        <div className="wd-action-hero-main">
+          <div className="wd-action-hero-meta">
+            <span className="wd-action-hero-kind">{k.label}</span>
+            <span className="wd-action-hero-tool">{action.tool}</span>
+          </div>
+          <div className="wd-action-hero-verb">{action.label || k.label}</div>
+          {action.target ? (
+            <button
+              type="button"
+              className="wd-action-hero-target"
+              onClick={() => revealInFinder(action.target as string)}
+              aria-label={`Reveal ${basename(action.target)} in Finder`}
+              title="Reveal in Finder"
+            >
+              <span className="wd-action-hero-target-glyph" aria-hidden>
+                ⌖
+              </span>
+              <span className="wd-action-hero-target-path">{action.target}</span>
+            </button>
+          ) : null}
+        </div>
+        <div className="wd-action-hero-elapsed">
+          <span className="wd-action-hero-elapsed-value">{elapsedClock(elapsedMs)}</span>
+          <span className="wd-action-hero-elapsed-label">Elapsed</span>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function fallbackContextRows(agent: RadarAgent): RadarContextRow[] {
@@ -208,6 +334,17 @@ function ActivitySection({ agent }: { agent: RadarAgent }) {
                   {a.label}
                 </span>
                 {rel ? <time className="wd-radar-feed-time">{rel}</time> : null}
+                {a.target ? (
+                  <button
+                    type="button"
+                    className="wd-radar-feed-reveal"
+                    onClick={() => revealInFinder(a.target as string)}
+                    aria-label={`Reveal ${basename(a.target)} in Finder`}
+                    title="Reveal in Finder"
+                  >
+                    ⌖
+                  </button>
+                ) : null}
               </li>
             );
           })}
@@ -263,6 +400,7 @@ function RosterSection({ children, onJumpTo }: { children: RadarAgent[]; onJumpT
 // ── Section 4: identity + cost (Task 21) ───────────────────────────────────────
 function IdentitySection({ agent }: { agent: RadarAgent }) {
   const theme = radarHarness(agent.harness);
+  const team = agent.team ?? null;
   return (
     <section className="wd-radar-section wd-radar-identity" data-section="identity">
       <div className="wd-card-kicker">Identity</div>
@@ -291,6 +429,22 @@ function IdentitySection({ agent }: { agent: RadarAgent }) {
           <dt>Est. cost</dt>
           <dd>{cost(agent.estCostUsd)}</dd>
         </div>
+        {team ? (
+          <div data-id="team">
+            <dt>Team</dt>
+            <dd>
+              {team.name}
+              {team.memberType ? ` · ${team.memberType}` : ''}
+              {team.isLead ? ' · lead' : ''}
+            </dd>
+          </div>
+        ) : null}
+        {team?.memberName ? (
+          <div data-id="team-member">
+            <dt>Member</dt>
+            <dd>{team.memberName}</dd>
+          </div>
+        ) : null}
       </dl>
     </section>
   );
@@ -305,10 +459,142 @@ export type RadarDetailPanelProps = {
   onClose?: () => void;
 };
 
+/**
+ * The agent's name, editable in place.
+ *
+ * Renaming used to mean hand-editing a transcript, so this is the whole point of the
+ * naming work rather than a convenience. Four behaviours are load-bearing:
+ *
+ * 1. While the input is focused it OWNS its value. The radar polls `get_radar_state` on
+ *    an interval, and a frame landing mid-edit must not overwrite what is being typed.
+ * 2. The committed value is the string Rust RETURNED, not the string typed: the backend
+ *    trims and truncates, so reconciling to its answer keeps the panel honest.
+ * 3. A rejected rename restores the exact previous name and says why, instead of leaving
+ *    a silently failed edit on screen.
+ * 4. No rename affordance at all renders when `agentId` is empty: there is nothing to
+ *    resolve the rename against.
+ *
+ * `committed` is compared against `heading` at RENDER time (not via an effect keyed on
+ * `editing`), so ending an edit can never itself race the optimistic value away before
+ * the backend's answer lands; only a genuinely new `heading` prop (a fresh poll) clears it.
+ */
+function EditableTitle({ agentId, heading }: { agentId: string; heading: string }) {
+  const canRename = agentId.length > 0;
+
+  const [committed, setCommitted] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  // Guards a commit firing twice for one edit: Enter and Escape both end by removing
+  // focus from the input, which can also fire a native blur.
+  const settledRef = useRef(true);
+
+  const prevAgentIdRef = useRef(agentId);
+  const prevHeadingRef = useRef(heading);
+  if (prevAgentIdRef.current !== agentId) {
+    // Switched to a different agent: none of this state belongs to it anymore.
+    prevAgentIdRef.current = agentId;
+    prevHeadingRef.current = heading;
+    setCommitted(null);
+    setEditing(false);
+    setError(null);
+  } else if (prevHeadingRef.current !== heading) {
+    // A fresh poll brought a new backend-derived heading: defer to it.
+    prevHeadingRef.current = heading;
+    setCommitted(null);
+  }
+
+  const shown = committed ?? heading;
+
+  function begin() {
+    if (!canRename) return;
+    settledRef.current = false;
+    setDraft(shown);
+    setError(null);
+    setEditing(true);
+  }
+
+  function cancel() {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    setEditing(false);
+  }
+
+  function commit() {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    const next = draft.trim();
+    const previous = shown;
+    setEditing(false);
+    if (!next || next === previous) return;
+    // Optimistic: show the typed value immediately, then reconcile to whatever Rust
+    // actually stored (it trims and truncates) once the call resolves.
+    setCommitted(next);
+    setError(null);
+    renameSession(agentId, next)
+      .then((cleaned) => setCommitted(cleaned))
+      .catch((err: unknown) => {
+        setCommitted(previous);
+        setError(typeof err === 'string' ? err : 'rename failed');
+      });
+  }
+
+  if (!editing) {
+    return (
+      <div className="wd-detail-title-row">
+        <h2 className="wd-detail-title">{shown}</h2>
+        {canRename ? (
+          <button
+            className="wd-detail-rename"
+            type="button"
+            onClick={begin}
+            aria-label={`Rename ${shown}`}
+            title="Rename"
+          >
+            ✎
+          </button>
+        ) : null}
+        {error ? (
+          <span className="wd-detail-rename-error" role="alert">
+            {error}
+          </span>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="wd-detail-title-row">
+      <input
+        className="wd-detail-title-input"
+        aria-label="Session name"
+        value={draft}
+        autoFocus
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            cancel();
+          }
+        }}
+      />
+    </div>
+  );
+}
+
 export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: RadarDetailPanelProps) {
   const theme = radarHarness(agent.harness);
-  const title = agent.label || agent.nickname || agent.id;
+  // The radar's OWN derived heading (task label, else nickname, else the raw id):
+  // kept separate from `agent.title`, the harness's own session name, so neither
+  // overwrites the other.
+  const heading = agent.label || agent.nickname || agent.id;
+  const sessionTitle = agent.title ?? null;
   const subtitle = radarSubtitle(agent);
+  const currentAction = agent.currentAction ?? null;
 
   // Accent is the flat harness hue — colour no longer encodes fill (that's the
   // globe's SIZE channel). CSS resolves `--heat` → `--harness` via its fallback.
@@ -316,7 +602,7 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
     <aside
       className="wd-detail wd-radar-detail"
       style={{ '--harness': theme.color } as CSSProperties}
-      aria-label={`Agent ${title}`}
+      aria-label={`Agent ${heading}`}
     >
       <div className="wd-detail-head">
         <div>
@@ -327,7 +613,8 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
             {theme.label}
             <span className={`wd-radar-status is-${agent.status}`}> · {STATUS_LABEL[agent.status]}</span>
           </div>
-          <h2 className="wd-detail-title">{title}</h2>
+          <EditableTitle agentId={agent.id} heading={heading} />
+          {sessionTitle ? <div className="wd-detail-session-name">{sessionTitle}</div> : null}
           {subtitle ? <div className="wd-detail-sub">{subtitle}</div> : null}
         </div>
         {onClose ? (
@@ -337,6 +624,7 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
         ) : null}
       </div>
 
+      <CurrentActionSection action={currentAction} />
       <ContextSection agent={agent} />
       <ActivitySection agent={agent} />
       <RosterSection children={children} onJumpTo={onJumpTo} />

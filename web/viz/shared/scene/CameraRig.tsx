@@ -83,6 +83,10 @@ export function CameraRig({
   locked?: boolean;
 }) {
   const { camera } = useThree();
+  // Canvas pixel size, reactive on resize. Feeds the aspect-aware overview fit so a
+  // narrow window frames the wide rail layout instead of clipping its ends.
+  const size = useThree((s) => s.size);
+  const aspect = size.height > 0 ? size.width / size.height : 1;
   const controls = useRef<any>(null);
   const targetGoal = useRef(new THREE.Vector3(0, 0, 0));
   const posGoal = useRef(new THREE.Vector3(0, 1, OVERVIEW_DIST));
@@ -113,7 +117,12 @@ export function CameraRig({
       };
     }
     const r = sceneBounds.radius;
-    const overviewDist = frameDistance(r, FOV_FALLBACK, locked ? LOCKED_OVERVIEW_FILL : OVERVIEW_FILL);
+    const overviewDist = frameDistance(
+      r,
+      FOV_FALLBACK,
+      locked ? LOCKED_OVERVIEW_FILL : OVERVIEW_FILL,
+      aspect,
+    );
     const maxDist = Math.min(1400, Math.max(MAX_DIST_BASE, overviewDist * 1.35));
     const far = Math.min(4000, Math.max(DEFAULT_FAR, (maxDist + r) * 1.3));
     return {
@@ -123,7 +132,7 @@ export function CameraRig({
       maxDist,
       far,
     };
-  }, [sceneBounds, locked]);
+  }, [sceneBounds, locked, aspect]);
   // Latest-value ref so the [selected]/[focusBounds]/[homeSignal] effects and the
   // frame loop read current limits WITHOUT taking sceneBounds as a dependency
   // (which would re-fire the cinematic moves on every layout tick).
@@ -192,8 +201,17 @@ export function CameraRig({
     } else {
       wasSelected.current = false;
       if (homePos.current) {
-        targetGoal.current.copy(homeTarget.current);
-        posGoal.current.copy(homePos.current);
+        // Restore the ANGLE you dived in from, but re-derive centre and distance from
+        // the LIVE fit. Replaying the captured position verbatim re-frames the forest as
+        // it was at dive time, so any agent that appeared while you were inspecting
+        // would land outside the frame on back-out (the locked auto-refit effect is
+        // skipped while something is selected, so nothing else corrects it).
+        const f = fitRef.current;
+        dir.copy(homePos.current).sub(homeTarget.current);
+        if (dir.lengthSq() < 1e-6) dir.copy(locked ? STRAIGHT_ON_DIR : OVERVIEW_DIR);
+        dir.normalize();
+        targetGoal.current.copy(f.center);
+        posGoal.current.copy(f.center).addScaledVector(dir, f.overviewDist);
       } else {
         writeOverviewPose(targetGoal.current, posGoal.current);
       }
@@ -330,9 +348,11 @@ export function CameraRig({
       enableDamping
       dampingFactor={0.15}
       rotateSpeed={0.95}
-      // Wheel/trackpad dolly was too twitchy at the default 1.0; calm it so a scroll
-      // nudges the zoom rather than lurching it.
-      zoomSpeed={0.6}
+      // Wheel/trackpad dolly was too twitchy at the default 1.0. 0.6 was still enough to
+      // overshoot the board in one flick on a Mac trackpad, where momentum scrolling
+      // keeps delivering wheel events after the fingers lift, so calm it further: a
+      // scroll should nudge the zoom, never lurch it.
+      zoomSpeed={0.32}
       // Board is locked: no rotate, no pan; the wheel still dollies toward the
       // cursor. Habits keeps the uncaged rig (rotate + pan).
       enableRotate={!locked}
