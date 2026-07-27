@@ -78,6 +78,115 @@ pub fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Resu
     f.write_all(bytes)
 }
 
+/// A terminal emulator WARDEN knows how to drive, resolved from a session's
+/// process ancestry rather than guessed. Both are AppleScript targets on macOS;
+/// on any other platform nothing resolves and the caller degrades to notify-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalApp {
+    /// `Terminal.app`, driven with `do script "..." in <tab>`.
+    Apple,
+    /// `iTerm2`, driven with `tell <session> to write text "..."`. More precise
+    /// (per session rather than per tab) when the user has it.
+    ITerm2,
+}
+
+impl TerminalApp {
+    /// The name AppleScript addresses the app by, and the label the UI shows.
+    pub fn app_name(&self) -> &'static str {
+        match self {
+            TerminalApp::Apple => "Terminal",
+            TerminalApp::ITerm2 => "iTerm2",
+        }
+    }
+}
+
+/// Why an Apple Events send did not land.
+///
+/// `NotPermitted` is called out separately from `Failed` because it is the one
+/// failure that is PERMANENT: macOS records the refusal and never re-prompts, so
+/// the caller must switch that harness to notify-only and point the user at
+/// System Settings instead of retrying forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationError {
+    /// `errAEEventNotPermitted` (-1743). Sticky. Recoverable only in System Settings.
+    NotPermitted,
+    /// `procNotFound` (-600): the emulator is not running.
+    TargetNotRunning,
+    /// The emulator is scriptable and permitted, but no tab or session owns that tty.
+    NoMatchingTab,
+    /// Anything else, with the raw message kept for the UI's detail line.
+    Failed(String),
+    /// No Apple Events surface on this platform at all.
+    Unsupported,
+}
+
+impl std::fmt::Display for AutomationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AutomationError::NotPermitted => write!(
+                f,
+                "automation permission denied (errAEEventNotPermitted): enable WARDEN under Privacy and Security, Automation"
+            ),
+            AutomationError::TargetNotRunning => write!(f, "the terminal app is not running"),
+            AutomationError::NoMatchingTab => {
+                write!(f, "no terminal tab is attached to that session's tty")
+            }
+            AutomationError::Failed(m) => write!(f, "{m}"),
+            AutomationError::Unsupported => {
+                write!(f, "this platform has no terminal automation surface")
+            }
+        }
+    }
+}
+
+/// The controlling terminal of `pid` as a device path (`/dev/ttys001`), or `None`
+/// when the process has no tty (an IDE-hosted or daemonised session).
+pub fn controlling_tty(pid: u32) -> Option<String> {
+    imp::controlling_tty(pid)
+}
+
+/// Which terminal emulator owns `pid`, found by walking the parent chain until a
+/// known emulator executable appears. `None` when the session is not inside one
+/// of the emulators WARDEN can drive.
+pub fn terminal_app_for_pid(pid: u32) -> Option<TerminalApp> {
+    imp::terminal_app_for_pid(pid)
+}
+
+/// Type `text` plus a return into the tab or session attached to `tty`, exactly
+/// as if the user had typed it.
+///
+/// This is the one place WARDEN writes INTO another program. It runs only for a
+/// session the user explicitly armed, and it is the deliberate exception to the
+/// read-only-toward-projects rule (it drives the agent, never the project files).
+pub fn send_text_to_tty(
+    app: TerminalApp,
+    tty: &str,
+    text: &str,
+) -> std::result::Result<(), AutomationError> {
+    imp::send_text_to_tty(app, tty, text)
+}
+
+/// Ask the OS whether WARDEN may drive `app`, PROMPTING the user the first time.
+///
+/// Called on first arm rather than at install, so the consent dialog arrives with
+/// the reason visible on screen. `Ok(())` means permitted now.
+pub fn request_automation(app: TerminalApp) -> std::result::Result<(), AutomationError> {
+    imp::request_automation(app)
+}
+
+/// Open System Settings at Privacy and Security, Automation, where a sticky
+/// denial is undone. Best-effort: failure to open a settings pane is not worth
+/// failing a command over.
+pub fn open_automation_settings() {
+    imp::open_automation_settings();
+}
+
+/// Post a local notification. The notify-only degradation path: when WARDEN
+/// cannot press the key it still says when the moment arrived.
+pub fn post_notification(title: &str, body: &str) {
+    imp::post_notification(title, body);
+}
+
 /// True when `pid` names a live process. Split on the unix/windows axis:
 /// * unix (macOS, Linux): `kill(pid, 0)` — probes existence/permission, sends
 ///   no signal;
