@@ -34,6 +34,7 @@
      crossorigin, and over file:// that makes the origin null and the request is
      blocked. This page is meant to open as a file. If it is ever served over http,
      add back: <link rel="preload" as="font" type="font/woff2" href="..." crossorigin> -->
+
 <style>
 /* ── type ─────────────────────────────────────────────────────────────────
    Three roles, and the split is deliberate rather than a moodboard.
@@ -158,14 +159,22 @@ img{max-width:100%;height:auto;display:block}
    Kept deliberately small. The hero IS the header on this page, so the rail's
    job is to sit out of the way and hold one link and one button; competing with
    the wordmark underneath it just made the top of the page feel heavy. */
+/* A three-column grid, not flex space-between, and the reason is the middle
+   item. Under space-between the three claims sat wherever the wordmark on the
+   left and the button on the right left room for them, which put them left of
+   centre by about the width difference between those two: visibly off, and it
+   moved every time the button's label changed. 1fr auto 1fr sizes the outer
+   columns to each other rather than to their contents, so the middle column is
+   centred on the PAGE and stays there. The outer items then key to the edges
+   themselves. */
 .rail{
   position:relative;z-index:4;
-  display:flex;align-items:center;justify-content:space-between;gap:24px;
+  display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:24px;
   padding:13px 32px 0;
 }
 .rail b{font-family:var(--mark);font-weight:800;font-size:12px;letter-spacing:.15em}
-.rail .set{display:flex;gap:16px;color:var(--ink-4);font-size:10px}
-.rail nav{display:flex;align-items:center;gap:16px}
+.rail .set{display:flex;gap:16px;color:var(--ink-4);font-size:10px;justify-content:center}
+.rail nav{display:flex;align-items:center;gap:16px;justify-self:end}
 .rail nav a.mono{font-size:10px}
 /* padded to a 24px hit target: the label itself is 11px mono and was a 15px tall
    target, which is under the WCAG 2.2 minimum. */
@@ -225,17 +234,16 @@ img{max-width:100%;height:auto;display:block}
    turns an extrusion into a smear. */
 .mark{
   position:relative;z-index:2;
-  font-family:var(--mark);font-weight:800;
-  /* smaller NUMBER than Expose carried, same optical size on the page: Technor
-     sets "WARDEN" about 15% wider at a given font-size, and left at 15vw/14rem
-     it drove the ring (which is measured off the mark's width) past both
-     viewport edges and started clipping bodies. */
+  /* Switzer, the same face as the lede underneath, not the display face. The
+     mark and the sentence under it now set in one voice, which is what stops
+     the hero reading as a logo dropped on top of a paragraph. */
+  font-family:var(--sans);font-weight:800;
   font-size:clamp(3rem,13vw,12.2rem);
   line-height:.9;
-  /* Technor is wide and squared where Expose was narrow, so it needs far less
-     pulling in: -.02em closed its square counters up and cost the mark its
-     machined look. */
-  letter-spacing:-.008em;
+  /* Switzer is fitted for TEXT, so at display size it sets loose. -.025em is
+     the tracking that closes it up to a wordmark; the lede runs -.018em at a
+     quarter of this size and the relationship holds. */
+  letter-spacing:-.025em;
   color:#f4f8f6;
   white-space:nowrap;
   user-select:none;
@@ -883,17 +891,26 @@ const HARNESS_IDS = Object.keys(HARNESS);
    it is leaned. Both dials had to move, this one and the radius in resize(). */
 const TILT   = 12 * Math.PI / 180;
 
-/* TWO rings, not one, and that is the whole answer to "more globes".
-   Eight was the old ceiling for a single ring, and ten in that same ring was
-   already too many: bodies overlapped each other across the whole wordmark and
-   the hero read as busy rather than ordered. Crowding an ellipse is not how you
-   add mass to an orbital system, adding an orbit is.
+/* TWO rings, not one. Crowding an ellipse is not how you add mass to an
+   orbital system, adding an orbit is: a second ring buys depth and crossings,
+   which is what makes the hero read as a system rather than as a border.
 
-   So: thirteen on the main ring, and seven more on a second one that is
-   slightly tighter, faster, counter-rotating, and leaning 0.40 rad out of the
-   first's plane. The two ellipses CROSS. Twenty bodies now read as a system
-   with depth, and the second ring gets its own size class (unit .60) so it
-   reads as satellites rather than as the main ring drifting out of formation.
+   ELEVEN bodies, not twenty. Twenty was the previous count and it was too many
+   for what this is: with a body every 28 degrees the outer ring never had a
+   gap in it, so it stopped reading as separate objects in orbit and started
+   reading as a dotted rule drawn round the word. Anything moving inside a
+   continuous band is also invisible, so the turnover, the size differences and
+   the liveness blaze all had nowhere to show. Seven on the main ring puts ~51
+   degrees between bodies: the eye can hold seven, so it tracks them
+   individually and a single one dimming out is an event. Four on the second
+   ring is enough to read as a crossing orbit and not enough to refill the
+   gaps the first one just opened.
+
+   So: seven on the main ring, and four more on a second one that is slightly
+   tighter, faster, counter-rotating, and leaning out of the first's plane. The
+   two ellipses CROSS, and the second ring keeps its own size class (unit .60)
+   so it reads as satellites rather than as the main ring drifting out of
+   formation.
 
    The second ring is deliberately NOT a small inner one. At R 2.15 it was
    narrower than the wordmark itself, so every one of its bodies lived on top of
@@ -910,8 +927,8 @@ const TILT   = 12 * Math.PI / 180;
      incline rotation of the ring's plane about X, radians
      unit    size class, multiplied into every body's scale on that ring */
 const RINGS = [
-  { count: 13, R: 3.35, period: 80, dir:  1, incline: 0,    unit: 1.00 },
-  { count: 7,  R: 2.95, period: 54, dir: -1, incline: 0.20, unit: 0.60 },
+  { count: 7, R: 3.35, period: 80, dir:  1, incline: 0,    unit: 1.00 },
+  { count: 4, R: 2.95, period: 54, dir: -1, incline: 0.20, unit: 0.60 },
 ];
 /* the camera is fitted to the OUTER ring, so that is the radius the layout
    maths in resize() is measured against */
@@ -1145,7 +1162,26 @@ const HEART_GEO = { sunburst: sunburstGeometry(), blossom: blossomGeometry() };
    and hands it to the scene as an env map. Same thing by hand: the formers
    are unlit planes and a ring, each turned to face the origin. It exists to
    put a glint on the crystal hearts, nothing else. One per renderer, because
-   a texture cannot cross a GL context. */
+   a texture cannot cross a GL context.
+
+   PMREM, and this is the fix for the bright FLASHING that used to cross the
+   bodies. The earlier pass rendered the formers into a plain
+   WebGLCubeRenderTarget and handed that raw texture over as the environment.
+   A raw cube is not roughness-prefiltered, so every material samples it at
+   full sharpness no matter what its roughness says: the glass at roughness
+   .04 and the gem at .07 were both reading a 128px cube of hard-edged bright
+   rectangles as a perfect mirror. As a body orbited and span, one of those
+   rectangles would sweep across its surface and snap on and off across a
+   couple of texels, which is a flash rather than a highlight, and the bloom
+   at threshold .22 then amplified it into the thing that was actually
+   visible on the page.
+
+   PMREMGenerator is the step drei runs and this port had skipped. It
+   prefilters the cube into the roughness-indexed mip chain three's PBR
+   shader expects, so roughness finally does what it says and a highlight
+   travels as a soft crescent instead of popping. sigma .06 blurs the source
+   on top of that, which turns three hard-edged panels into three soft area
+   lights: the same lighting with no edge to catch. */
 function buildEnv(renderer) {
   const s = new THREE.Scene();
   const former = (geo, color, intensity, pos, sx, sy) => {
@@ -1159,14 +1195,20 @@ function buildEnv(renderer) {
   };
   const rect = new THREE.PlaneGeometry(1, 1);
   const ring = new THREE.RingGeometry(0.5, 1, 32);
-  former(rect, '#ffcaa0', 1.7, [-5, 3, -3], 7, 7);
-  former(rect, '#bfeaff', 1.4, [5, 1, -4], 6, 6);
-  former(ring, '#ffffff', 1.2, [2, 4, 2], 2, 2);
+  /* Intensities pulled ~30% off the old values. They were tuned against an
+     unfiltered cube, where a highlight only ever showed up on the few frames
+     it landed dead on a former, so they had to be hot to register at all.
+     Prefiltered, the same lighting is on the body continuously and the old
+     numbers read as blown out. Bigger and dimmer is the same total light
+     spread over more of the sphere. */
+  former(rect, '#ffcaa0', 1.15, [-5, 3, -3], 9, 9);
+  former(rect, '#bfeaff', 0.95, [5, 1, -4], 8, 8);
+  former(ring, '#ffffff', 0.80, [2, 4, 2], 3, 3);
 
-  const rt = new THREE.WebGLCubeRenderTarget(128, { type: THREE.HalfFloatType });
-  const cam = new THREE.CubeCamera(0.1, 100, rt);
-  cam.update(renderer, s);
-  return rt.texture;
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const target = pmrem.fromScene(s, 0.06, 0.1, 100);
+  pmrem.dispose();
+  return target.texture;
 }
 
 /* == one globe (RadarConstellation.tsx:170-493) ===========================
@@ -1238,12 +1280,19 @@ function makeGlobe(i, over) {
 
      depthWrite:false so the near hemisphere never occludes the gem or the far
      lattice, and detail 2 because a specular crescent is carried by the normals
-     rather than by the triangle count. */
+     rather than by the triangle count.
+
+     roughness .14, not .04. Against the unfiltered cube these two numbers
+     rendered identically (see buildEnv), so .04 was never actually buying the
+     sharpness it claims: it was the missing prefilter putting a mirror on
+     every body regardless. Now that roughness is live, .14 is the width that
+     spreads the probe into a crescent you can watch travel, which is what the
+     note above asks for, rather than a point that blinks. */
   g.glassMat = new THREE.MeshPhysicalMaterial({
-    color: '#0b1622', metalness: 0, roughness: 0.04,
-    clearcoat: 1, clearcoatRoughness: 0.04,
+    color: '#0b1622', metalness: 0, roughness: 0.14,
+    clearcoat: 1, clearcoatRoughness: 0.12,
     transparent: true, opacity: 0.13, depthWrite: false,
-    envMapIntensity: 2.8,
+    envMapIntensity: 1.6,
   });
   g.group.add(new THREE.Mesh(new THREE.IcosahedronGeometry(0.985, 2), g.glassMat));
 
@@ -1267,15 +1316,22 @@ function makeGlobe(i, over) {
      renderOrder -1, which only sorts ahead of the TRANSPARENT queue, so an
      opaque gem would render first and be painted over by its own occluder. */
   /* Polished, not matte. roughness .22 spread the probe into a dull sheen and
-     the core read as painted plastic; at .07 under a full clearcoat the facets
-     each catch the lightformer as a distinct hard glint, which is what makes a
+     the core read as painted plastic; at .17 under a full clearcoat the facets
+     each catch the lightformer as a distinct glint, which is what makes a
      faceted solid look like cut crystal instead of a low-poly blob. The env map
-     is doing all of this work, so its intensity carries most of the effect. */
+     is doing all of this work, so its intensity carries most of the effect.
+
+     .07 was the old value and it was the second half of the flashing. A flat-
+     shaded facet is a flat mirror, twenty of them are twenty mirrors on one
+     spinning body, and against an unfiltered cube each one switched between
+     black and a blown highlight the instant its normal crossed a former. .17
+     is still inside the cut-crystal range and it gives every facet a gradient
+     to travel through instead of two states to snap between. */
   g.gemMat = new THREE.MeshPhysicalMaterial({
-    color: '#05120b', emissiveIntensity: 0.5, metalness: 0, roughness: 0.07,
-    clearcoat: 1, clearcoatRoughness: 0.06,
+    color: '#05120b', emissiveIntensity: 0.5, metalness: 0, roughness: 0.17,
+    clearcoat: 1, clearcoatRoughness: 0.14,
     transmission: 0, thickness: 0.6, ior: 1.45, transparent: true,
-    envMapIntensity: 2.4, flatShading: true,
+    envMapIntensity: 1.5, flatShading: true,
   });
   /* The core paints over the disc and over the shell's far lattice, always.
      Dropping transmission also dropped the thing that used to make the gem
@@ -1351,7 +1407,20 @@ const damp = (cur, target, lambda, dt) => cur + (target - cur) * (1 - Math.exp(-
 const livenessColorScale = (k) => 0.62 + k * 0.38;           /* :112-115 */
 const spinRate = (isRoot, liveK) =>
   (isRoot ? 0.08 : 0.14) * (REDUCED ? 1 : 1 + liveK * 0.85); /* radarMotion.ts */
-const glowTarget = (g) => Math.max(0.05, (g.isRoot ? 0.22 : 0.16) + (g.working ? 2.7 : 0)); /* :68-92 */
+/* The working term was 2.7, which put a working core at emissiveIntensity ~3.9.
+   ACES at exposure 1.05 is already compressing hard by 2.5 and the bloom pass
+   adds on top of that, so everything above roughly 2.8 landed on the same
+   clipped white: measured, a working core was ~1,200 pixels of luma 255 with no
+   crystal and no harness hue left in it, and because the pulse rides on top the
+   size of that white patch swung 1.45x every few seconds. A pure white disc
+   changing size is read as a flash, which is exactly what it looked like.
+
+   1.55 puts a working core at ~2.71, just under the knee, so it is the
+   brightest thing on the ring without being clipped: it keeps its facets, it
+   keeps its tangerine or cyan, and the gap the legend promises (idle ~1.08,
+   working ~2.71, so still two and a half times) survives intact. Brightness is
+   still the liveness channel. It just stops running off the end of the scale. */
+const glowTarget = (g) => Math.max(0.05, (g.isRoot ? 0.22 : 0.16) + (g.working ? 1.55 : 0)); /* :68-92 */
 
 function updateGlobe(g, t, dt, ringY, radiusUnit, cam) {
   const s = g.sim;
@@ -1430,18 +1499,49 @@ function updateGlobe(g, t, dt, ringY, radiusUnit, cam) {
      and this one cannot (see gemMat). The LIVENESS GAP is what the legend
      promises, not the absolute value: idle lands near 1.0 and working near 4.0,
      so a working core still blazes at roughly four times an idle one. */
-  const pulseGlow = 1 + pulse * 0.3;
+  /* The breath was +/-30% on the core and +/-45% on the halo. Under a clipped
+     core that amplitude was the flash itself: the brightness had nowhere to go
+     so the pulse came out as the white patch growing and shrinking instead of
+     as the body getting brighter and dimmer. With the core back under the knee
+     the pulse is visible as brightness again, so it needs far less of it. 14%
+     is a breath you notice on a body you are looking at and do not catch out of
+     the corner of your eye, which is the right split for something that sits
+     behind the wordmark on every scroll. */
+  const pulseGlow = 1 + pulse * 0.14;
   g.gemMat.emissiveIntensity = (0.85 + s.glow * 1.05) * pulseGlow;
-  g.haloMat.opacity = Math.min(1, (0.05 + s.glow * 0.34) * (1 + pulse * 0.45));
-  g.nodeMat.opacity = Math.min(1, (0.16 + s.glow * 0.32) * pulseGlow);
+  /* The halo and the nodes are the last of the flashing, and the reason they
+     were the hardest to see is that they do not obey the exposure. Both are
+     AdditiveBlending with toneMapped:false, so unlike every other surface here
+     they skip ACES and write their colour straight into the buffer. Measured
+     live, a working body's halo was rgb(1, .47, .33) at opacity .75 landing on
+     top of a core the tone mapper had already brought up to ~.87: the red
+     channel summed past 1.6 and clipped, and since the halo is a radial ramp
+     the clip covered a disc rather than a point. That is the white blob that
+     was sitting where the crystal should be.
+
+     .20 and .20 keep both under the ceiling once they land on the core. The
+     halo is still the thing that says a body is live (idle .08 against working
+     .42, a five-fold spread), it just stops being the thing that decides the
+     pixel. Leaving toneMapped alone on purpose: switching it on would compress
+     the halo's own colour but the ADDITION still happens in buffer space
+     afterwards, so it treats the symptom and not the sum. The amplitude is the
+     only real control here. */
+  g.haloMat.opacity = Math.min(1, (0.05 + s.glow * 0.20) * (1 + pulse * 0.2));
+  g.nodeMat.opacity = Math.min(1, (0.14 + s.glow * 0.20) * pulseGlow);
   /* a working body looks wetter: the glass picks up a little more of the probe
      as the core comes up, so liveness reads in the highlight too */
   g.glassMat.opacity = (0.11 + liveK * 0.07) * Math.max(0, Math.min(1, g.lscale));
 
-  /* colour: idle lattices dim, working ones blaze toward white-hot, :359-383 */
+  /* colour: idle lattices dim, working ones blaze toward white-hot, :359-383.
+     whiteHot was .5 + .12, which drove a working core half way to white before
+     the emissive intensity had even been applied, and the two together are what
+     turned tangerine and cyan into the same anonymous white. The file already
+     says this is the cost ("honest but washes the harness hue out"); at .26 the
+     blaze still reads as heat rather than as colour, and the harness the legend
+     underneath is naming survives being on a working body. */
   const shellLit = 0.32 + liveK * 0.68;
   const colorQuiet = livenessColorScale(liveK);
-  const whiteHot = liveK * 0.5 + pulse * 0.12;
+  const whiteHot = liveK * 0.26 + pulse * 0.05;
   g.shellMat.uniforms.stroke.value.copy(g.color).lerp(WHITE, whiteHot * 0.4).multiplyScalar(shellLit);
   g.shellMat.uniforms.backfaceStroke.value.copy(g.color).multiplyScalar(0.16 * shellLit);
   g.cageMat.uniforms.stroke.value.copy(g.innerColor).lerp(WHITE, whiteHot * 0.4).multiplyScalar(shellLit);
@@ -1733,8 +1833,16 @@ function makeStage(canvas, cam, bloom) {
 
   const composer = new EffectComposer(renderer, { frameBufferType: THREE.HalfFloatType, multisampling: 4 });
   composer.addPass(new RenderPass(scene, cam));
+  /* Threshold .38, up from .22, and the third part of the flashing fix. Bloom
+     is what turned a specular into an event: at .22 the threshold sat under
+     the glass highlight, so every glint the probe threw got a halo bolted onto
+     it and a highlight that would have been a small bright spot arrived as a
+     bloom the width of the body. The cores are the only thing on this page
+     that should bloom, and they clear .38 comfortably (an idle core lands near
+     .55 tonemapped, a working one near .85), so the liveness gap the legend
+     promises survives the change while a passing reflection no longer does. */
   composer.addPass(new EffectPass(cam, new BloomEffect(bloom || {
-    intensity: 1.3, luminanceThreshold: 0.22, luminanceSmoothing: 0.9,
+    intensity: 1.05, luminanceThreshold: 0.38, luminanceSmoothing: 0.9,
     mipmapBlur: true, radius: 0.85,
   })));                                                  /* :972 */
   return { renderer, scene, composer };
@@ -1919,17 +2027,23 @@ function updateStrip(t, dt) {
    event rate spread over 2.5x the bodies meant any given globe turned over
    once every three minutes and the ring looked static.
 
-   Now 2.2 to 5.2 seconds, and a third of the events take TWO bodies at once.
+   The rate has to be read against the COUNT, which is why it moved again when
+   the ring went from twenty bodies to eleven. The same event rate over half as
+   many bodies doubles how often any given one turns over, and at eleven that
+   put a collapse in the reader's eye about every thirty seconds, which is the
+   ring drawing attention to itself. 3.4 to 7.4 seconds with a fifth of the
+   events taking two bodies lands each body at roughly a minute, so an event is
+   something you catch rather than something you wait through.
+
    An event runs about 0.83s end to end (0.23s to collapse at lambda 16, 0.60s
-   to bloom back at lambda 7), so something is now always mid-turnover
-   somewhere on the ring without the hero ever looking like it is churning. */
+   to bloom back at lambda 7). */
 let nextEvent = 2;
 function turnover(t) {
   if (REDUCED || t < nextEvent) return;
-  nextEvent = t + 2.2 + Math.random() * 3;
+  nextEvent = t + 3.4 + Math.random() * 4;
   const alive = globes.filter((g) => g.phase === 'alive');
   if (!alive.length) return;
-  const take = Math.random() < 0.34 ? 2 : 1;
+  const take = Math.random() < 0.2 ? 2 : 1;
   for (let n = 0; n < take && alive.length; n++) {
     const [g] = alive.splice(Math.floor(Math.random() * alive.length), 1);
     g.phase = 'imploding';
@@ -2020,15 +2134,19 @@ function frame() {
 
   if (heroVisible) {
     turnover(t);
-    /* body size, as a fraction of the ring radius. Dropped from .097 when the
-       ring widened: a body is sized in WORLD units, so widening the ring shrank
-       the world-per-pixel scale and every globe grew ~23% on screen without
-       anyone asking it to. Twenty of those crowded the stage edge to edge. */
+    /* body size, as a fraction of the ring radius, and it stays at .067 even
+       though the count halved. Going up to .079 with eleven bodies was tried
+       and it is the wrong trade: the bodies on the near arc grew until they
+       crowded the lede underneath and the two largest anchored the bottom
+       corners, so the hero read as scattered objects rather than as an orbit,
+       which is the same "overwhelming" complaint the count was cut to answer,
+       just with fewer and bigger offenders. Removing bodies is what buys the
+       air. Spending it back on size gives it straight up again. */
     /* Phones get bigger bodies. The ring radius there is capped by the VIEWPORT
        rather than by the wordmark (0.46 * W wins under ~700px), so the same
        world-unit body that reads correctly against a 590px desktop ring lands
-       at ~12px across on a 390px one, and twenty of those read as confetti
-       sprinkled round the word rather than as an orbit. */
+       at ~12px across on a 390px one, which reads as confetti sprinkled round
+       the word rather than as an orbit. */
     const radiusUnit = R * (window.innerWidth < 700 ? 0.108 : 0.067);
     for (let i = 0; i < globes.length; i++) {
       const g = globes[i];
@@ -2067,6 +2185,7 @@ resize();
 resizeStrip();
 resizeSky();
 window.addEventListener('resize', () => { resize(); resizeStrip(); resizeSky(); });
+
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { resize(); resizeStrip(); });
 requestAnimationFrame(frame);
 })();

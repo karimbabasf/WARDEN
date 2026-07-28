@@ -19,7 +19,6 @@ import {
   BufferGeometry,
   CanvasTexture,
   Color,
-  CubeCamera,
   DirectionalLight,
   DoubleSide,
   Float32BufferAttribute,
@@ -33,6 +32,7 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshPhysicalMaterial,
+  PMREMGenerator,
   PerspectiveCamera,
   PlaneGeometry,
   Points,
@@ -43,18 +43,17 @@ import {
   Sprite,
   SpriteMaterial,
   Vector3,
-  WebGLCubeRenderTarget,
   WebGLRenderer,
 } from 'three';
 import { EffectComposer, RenderPass, EffectPass, BloomEffect } from 'postprocessing';
 
 const THREE = {
   ACESFilmicToneMapping, AdditiveBlending, AmbientLight, BackSide, BufferAttribute,
-  BufferGeometry, CanvasTexture, Color, CubeCamera, DirectionalLight, DoubleSide,
+  BufferGeometry, CanvasTexture, Color, DirectionalLight, DoubleSide,
   Float32BufferAttribute, Group, HalfFloatType, IcosahedronGeometry, LineBasicMaterial,
   LineLoop, LineSegments, MathUtils, Mesh, MeshBasicMaterial, MeshPhysicalMaterial,
-  PerspectiveCamera, PlaneGeometry, Points, PointsMaterial, RingGeometry, Scene,
-  ShaderMaterial, Sprite, SpriteMaterial, Vector3, WebGLCubeRenderTarget, WebGLRenderer,
+  PMREMGenerator, PerspectiveCamera, PlaneGeometry, Points, PointsMaterial, RingGeometry,
+  Scene, ShaderMaterial, Sprite, SpriteMaterial, Vector3, WebGLRenderer,
 };
 
 export { THREE, EffectComposer, RenderPass, EffectPass, BloomEffect };
