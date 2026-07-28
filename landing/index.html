@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WARDEN &middot; the agent that watches your agents</title>
-<meta name="description" content="A macOS radar for every Claude Code and Codex session running on your Mac. Local first, no API keys, no socket until you ask for one.">
+<title>WARDEN &middot; every agent you are running, on one live board</title>
+<meta name="description" content="A macOS board for every coding agent running on your Mac. What each one is doing right now, which have stalled, how much context and money they have burned. $15, one payment.">
 
 <!-- Share card. og.png is the real hero shot at 1200x630, taken from this page by
      the same browser that renders it, so the card can never drift from the site.
@@ -14,15 +14,15 @@
      a hostname that does not exist yet. -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="WARDEN">
-<meta property="og:title" content="WARDEN &middot; the agent that watches your agents">
-<meta property="og:description" content="Every Claude Code and Codex session on your Mac, drawn as one live map. Which agents are working, which have gone quiet, how much context each one has left.">
+<meta property="og:title" content="WARDEN &middot; every agent you are running, on one live board">
+<meta property="og:description" content="What each agent is doing right now, which have stalled, how much context and money they have burned. One screen instead of fourteen terminal tabs.">
 <meta property="og:image" content="og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="The WARDEN wordmark built from a grid of dots, ringed by lattice globes representing live agents.">
+<meta property="og:image:alt" content="The WARDEN wordmark ringed by lattice globes, one per live agent.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="WARDEN &middot; the agent that watches your agents">
-<meta name="twitter:description" content="Every Claude Code and Codex session on your Mac, drawn as one live map.">
+<meta name="twitter:title" content="WARDEN &middot; every agent you are running, on one live board">
+<meta name="twitter:description" content="What each agent is doing right now, which have stalled, and what they are costing you.">
 <meta name="twitter:image" content="og.png">
 
 <!-- Favicon inline as a data URI so the page still makes ZERO external requests and
@@ -36,59 +36,57 @@
      add back: <link rel="preload" as="font" type="font/woff2" href="..." crossorigin> -->
 <style>
 /* ── type ─────────────────────────────────────────────────────────────────
-   Array is the LOGOTYPE, used once, for the wordmark and nothing else. It is a
-   dot matrix face: the word is built from a grid of points, which is the same
-   thing the globes are (a point lattice with lit vertex nodes). The word and the
-   bodies orbiting it are made of the same particles, which is the whole idea.
-   It breaks down below display size, so it never appears anywhere but the mark.
-   Nippo (variable 200-700) carries everything else, headings and paragraphs both:
-   squared and geometric, Array's solid counterpart. Checked at 17px against a
-   neutral grotesk before committing to it; the flat sided bowls read as instrument
-   text rather than the soft geometric that made the first pick wrong for body.
-   Mono is the app's own stack: WARDEN's style.css declares local SF Mono / Menlo,
-   so the site and the product speak in the same typeface for zero payload.
-   Three families total (logotype, text, mono) and 59KB of font across the page. */
+   ONE text family, Expose (variable 400-900), carrying the wordmark at 800 and
+   body at 400. A single face with a real weight gap reads as a decision; two
+   unrelated faces read as a moodboard. Picked by rendering the shortlist INSIDE
+   this hero at full size with the ring live, not off a specimen row: the earlier
+   dot matrix logotype dissolved into the globes at 180px and the condensed
+   candidates shrank the ring, which is measured off the mark's width.
+   Numerals, labels and prices are the app's own mono stack (local SF Mono /
+   Menlo, zero payload), which is also how WARDEN itself sets every readout, so
+   the site and the product speak the same language. 28.6KB of webfont total,
+   down from 59KB. */
 @font-face{
-  font-family:Array;
-  src:url("fonts/array.woff2") format("woff2");
-  font-weight:700; font-style:normal; font-display:swap;
-}
-@font-face{
-  font-family:Nippo;
-  src:url("fonts/nippo-variable.woff2") format("woff2-variations");
-  font-weight:200 700; font-style:normal; font-display:swap;
+  font-family:Expose;
+  src:url("fonts/expose.woff2") format("woff2-variations");
+  font-weight:400 900; font-style:normal; font-display:swap;
 }
 @font-face{ /* metric matched fallback so the wordmark does not shift on load */
   font-family:MarkFallback;
   src:local("Helvetica Neue"),local("Arial");
-  size-adjust:112%; ascent-override:92%; descent-override:22%;
+  size-adjust:104%; ascent-override:92%; descent-override:22%;
 }
 
 :root{
   --void:#020403;          /* the app's own --bg */
   --surface:#070d0b;
+  --surface-2:#0b1310;
   --ink:#e9f1ed;
   --ink-2:#a3b3ad;         /* 9.4:1  */
   --ink-3:#7d908a;         /* 6.1:1  */
-  --ink-4:#6e7c76;         /* 4.7:1, the dimmest step that still clears AA */
+  /* 4.7:1 on --void, but this step is also used ON --surface and --surface-2
+     (tier prices, the strike-through, the window bar), and those are lighter,
+     which dropped it to 4.31:1 and failed AA. Calibrated against the LIGHTEST
+     surface it appears on rather than the darkest, so every use clears 4.5. */
+  --ink-4:#7c8a84;
   --rule:#16211d;
   --rule-2:#101a17;
   --claude:#ff8636;        /* harnessColors.ts, verbatim */
   --codex:#4fc9ff;
   --slate:#8fa0b8;
 
-  --mark:Array,MarkFallback,sans-serif;   /* the logotype, used exactly once */
-  --display:Nippo,"Helvetica Neue",sans-serif;
-  --sans:Nippo,"Helvetica Neue",sans-serif;
+  --mark:Expose,MarkFallback,sans-serif;
+  --sans:Expose,"Helvetica Neue",sans-serif;
   --mono:"SF Mono",Menlo,ui-monospace,monospace;
 
   --r-ctl:4px;             /* machined geometry: one control radius, one surface radius */
   --r-srf:2px;
   --ease:cubic-bezier(.23,1,.32,1);
+  --t-micro:.12s; --t-base:.3s; --t-travel:.6s;
 }
 
 *{margin:0;padding:0;box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
 body{
   background:var(--void); color:var(--ink);
   font-family:var(--sans); font-weight:400;
@@ -99,29 +97,46 @@ body{
 ::selection{background:var(--claude);color:#0a0503}
 a{color:inherit}
 :focus-visible{outline:2px solid var(--codex);outline-offset:3px;border-radius:2px}
+/* height:auto is load bearing: the img carries width/height attributes so the
+   layout reserves the right box before it decodes, and without this the
+   attribute height wins once max-width kicks in and the screenshot renders
+   348x900 (stretched to four times its aspect) on a phone. */
+img{max-width:100%;height:auto;display:block}
 
 .wrap{max-width:1240px;margin:0 auto;padding:0 32px}
 .mono{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;font-weight:500}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* Reveal on scroll. Transform and opacity only, one easing token, and a stagger
+   driven by an inline --d so the markup stays free of per-element rules. */
+.rise{opacity:0;transform:translateY(10px);
+  transition:opacity var(--t-travel) var(--ease) var(--d,0s),transform var(--t-travel) var(--ease) var(--d,0s)}
+.rise.in{opacity:1;transform:none}
 
 /* ── top rail ─────────────────────────────────────────────────────────── */
 .rail{
   position:relative;z-index:4;
-  display:flex;align-items:baseline;justify-content:space-between;gap:24px;
-  padding:24px 32px 0;
+  display:flex;align-items:center;justify-content:space-between;gap:24px;
+  padding:20px 32px 0;
 }
-.rail b{font-family:var(--display);font-weight:700;font-size:14px;letter-spacing:.22em}
-.rail .mono{color:var(--ink-3)}
-.rail .set{display:flex;gap:20px}
+.rail b{font-family:var(--mark);font-weight:800;font-size:15px;letter-spacing:.16em}
+.rail .set{display:flex;gap:20px;color:var(--ink-3)}
+.rail nav{display:flex;align-items:center;gap:22px}
+/* padded to a 24px hit target: the label itself is 11px mono and was a 15px tall
+   target, which is under the WCAG 2.2 minimum. */
+.rail nav a.mono{color:var(--ink-3);text-decoration:none;padding:7px 4px;
+  transition:color var(--t-micro) var(--ease)}
+.rail nav a.mono:hover{color:var(--ink)}
 
 /* ── hero ─────────────────────────────────────────────────────────────── */
-.hero{padding:0 0 96px}
+.hero{padding:0 0 40px}
 
 /* the ring stage. Two canvases with the wordmark sandwiched between them is
    what buys real occlusion: near globes paint over the letters, far globes are
    painted over by them. One shared orbit solves both layers. */
 .orbit{
   position:relative;
-  height:clamp(420px,60vh,620px);
+  height:clamp(400px,56vh,580px);
   display:grid;place-items:center;
 }
 /* The canvases overhang the stage box top and bottom. The ring is taller than
@@ -138,31 +153,35 @@ a{color:inherit}
 
 .mark{
   position:relative;z-index:2;
-  font-family:var(--mark);font-weight:700;
-  font-size:clamp(3.1rem,12.6vw,11.5rem);
+  font-family:var(--mark);font-weight:800;
+  font-size:clamp(3rem,12.4vw,11rem);
   line-height:.9;
-  letter-spacing:.04em;
-  text-indent:.02em;           /* half the trailing letterspace, to optically centre */
+  letter-spacing:-.018em;
   color:var(--ink);
   white-space:nowrap;
   user-select:none;
 }
 
 .lede{
-  max-width:52ch;margin:0 auto;padding:0 32px;
-  text-align:center;color:var(--ink-2);
-  font-size:clamp(17px,1.55vw,20px);line-height:1.55;
+  max-width:34ch;margin:0 auto;padding:0 32px;
+  text-align:center;color:var(--ink);
+  font-size:clamp(24px,2.9vw,38px);line-height:1.16;
+  font-weight:600;letter-spacing:-.018em;
 }
-.lede em{font-style:normal;color:var(--ink)}
+.sub{
+  max-width:56ch;margin:18px auto 0;padding:0 32px;
+  text-align:center;color:var(--ink-2);
+  font-size:clamp(16px,1.4vw,18px);line-height:1.55;
+}
 
-.actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:36px;padding:0 32px}
+.actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:32px;padding:0 32px}
 
 /* Controls: layered depth, not a flat fill. Hard offset that collapses on press. */
 .btn{
-  font-family:var(--display);font-size:14px;font-weight:600;letter-spacing:.03em;
-  padding:12px 24px;border-radius:var(--r-ctl);
-  cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px;
-  transition:transform .12s var(--ease),box-shadow .12s var(--ease),background-color .12s var(--ease);
+  font-family:var(--sans);font-size:15px;font-weight:600;letter-spacing:-.005em;
+  padding:13px 22px;border-radius:var(--r-ctl);
+  cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:10px;
+  transition:transform var(--t-micro) var(--ease),box-shadow var(--t-micro) var(--ease),background-color var(--t-micro) var(--ease);
 }
 .btn-key{
   background:var(--ink);color:#050a08;border:1px solid #ffffff;
@@ -176,76 +195,197 @@ a{color:inherit}
 }
 .btn-ghost:hover{background:#0c1512;border-color:#31423b}
 .btn-ghost:active{transform:translateY(2px);box-shadow:0 0 0 #0b120f,inset 0 1px 0 rgba(255,255,255,.06)}
-.note{margin-top:20px;text-align:center;color:var(--ink-3)}
+.btn .tag{font-family:var(--mono);font-size:12px;letter-spacing:.06em;opacity:.62}
+.btn-sm{padding:9px 16px;font-size:14px}
+.note{margin-top:18px;text-align:center;color:var(--ink-3)}
 
-/* ── legend: what a globe is telling you ──────────────────────────────── */
-.legend{
-  margin-top:88px;border-top:1px solid var(--rule);
-  display:grid;grid-template-columns:repeat(3,1fr);
+/* ── the three tells: what you get, before any prose ──────────────────── */
+.tells{
+  margin-top:72px;padding-top:0;
+  display:grid;grid-template-columns:repeat(3,1fr);gap:1px;
+  background:var(--rule-2);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);
 }
-.legend li{list-style:none;padding:24px 28px 24px 0;border-right:1px solid var(--rule-2)}
-.legend li:last-child{border-right:0}
-.legend dt{color:var(--ink-3);margin-bottom:8px}
-.legend dd{color:var(--ink-2);font-size:15px;line-height:1.5;max-width:34ch}
-.legend dd b{color:var(--ink);font-weight:600}
+.tells div{background:var(--void);padding:26px 30px 28px}
+.tells h2{font-size:19px;font-weight:600;letter-spacing:-.012em;margin-bottom:7px;font-family:var(--sans);line-height:1.3}
+.tells p{color:var(--ink-2);font-size:15px;line-height:1.5;max-width:34ch}
+
+/* ── section furniture ────────────────────────────────────────────────── */
+section{scroll-margin-top:24px}
+.band{padding:112px 0 0;border-top:1px solid var(--rule)}
+.band:first-of-type{border-top:0}
+.head{display:grid;grid-template-columns:5fr 7fr;gap:56px;align-items:end;margin-bottom:48px}
+h2{font-family:var(--sans);font-weight:700;font-size:clamp(2rem,4.2vw,3.2rem);line-height:1.03;letter-spacing:-.028em}
+.head p{color:var(--ink-2);max-width:56ch;font-size:17px}
+.kicker{color:var(--ink-4);margin-bottom:18px;display:block}
+
+/* ── proof: the actual product ────────────────────────────────────────── */
+.shot{
+  position:relative;border:1px solid var(--rule);border-radius:6px;overflow:hidden;
+  background:var(--surface);
+  box-shadow:0 1px 0 rgba(255,255,255,.05) inset, 0 30px 80px -40px rgba(0,0,0,.9);
+}
+.shot .bar{
+  display:flex;align-items:center;gap:7px;padding:10px 14px;
+  border-bottom:1px solid var(--rule);background:var(--surface-2);
+}
+.shot .bar i{width:9px;height:9px;border-radius:50%;background:#1d2a25;display:block}
+.shot .bar span{margin-left:8px;color:var(--ink-4);font-family:var(--mono);font-size:11px;letter-spacing:.1em}
+.shot img{width:100%}
+/* numbered pins sit ON the screenshot, the legend below matches them. Reads at a
+   glance and survives a narrow viewport, which a floating callout does not. */
+.pin{
+  position:absolute;width:24px;height:24px;border-radius:50%;
+  display:grid;place-items:center;
+  font-family:var(--mono);font-size:11px;font-weight:600;
+  background:var(--ink);color:#050a08;
+  box-shadow:0 0 0 4px rgba(2,4,3,.75);
+  transform:translate(-50%,-50%);
+}
+.keys{display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin-top:26px}
+.keys li{list-style:none;display:grid;grid-template-columns:24px 1fr;gap:12px;align-items:start}
+.keys .n{
+  font-family:var(--mono);font-size:11px;font-weight:600;
+  width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
+  background:var(--surface);border:1px solid var(--rule);color:var(--ink-2);margin-top:2px;
+}
+.keys p{color:var(--ink-2);font-size:15px;line-height:1.5}
+.keys b{color:var(--ink);font-weight:600}
+
+/* ── read: the live legend ────────────────────────────────────────────── */
+.channels{position:relative;display:grid;grid-template-columns:repeat(3,1fr)}
+#orb-strip{
+  position:absolute;left:0;top:0;width:100%;height:190px;display:block;
+  pointer-events:none;
+}
+.channels li{list-style:none;padding:206px 28px 0 0}
+.channels dt{color:var(--ink-3);margin-bottom:9px}
+.channels dd{color:var(--ink-2);font-size:15px;line-height:1.5;max-width:34ch}
+.channels dd b{color:var(--ink);font-weight:600}
 .g-claude{color:var(--claude)}.g-codex{color:var(--codex)}.g-slate{color:var(--slate)}
-/* the harness glyphs come from the mono stack, which actually carries them */
 .gly{font-family:var(--mono);font-size:.92em}
 
-/* ── datasheet ────────────────────────────────────────────────────────── */
-.sheet{padding:120px 0 40px;border-top:1px solid var(--rule)}
-.sheet-head{display:grid;grid-template-columns:5fr 7fr;gap:56px;align-items:end;margin-bottom:64px}
-h2{font-family:var(--display);font-weight:700;font-size:clamp(2rem,4.4vw,3.4rem);line-height:1.02;letter-spacing:-.015em}
-.sheet-head p{color:var(--ink-2);max-width:56ch;font-size:17px}
-
+/* ── restraint rows ───────────────────────────────────────────────────── */
 .rows{border-top:1px solid var(--rule)}
 .row{
   display:grid;grid-template-columns:44px 5fr 7fr;gap:32px;
-  padding:32px 0;border-bottom:1px solid var(--rule-2);align-items:start;
+  padding:30px 0;border-bottom:1px solid var(--rule-2);align-items:start;
 }
 .row .idx{font-family:var(--mono);font-size:11px;color:var(--ink-4);padding-top:4px;letter-spacing:.08em}
-.row h3{font-family:var(--display);font-weight:700;font-size:20px;letter-spacing:.005em;line-height:1.25}
+.row h3{font-weight:600;font-size:19px;letter-spacing:-.012em;line-height:1.25}
 .row p{color:var(--ink-2);font-size:16px;max-width:64ch}
 .row p b{color:var(--ink);font-weight:600}
 
-.spec{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-2);margin-top:64px;border:1px solid var(--rule-2)}
-.spec div{background:var(--void);padding:20px 24px}
-.spec dt{color:var(--ink-4);margin-bottom:8px}
+.spec{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-2);margin-top:44px;border:1px solid var(--rule-2)}
+.spec div{background:var(--void);padding:18px 22px}
+.spec dt{color:var(--ink-4);margin-bottom:7px}
 .spec dd{font-size:15px;color:var(--ink);font-weight:500}
 
+/* ── pricing ──────────────────────────────────────────────────────────── */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:8px}
+.tier{
+  position:relative;
+  background:var(--surface);border:1px solid var(--rule);border-radius:6px;
+  padding:28px 26px 26px;
+  display:flex;flex-direction:column;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05);
+  transition:transform var(--t-base) var(--ease),border-color var(--t-base) var(--ease),background-color var(--t-base) var(--ease);
+}
+.tier:hover{transform:translateY(-4px);border-color:#2b3a34;background:var(--surface-2)}
+.tier.pick{border-color:#3a4b43}
+.tier.pick::before{
+  content:"MOST TAKEN";position:absolute;top:-1px;right:18px;
+  transform:translateY(-50%);
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;font-weight:600;
+  background:var(--claude);color:#170a02;padding:4px 9px;border-radius:2px;
+}
+/* the machine count, drawn rather than stated: one orb per Mac. */
+.orbs{display:flex;gap:11px;height:32px;align-items:center;margin-bottom:20px}
+.orb{
+  width:26px;height:26px;border-radius:50%;position:relative;
+  border:1px solid rgba(255,255,255,.34);
+  background:radial-gradient(circle at 50% 50%, rgba(255,255,255,.14), rgba(255,255,255,0) 68%);
+}
+.orb::after{
+  content:"";position:absolute;inset:7px;border-radius:50%;
+  background:var(--claude);opacity:.85;
+}
+/* the cradle ring, flattened to an ellipse so it reads as an orbit seen edge on
+   rather than a halo. Speeds up on hover: the only motion on the card that
+   answers the pointer, which is enough. */
+.orb::before{
+  content:"";position:absolute;inset:-6px;border-radius:50%;
+  border:1px solid rgba(255,255,255,.16);
+  animation:orbspin 9s linear infinite;
+  transform-origin:50% 50%;
+  scale:1 .38;
+}
+.tier:hover .orb::before{animation-duration:2.6s}
+.tier:nth-child(2) .orb:nth-child(2)::after{background:var(--codex)}
+.tier:nth-child(3) .orb:nth-child(2)::after{background:var(--codex)}
+.tier:nth-child(3) .orb:nth-child(3)::after{background:var(--slate)}
+@keyframes orbspin{from{rotate:0deg}to{rotate:360deg}}
+
+.tier h3{font-size:15px;font-weight:600;color:var(--ink-2);letter-spacing:-.005em}
+.price{display:flex;align-items:baseline;gap:10px;margin:10px 0 2px}
+.price .now{font-family:var(--mono);font-size:44px;font-weight:600;letter-spacing:-.03em;color:var(--ink);line-height:1}
+.price .was{font-family:var(--mono);font-size:17px;color:var(--ink-4);text-decoration:line-through;text-decoration-thickness:1px}
+.save{
+  font-family:var(--mono);font-size:10px;letter-spacing:.12em;font-weight:600;
+  color:var(--claude);
+  opacity:0;transition:opacity var(--t-travel) var(--ease) .28s;
+}
+.in .save{opacity:1}
+.tier .per{color:var(--ink-4);font-family:var(--mono);font-size:11px;letter-spacing:.08em;margin-bottom:16px}
+.tier p.what{color:var(--ink-2);font-size:15px;line-height:1.5;margin-bottom:22px;flex:1}
+.tier .btn{width:100%;justify-content:center}
+.terms{margin-top:22px;color:var(--ink-4);text-align:center}
+
 /* ── close ────────────────────────────────────────────────────────────── */
-.close{padding:128px 0 100px;text-align:center}
-.close h2{max-width:16ch;margin:0 auto 24px}
-.close p{color:var(--ink-2);max-width:46ch;margin:0 auto 32px}
+.close{padding:116px 0 96px;text-align:center;border-top:1px solid var(--rule);margin-top:112px}
+.close h2{max-width:17ch;margin:0 auto 20px}
+.close p{color:var(--ink-2);max-width:48ch;margin:0 auto 30px}
 
 footer{border-top:1px solid var(--rule);padding:24px 0 40px}
 .foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--ink-4)}
 
-@media (max-width:900px){
-  .legend{grid-template-columns:1fr}
-  .legend li{border-right:0;border-bottom:1px solid var(--rule-2);padding-right:0}
-  .legend li:last-child{border-bottom:0}
-  .sheet-head{grid-template-columns:1fr;gap:24px;align-items:start}
+@media (max-width:980px){
+  .tells{grid-template-columns:1fr}
+  .keys{grid-template-columns:1fr;gap:16px}
+  .tiers{grid-template-columns:1fr}
+  .head{grid-template-columns:1fr;gap:20px;align-items:start}
   .row{grid-template-columns:1fr;gap:12px}
   .row .idx{padding-top:0}
   .spec{grid-template-columns:repeat(2,1fr)}
   .rail .set{display:none}
   .wrap{padding:0 20px}
+  .channels{grid-template-columns:1fr}
+  #orb-strip{display:none}
+  .channels li{padding:0 0 22px;border-bottom:1px solid var(--rule-2)}
+  .channels li:last-child{border-bottom:0}
+  .pin{display:none}
 }
 @media (max-width:640px){
   /* narrow: the stage collapses toward the wordmark so the ring stops sitting in
      a field of dead space, and the mark takes more of the width to stay dominant */
-  .orbit{height:clamp(300px,42vh,400px)}
+  .orbit{height:clamp(280px,40vh,380px)}
   .orbit canvas{top:-104px;bottom:-104px;height:calc(100% + 208px)}
-  .mark{font-size:clamp(3rem,15.5vw,5rem);letter-spacing:.03em;text-indent:.03em}
-  .lede,.actions{padding:0 20px}
-  .hero{padding-bottom:64px}
-  .legend{margin-top:56px}
-  .sheet{padding-top:88px}
-  .close{padding:96px 0 80px}
+  .mark{font-size:clamp(2.9rem,15.5vw,5rem)}
+  .lede,.sub,.actions{padding:0 20px}
+  .lede{font-size:26px}
+  .band{padding-top:80px}
+  .close{padding:88px 0 72px;margin-top:80px}
+  .tells{margin-top:52px}
+  .rail nav a.mono{display:none}
 }
+/* Anything that captures the page without scrolling it (print, a screenshot
+   tool, a scraper) never fires the observer, so the reveal would hand it a page
+   of empty boxes. */
+@media print{ .rise{opacity:1!important;transform:none!important} }
 @media (prefers-reduced-motion:reduce){
-  *{transition-duration:.01ms!important}
+  html{scroll-behavior:auto}
+  *{transition-duration:.01ms!important;animation-duration:.01ms!important;animation-iteration-count:1!important}
+  .rise{opacity:1;transform:none}
+  .save{opacity:1}
 }
 </style>
 </head>
@@ -254,95 +394,195 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
 <div class="rail">
   <b>WARDEN</b>
   <div class="set mono">
-    <span>LOCAL FIRST</span><span>MACOS</span><span>NO API KEYS</span>
+    <span>LOCAL FIRST</span><span>NO ACCOUNT</span><span>NO API KEYS</span>
   </div>
-  <span class="mono">v0.1 &middot; APPLE SILICON</span>
+  <nav>
+    <a class="mono" href="#pricing">PRICING</a>
+    <a class="btn btn-key btn-sm" href="#pricing">Get WARDEN <span class="tag">$15</span></a>
+  </nav>
 </div>
 
 <main>
 <section class="hero">
   <div class="orbit" id="orbit">
     <canvas id="ring-back"></canvas>
-    <h1 class="mark">WARDEN</h1>
+    <h1 class="mark">WARDEN<span class="sr">, every agent you are running on one live board</span></h1>
     <canvas id="ring-front"></canvas>
   </div>
 
-  <p class="lede"><em>Every Claude Code and Codex session on your Mac, drawn as one live map.</em>
-  Which agents are working, which have gone quiet, how much context each one has left.</p>
+  <p class="lede">Every agent you are running, on one live board.</p>
+  <p class="sub">What each one is doing this second, which have gone quiet, and how much
+  context and money they have burned through. One screen instead of fourteen terminal tabs.</p>
 
   <div class="actions">
-    <a class="btn btn-key" href="#">Download for macOS</a>
-    <a class="btn btn-ghost" href="#read">What the radar shows</a>
+    <a class="btn btn-key" href="#pricing">Get WARDEN for macOS <span class="tag">$15</span></a>
+    <a class="btn btn-ghost" href="#proof">See it running</a>
   </div>
-  <p class="note mono">Reads your transcripts. Writes nothing to your projects.</p>
+  <p class="note mono">One payment &middot; runs entirely on your Mac &middot; nothing leaves the machine</p>
 
   <div class="wrap">
-    <ul class="legend">
+    <div class="tells">
+      <div class="rise"><h2>One board, every agent</h2>
+        <p>Every session on the machine, side by side, whatever is driving it.</p></div>
+      <div class="rise" style="--d:.08s"><h2>Stalled or working, instantly</h2>
+        <p>A working agent blazes. One that has quietly died goes dim and stays dim.</p></div>
+      <div class="rise" style="--d:.16s"><h2>Context and spend, live</h2>
+        <p>Watch a session fill its window and run up a bill before it surprises you.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="proof">
+  <div class="wrap">
+    <div class="head">
+      <h2 class="rise">This is the whole product.</h2>
+      <p class="rise" style="--d:.06s">No dashboard to assemble, no config file, no integration step. It opens
+      to the board, and the board is already correct.</p>
+    </div>
+
+    <div class="shot rise">
+      <div class="bar"><i></i><i></i><i></i><span>WARDEN</span></div>
+      <img src="app.jpg" width="1600" height="900" alt="The WARDEN window: a list of live agent sessions on the left, a lattice globe on the radar in the centre, and a readout on the right showing context window, activity and cost.">
+      <span class="pin" style="left:7.6%;top:31%">1</span>
+      <span class="pin" style="left:50%;top:36.5%">2</span>
+      <span class="pin" style="left:74.5%;top:61%">3</span>
+    </div>
+
+    <ul class="keys">
+      <li class="rise"><span class="n">1</span>
+        <p><b>The fleet.</b> Every session with the command it is running right now, its
+        model, and how far into its context window it has climbed.</p></li>
+      <li class="rise" style="--d:.07s"><span class="n">2</span>
+        <p><b>The board.</b> One globe per agent. Subagents hang off the agent that
+        spawned them, so a runaway fan-out is visible as a shape, not a log.</p></li>
+      <li class="rise" style="--d:.14s"><span class="n">3</span>
+        <p><b>The readout.</b> What the selected agent is doing, what it last touched,
+        how long it has been up, and what it has cost so far.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section class="band" id="read">
+  <div class="wrap">
+    <div class="head">
+      <h2 class="rise">Read it from across the room.</h2>
+      <p class="rise" style="--d:.06s">Three channels, each carrying exactly one fact. Once you have them, the
+      board answers from across the room and you stop opening sessions to check.</p>
+    </div>
+
+    <ul class="channels">
+      <canvas id="orb-strip"></canvas>
       <li><dl>
         <dt class="mono">Size &middot; context occupancy</dt>
-        <dd>A globe grows with the context its session is holding. A near full agent is a <b>large body</b> before you open anything.</dd>
+        <dd>A globe grows with the context its session is holding. A nearly full agent is a
+        <b>large body</b> before you open anything.</dd>
       </dl></li>
       <li><dl>
         <dt class="mono">Brightness &middot; liveness</dt>
-        <dd>Working agents blaze toward <b>white hot</b>. Idle ones dim and hold their hue. Colour never encodes load.</dd>
+        <dd>Working agents blaze toward <b>white hot</b>. Idle ones dim and hold their hue.
+        Colour never encodes load.</dd>
       </dl></li>
       <li><dl>
         <dt class="mono">Hue &middot; harness</dt>
-        <dd><span class="g-claude"><span class="gly">&#9670;</span> Claude</span>, <span class="g-codex"><span class="gly">&#9635;</span> Codex</span>, <span class="g-slate"><span class="gly">&#9671;</span> Unknown</span>. Always paired with a glyph, never colour alone.</dd>
+        <dd><span class="g-claude"><span class="gly">&#9670;</span> Claude Code</span>,
+        <span class="g-codex"><span class="gly">&#9635;</span> Codex</span>,
+        <span class="g-slate"><span class="gly">&#9671;</span> anything else</span>. Always paired
+        with a glyph, never colour alone.</dd>
       </dl></li>
     </ul>
   </div>
 </section>
 
-<section class="sheet" id="read">
+<section class="band">
   <div class="wrap">
-    <div class="sheet-head">
-      <h2>Three things it will not do</h2>
-      <p>WARDEN sits on top of work you care about, so the interesting part of the spec is
-      the part about restraint. These are enforced in the code, not in the marketing.</p>
+    <div class="head">
+      <h2 class="rise">Three things it will not do</h2>
+      <p class="rise" style="--d:.06s">WARDEN sits on top of work you care about, so the interesting half of the
+      spec is the half about restraint. These are enforced in the code, not in the marketing.</p>
     </div>
 
     <div class="rows">
-      <div class="row">
+      <div class="row rise">
         <span class="idx">01</span>
         <h3>It does not write to your projects</h3>
         <p>WARDEN tails the transcript files your harnesses already produce and never touches a
         watched project's source. <b>The only writes outside its own database are harness session
         metadata</b>, and they are confined to a single file so the write surface stays one file wide.</p>
       </div>
-      <div class="row">
+      <div class="row rise">
         <span class="idx">02</span>
         <h3>It does not open a socket until you ask</h3>
         <p>At rest it contacts no relay and binds no endpoint. Remote observation binds lazily,
         the moment you press Share. <b>What crosses the wire is a redacted projection</b>, never the
-        radar state itself, and a test fails the build if a radar type is ever serialized toward
+        board state itself, and a test fails the build if a radar type is ever serialized toward
         the network.</p>
       </div>
-      <div class="row">
+      <div class="row rise">
         <span class="idx">03</span>
         <h3>It does not invent a number</h3>
         <p>Every globe, ring and flare maps to a real signal: session liveness, context token
         weight, subagent hierarchy. <b>An unrecognised harness gets a neutral slate globe</b> rather
-        than borrowing Claude's or Codex's identity, and nothing on screen is there to fill space.</p>
+        than borrowing another's identity, and nothing on screen is there to fill space.</p>
       </div>
     </div>
 
     <dl class="spec">
       <div><dt class="mono">Platform</dt><dd>macOS, Apple Silicon</dd></div>
-      <div><dt class="mono">Harnesses</dt><dd>Claude Code, Codex</dd></div>
+      <div><dt class="mono">Reads today</dt><dd>Claude Code, Codex</dd></div>
       <div><dt class="mono">Storage</dt><dd>SQLite with FTS5, local</dd></div>
       <div><dt class="mono">Sharing</dt><dd>QUIC, on demand only</dd></div>
     </dl>
   </div>
 </section>
 
+<section class="band" id="pricing">
+  <div class="wrap">
+    <div class="head">
+      <h2 class="rise">Buy it once.</h2>
+      <p class="rise" style="--d:.06s">A licence per Mac, paid one time. No subscription, no seats, no account to
+      create. Add machines and the per-machine price drops.</p>
+    </div>
+
+    <div class="tiers">
+      <div class="tier rise">
+        <div class="orbs"><span class="orb"></span></div>
+        <h3>One Mac</h3>
+        <div class="price"><span class="now">$15</span></div>
+        <p class="per">SINGLE LICENCE</p>
+        <p class="what">The whole app on the machine you actually work on.</p>
+        <a class="btn btn-ghost" href="#">Get WARDEN</a>
+      </div>
+
+      <div class="tier pick rise" style="--d:.08s">
+        <div class="orbs"><span class="orb"></span><span class="orb"></span></div>
+        <h3>Two Macs</h3>
+        <div class="price"><span class="now">$25</span><span class="was">$30</span></div>
+        <p class="per"><span class="save">SAVE $5</span></p>
+        <p class="what">Desktop and laptop on one licence, for the way most people actually work.</p>
+        <a class="btn btn-key" href="#">Get WARDEN</a>
+      </div>
+
+      <div class="tier rise" style="--d:.16s">
+        <div class="orbs"><span class="orb"></span><span class="orb"></span><span class="orb"></span></div>
+        <h3>Three Macs</h3>
+        <div class="price"><span class="now">$30</span><span class="was">$45</span></div>
+        <p class="per"><span class="save">SAVE $15</span></p>
+        <p class="what">The whole desk, including the machine that only ever runs agents.</p>
+        <a class="btn btn-ghost" href="#">Get WARDEN</a>
+      </div>
+    </div>
+
+    <p class="terms mono">macOS on Apple Silicon &middot; no account &middot; no API keys</p>
+  </div>
+</section>
+
 <section class="close">
   <div class="wrap">
     <h2>Run five agents. Watch one screen.</h2>
-    <p>It launches to the radar, sits in the tray, and answers the only question worth asking
+    <p>It launches to the board, sits in the tray, and answers the only question worth asking
     mid session: which of these is actually still moving?</p>
     <div class="actions" style="margin-top:0">
-      <a class="btn btn-key" href="#">Download for macOS</a>
+      <a class="btn btn-key" href="#pricing">Get WARDEN for macOS <span class="tag">$15</span></a>
     </div>
   </div>
 </section>
@@ -390,8 +630,9 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
                                           RadarConstellation.tsx:938-974
 
    Two deliberate departures, both because a landing page is not the app:
-     1. an occluder sprite behind each front globe, so a globe crossing the
-        wordmark actually hides it. The app has nothing to occlude.
+     1. an occluder behind each front globe, so a globe crossing the wordmark
+        actually hides it. The app has nothing to occlude. See OCCLUSION below,
+        this is the part that has to look like a body and not a stain.
      2. no fog. fogExp2(BG, .014) over this scene's ~13 world units is a
         0.4% attenuation, i.e. invisible. Carrying it would be cargo cult.
 
@@ -406,12 +647,32 @@ const BACK  = document.getElementById('ring-back');
 const FRONT = document.getElementById('ring-front');
 const ORBIT = document.getElementById('orbit');
 const MARK  = document.querySelector('.mark');
+const STRIP = document.getElementById('orb-strip');
 
 const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+/* == reveal on scroll ====================================================
+   Independent of WebGL on purpose: if the vendor bundle fails, the page still
+   animates in rather than sitting at opacity 0 forever. */
+(() => {
+  const rise = document.querySelectorAll('.rise');
+  if (REDUCED || !('IntersectionObserver' in window)) {
+    rise.forEach((el) => el.classList.add('in'));
+    return;
+  }
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      e.target.classList.add('in');
+      io.unobserve(e.target);
+    }
+  }, { rootMargin: '0px 0px -12% 0px', threshold: 0.12 });
+  rise.forEach((el) => io.observe(el));
+})();
+
 /* No WebGL (or the vendor bundle failed to load): drop the canvases and let the
    wordmark carry the hero on its own rather than shipping a broken frame. */
-if (typeof W3 === 'undefined') { BACK.remove(); FRONT.remove(); return; }
+if (typeof W3 === 'undefined') { BACK.remove(); FRONT.remove(); if (STRIP) STRIP.remove(); return; }
 const { THREE, EffectComposer, RenderPass, EffectPass, BloomEffect } = W3;
 
 const BG    = '#020403';                       /* RadarConstellation.tsx:46 */
@@ -427,12 +688,15 @@ const HARNESS_IDS = Object.keys(HARNESS);
 /* Camera lift above the ring plane. This is the whole "saturn" dial: the ring's
    vertical half-spread on screen is Rpx * sin(TILT), so at 11.5 degrees the near
    globes land ~103px below the cap band, which on a ~110px wordmark drops them
-   clean under the baseline and kills the lapping. At 6.5 they cross the lower
+   clean under the baseline and kills the lapping. At 8 they cross the lower
    half of the letters and the far ones cross the upper half, which is the
    overlap Karim asked for, and it still reads as an oval rather than a line. */
 const TILT   = 8 * Math.PI / 180;
-const PERIOD = 64;                    /* seconds per revolution */
-const COUNT  = 10;
+const PERIOD = 80;                    /* seconds per revolution */
+/* 8, not 10. At 10 the ring stopped reading as a ring: globes overlapped each
+   other across the whole wordmark and the hero looked busy rather than ordered.
+   Eight leaves visible spacing at the extremes, where the ellipse is densest. */
+const COUNT  = 8;
 const R      = 3.2;                   /* ring radius, world units */
 
 /* == drei's wireframe material, ported ===================================
@@ -571,12 +835,44 @@ function radialTexture(size, stops) {
 }
 const glowTex = radialTexture(128, [[0, 1], [0.18, 0.8], [0.5, 0.22], [1, 0]]);
 const dotTex  = radialTexture(48,  [[0, 1], [0.4, 0.75], [1, 0]]);
-/* The one thing the app has no need for: a dark disc that lets a front globe
-   genuinely eat the wordmark behind it. Tight rather than wide on purpose. A
-   broad soft disc greys the letters across the globe's whole footprint and
-   reads as a smudge on the type; a small dense one reads as a solid body
-   passing in front, which is the point. */
-const occTex = radialTexture(128, [[0, 0.86], [0.45, 0.82], [0.72, 0.3], [1, 0]]);
+
+/* == OCCLUSION ===========================================================
+   A front globe has to hide the letters behind it, and HOW it does that is
+   the difference between a body and a stain. The previous version was a soft
+   radial sprite: 0.86 alpha at the centre falling to zero by the rim, sized
+   at 1.75x the globe. Because a sprite of scale S spans S world units, that
+   disc was actually SMALLER in radius than the globe it belonged to, and its
+   gradient meant every letter under it got partially greyed across a wide
+   soft footprint. On screen that is a smudge sliding over the type, and it
+   read as cheap because it is not how anything occludes anything.
+
+   This is a billboarded disc in the page's own colour at exactly the globe's
+   silhouette radius, fully opaque, hard edged. A globe crossing the wordmark
+   now takes a clean circular bite out of it and its lattice sits on a solid
+   sphere, which is what a body passing in front actually looks like. The
+   composer runs 4x multisampling so the rim stays smooth, and the disc is
+   toneMapped:false so it stays exactly BG and stays invisible everywhere it
+   is not covering type. Every glow the globe carries (halo, gem, nodes) has a
+   world radius below 0.75x the shell, so all of it now lands on the disc
+   instead of washing across the letters.
+
+   Built by hand as a triangle fan rather than with THREE.CircleGeometry: the
+   vendor bundle is tree-shaken to the ~34 classes this page actually uses, so
+   reaching for a new primitive silently returns undefined and throws at module
+   scope, taking the whole hero down. BufferGeometry and Float32BufferAttribute
+   are already in the bundle. Cheaper than rebuilding 572KB for one disc. */
+function discGeometry(segments) {
+  const pos = [];
+  for (let i = 0; i < segments; i++) {
+    const a0 = (i / segments) * Math.PI * 2;
+    const a1 = ((i + 1) / segments) * Math.PI * 2;
+    pos.push(0, 0, 0, Math.cos(a0), Math.sin(a0), 0, Math.cos(a1), Math.sin(a1), 0);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  return g;
+}
+const OCC_GEO = discGeometry(96);
 
 /* == AgentCore geometry (AgentCore.tsx:63-145, verbatim) ================== */
 function ringGeometry(radius, segments = 96) {
@@ -661,23 +957,27 @@ function buildEnv(renderer) {
   return rt.texture;
 }
 
-/* == one globe (RadarConstellation.tsx:170-493) =========================== */
-function makeGlobe(i) {
+/* == one globe (RadarConstellation.tsx:170-493) ===========================
+   `over` lets the live legend build globes that demonstrate one channel each
+   rather than taking the ring's derived-from-index identity. */
+function makeGlobe(i, over) {
+  const o = over || {};
   const g = {
     group: new THREE.Group(),
     seed: (i * 137.508 % 100) / 100,
-    isRoot: i % 3 === 0,
-    harness: HARNESS_IDS[i % 2],
+    isRoot: o.isRoot !== undefined ? o.isRoot : i % 3 === 0,
+    harness: o.harness || HARNESS_IDS[i % 2],
     /* A working globe blazes toward white (whiteHot below), which is honest but
        washes the harness hue out. On a real board most sessions are idle at any
        moment, so a minority here keeps both the blaze AND the tangerine/cyan the
        legend underneath promises. */
-    working: i % 3 === 1,
-    ctx: 0.45 + ((i * 37) % 55) / 100,   /* context occupancy = the SIZE channel */
+    working: o.working !== undefined ? o.working : i % 3 === 1,
+    ctx: o.ctx !== undefined ? o.ctx : 0.45 + ((i * 37) % 55) / 100,  /* context occupancy = SIZE */
     phase: 'alive',
     lscale: 1,
     sim: { scale: 0.0001, glow: 0.5, live: 0, core: 1 },
     theta: (i / COUNT) * Math.PI * 2,
+    anchor: o.anchor || null,      /* legend globes sit still instead of orbiting */
   };
 
   const isRoot = g.isRoot;
@@ -715,12 +1015,35 @@ function makeGlobe(i) {
   g.halo = new THREE.Sprite(g.haloMat);
   g.halo.scale.setScalar(isRoot ? 0.74 : 0.58);
   g.gem.add(g.halo);
+  /* THIRD departure from the app, forced by the second one. The app's gem is a
+     transmissive crystal (transmission .55), and transmission samples whatever
+     is behind the mesh. The occluder disc sits directly behind every front
+     globe, so the gem was refracting solid black and every core on the ring
+     went dark: proved by rendering one frame with the disc suppressed, where
+     the same gems came back lit. On this page the gem's whole job is to be the
+     lit core, so it is emissive-only. It also halves the draw calls, because
+     three re-renders the scene into its own buffer for every transmissive
+     material. `transparent` stays true: the disc is depthTest:false at
+     renderOrder -1, which only sorts ahead of the TRANSPARENT queue, so an
+     opaque gem would render first and be painted over by its own occluder. */
   g.gemMat = new THREE.MeshPhysicalMaterial({
     color: '#05120b', emissiveIntensity: 0.5, metalness: 0, roughness: 0.22,
-    transmission: 0.55, thickness: 0.6, ior: 1.45, transparent: true,
+    transmission: 0, thickness: 0.6, ior: 1.45, transparent: true,
     envMapIntensity: 1.1, flatShading: true,
   });
-  g.gem.add(new THREE.Mesh(new THREE.IcosahedronGeometry(0.26, 0), g.gemMat));
+  /* The core paints over the disc and over the shell's far lattice, always.
+     Dropping transmission also dropped the thing that used to make the gem
+     visible at all: a transmissive material is rendered in three's own pass
+     AFTER the opaque and transparent queues, so it landed on top by accident
+     of the pipeline. Without it the gem is an ordinary transparent mesh, and
+     the shell's wireframe writes depth across its whole front hemisphere even
+     where the shader draws nothing (a zero-alpha fragment still writes depth),
+     so the core was being depth-rejected and vanished. depthTest:false plus a
+     renderOrder above the disc's -1 states the intent directly. */
+  const gemMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.26, 0), g.gemMat);
+  g.gemMat.depthTest = false;
+  gemMesh.renderOrder = 1;
+  g.gem.add(gemMesh);
   g.group.add(g.gem);
 
   /* orchestrator signature: a root wears the gyro cradle + brand heart. */
@@ -750,9 +1073,9 @@ function makeGlobe(i) {
 
   /* the landing-only occluder, mounted OUTSIDE the group so it never takes the
      globe's spin, and drawn first so it can never erase another globe's lines. */
-  g.occ = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: occTex, color: new THREE.Color(BG), transparent: true,
-    depthWrite: false, depthTest: false,
+  g.occ = new THREE.Mesh(OCC_GEO, new THREE.MeshBasicMaterial({
+    color: new THREE.Color(BG), toneMapped: false,
+    transparent: true, opacity: 1, depthTest: false, depthWrite: false,
   }));
   g.occ.renderOrder = -1;
 
@@ -782,7 +1105,7 @@ const spinRate = (isRoot, liveK) =>
   (isRoot ? 0.08 : 0.14) * (REDUCED ? 1 : 1 + liveK * 0.85); /* radarMotion.ts */
 const glowTarget = (g) => Math.max(0.05, (g.isRoot ? 0.22 : 0.16) + (g.working ? 2.7 : 0)); /* :68-92 */
 
-function updateGlobe(g, t, dt, ringY, radiusUnit) {
+function updateGlobe(g, t, dt, ringY, radiusUnit, cam) {
   const s = g.sim;
 
   /* lifecycle, radarLifecycle.ts: implode at lambda 16, bloom back at 7, and
@@ -819,10 +1142,14 @@ function updateGlobe(g, t, dt, ringY, radiusUnit) {
   const breathe = 1 + idleBreath * (1 - liveK) + pulse * 0.045;
   g.group.scale.setScalar(s.scale * breathe);
 
-  const x = Math.cos(g.theta) * R;
-  const z = Math.sin(g.theta) * R;
-  const y = ringY + Math.sin(t * 0.6 + g.seed * 6.28) * 0.05;
-  g.group.position.set(x, y, z);
+  if (g.anchor) {
+    g.group.position.set(g.anchor.x, g.anchor.y + Math.sin(t * 0.6 + g.seed * 6.28) * 0.04, g.anchor.z);
+  } else {
+    const x = Math.cos(g.theta) * R;
+    const z = Math.sin(g.theta) * R;
+    const y = ringY + Math.sin(t * 0.6 + g.seed * 6.28) * 0.05;
+    g.group.position.set(x, y, z);
+  }
   g.group.rotation.y += dt * spinRate(g.isRoot, liveK);
 
   g.halo.scale.setScalar((g.isRoot ? 0.74 : 0.58) * (1 + liveK * 0.95 + pulse * 0.45));
@@ -831,9 +1158,13 @@ function updateGlobe(g, t, dt, ringY, radiusUnit) {
   g.gem.rotation.y += dt * 0.28;
   g.gem.rotation.x += dt * 0.12;
 
-  /* brightness = liveness, :345-357 */
+  /* brightness = liveness, :345-357. The gem floor is lifted from the app's 0.3
+     to 0.85 because the app's crystal earns its idle luminance from transmission
+     and this one cannot (see gemMat). The LIVENESS GAP is what the legend
+     promises, not the absolute value: idle lands near 1.0 and working near 4.0,
+     so a working core still blazes at roughly four times an idle one. */
   const pulseGlow = 1 + pulse * 0.3;
-  g.gemMat.emissiveIntensity = (0.3 + s.glow * 1.05) * pulseGlow;
+  g.gemMat.emissiveIntensity = (0.85 + s.glow * 1.05) * pulseGlow;
   g.haloMat.opacity = Math.min(1, (0.05 + s.glow * 0.34) * (1 + pulse * 0.45));
   g.nodeMat.opacity = Math.min(1, (0.16 + s.glow * 0.32) * pulseGlow);
 
@@ -872,16 +1203,20 @@ function updateGlobe(g, t, dt, ringY, radiusUnit) {
     g.heartMat.opacity = 0.9 * s.core;
   }
 
-  /* the occluder tracks the globe, sized to the shell and faded with it */
+  /* the occluder tracks the globe: same centre, the globe's true silhouette
+     radius, and billboarded so it is always a full disc rather than an ellipse.
+     The shell is IcosahedronGeometry(1) under group.scale, so the silhouette
+     radius IS s.scale * breathe; 1.02 covers the lattice's outermost stroke. */
   g.occ.position.copy(g.group.position);
-  g.occ.scale.setScalar(s.scale * breathe * 1.75);
+  if (cam) g.occ.quaternion.copy(cam.quaternion);
+  g.occ.scale.setScalar(s.scale * breathe * 1.02);
   g.occ.material.opacity = Math.max(0, Math.min(1, g.lscale));
 }
 
-/* == scene, one camera shared by both canvases =========================== */
+/* == scene =============================================================== */
 const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 200);
 
-function makeStage(canvas) {
+function makeStage(canvas, cam, bloom) {
   const renderer = new THREE.WebGLRenderer({
     canvas, antialias: true, alpha: true, powerPreference: 'high-performance',
   });
@@ -898,8 +1233,8 @@ function makeStage(canvas) {
   scene.add(d1, d2);
 
   const composer = new EffectComposer(renderer, { frameBufferType: THREE.HalfFloatType, multisampling: 4 });
-  composer.addPass(new RenderPass(scene, camera));
-  composer.addPass(new EffectPass(camera, new BloomEffect({
+  composer.addPass(new RenderPass(scene, cam));
+  composer.addPass(new EffectPass(cam, new BloomEffect(bloom || {
     intensity: 1.3, luminanceThreshold: 0.22, luminanceSmoothing: 0.9,
     mipmapBlur: true, radius: 0.85,
   })));                                                  /* :972 */
@@ -911,12 +1246,13 @@ function makeStage(canvas) {
    a thrown exception over the page. */
 let back, front;
 try {
-  back  = makeStage(BACK);
-  front = makeStage(FRONT);
+  back  = makeStage(BACK, camera);
+  front = makeStage(FRONT, camera);
 } catch (err) {
   console.warn('WARDEN ring: no WebGL, falling back to the wordmark alone.', err);
   BACK.remove();
   FRONT.remove();
+  if (STRIP) STRIP.remove();
   return;
 }
 
@@ -953,6 +1289,82 @@ function resize() {
   }
 }
 
+/* == the live legend =====================================================
+   Three globes, each demonstrating exactly one channel, sitting above the
+   column that names it. This is the cheapest honest way to teach the board's
+   language: a sentence about "size is context occupancy" costs a reader more
+   than watching one globe grow.
+
+   Perspective rather than orthographic, and not by preference: OrthographicCamera
+   is not in the tree-shaken vendor bundle either. It costs nothing here, because
+   a pinhole projection scales by f/z and all three globes sit on the same z
+   plane, so they read at identical size across the strip regardless of how far
+   off-axis they are. The only difference is a slight outward turn on the two
+   flanking bodies, which looks like lighting rather than an error. Everything
+   below is inside the try: a missing class here must cost the legend, never the
+   page. */
+let strip = null;
+if (STRIP) {
+  try {
+    const stripCam = new THREE.PerspectiveCamera(28, 1, 0.1, 100);
+    strip = makeStage(STRIP, stripCam, {
+      intensity: 1.15, luminanceThreshold: 0.22, luminanceSmoothing: 0.9,
+      mipmapBlur: true, radius: 0.8,
+    });
+    strip.cam = stripCam;
+    /* One per channel: [0] size, [1] liveness, [2] harness hue. All three are
+       the SAME body (sub globes, identical ctx floor) so the only difference a
+       reader sees is the channel being demonstrated. The first pass mixed roots
+       and subs, which put a big gyro cradle on two of the three and made the row
+       read as three unrelated objects rather than one control and two variables. */
+    strip.globes = [
+      makeGlobe(0, { isRoot: false, harness: 'claude_code', working: false, ctx: 0.72, anchor: new THREE.Vector3(0, 0, 0) }),
+      makeGlobe(1, { isRoot: false, harness: 'claude_code', working: false, ctx: 0.72, anchor: new THREE.Vector3(0, 0, 0) }),
+      makeGlobe(2, { isRoot: false, harness: 'codex',       working: false, ctx: 0.72, anchor: new THREE.Vector3(0, 0, 0) }),
+    ];
+    for (const g of strip.globes) strip.scene.add(g.group);
+  } catch (err) {
+    console.warn('WARDEN legend: no second context, dropping the live orbs.', err);
+    STRIP.remove();
+    strip = null;
+  }
+}
+
+const STRIP_FOV = 28;
+function resizeStrip() {
+  if (!strip) return;
+  const r = STRIP.getBoundingClientRect();
+  const W = r.width, H = r.height;
+  if (W < 2 || H < 2) return;
+  /* world height pinned at 2.4 units, width follows the aspect, so a globe is
+     the same physical size no matter how wide the row gets */
+  const wh = 2.4, ww = wh * (W / H);
+  const c = strip.cam;
+  c.aspect = W / H;
+  c.position.set(0, 0, (wh / 2) / Math.tan((STRIP_FOV * Math.PI / 180) / 2));
+  c.lookAt(0, 0, 0);
+  c.updateProjectionMatrix();
+  /* three columns: centre each globe on its column, matching the CSS grid */
+  strip.globes.forEach((g, i) => { g.anchor.x = (-ww / 3) + (i * ww / 3); });
+  strip.renderer.setSize(W, H, false);
+  strip.composer.setSize(W, H);
+}
+
+function updateStrip(t, dt) {
+  if (!strip) return;
+  const [size, live, hue] = strip.globes;
+  /* size: a session filling its context window, then a fresh one taking over */
+  size.ctx = REDUCED ? 0.7 : 0.28 + (Math.sin(t * 0.42) * 0.5 + 0.5) * 0.72;
+  /* liveness: working, then quietly stalling, on a slow square-ish cycle */
+  live.working = REDUCED ? true : Math.sin(t * 0.5) > -0.15;
+  /* hue: the same body under a different harness */
+  if (!REDUCED) {
+    const want = Math.sin(t * 0.34) > 0 ? 'codex' : 'claude_code';
+    if (hue.harness !== want) { hue.harness = want; applyHarness(hue); }
+  }
+  for (const g of strip.globes) updateGlobe(g, t, dt, 0, 0.78, strip.cam);
+}
+
 /* == turnover: one session ends, another starts ==========================
    Karim's dial. 5 to 10 seconds between events, and an event takes about
    0.83s end to end (0.23s to collapse at lambda 16, 0.60s to bloom back at
@@ -968,43 +1380,52 @@ function turnover(t) {
 
 /* == loop ================================================================ */
 let last = performance.now() / 1000;
-let visible = true;
-new IntersectionObserver(([e]) => { visible = e.isIntersecting; }, { threshold: 0 }).observe(ORBIT);
+let heroVisible = true;
+let stripVisible = false;
+new IntersectionObserver(([e]) => { heroVisible = e.isIntersecting; }, { threshold: 0 }).observe(ORBIT);
+if (strip) {
+  new IntersectionObserver(([e]) => { stripVisible = e.isIntersecting; }, { threshold: 0 }).observe(STRIP);
+}
 
 function frame() {
   requestAnimationFrame(frame);
   const now = performance.now() / 1000;
   const dt = Math.min(now - last, 0.05);
   last = now;
-  if (!visible) return;
-
   const t = now;
-  turnover(t);
 
-  const spin = REDUCED ? 0 : (t / PERIOD) * Math.PI * 2;
-  const radiusUnit = R * 0.097;
-  for (let i = 0; i < globes.length; i++) {
-    const g = globes[i];
-    g.theta = (i / COUNT) * Math.PI * 2 + spin;
-    updateGlobe(g, t, dt, ringY, radiusUnit);
-    /* the depth sandwich: a globe nearer the camera than the wordmark plane
-       is drawn on the canvas ABOVE the <h1>, one behind it on the canvas
-       below. Reparenting is how a globe crosses the word. */
-    const target = g.group.position.z >= 0 ? front : back;
-    if (g.group.parent !== target.scene) {
-      target.scene.add(g.group);
-      target.scene.add(g.occ);
+  if (heroVisible) {
+    turnover(t);
+    const spin = REDUCED ? 0 : (t / PERIOD) * Math.PI * 2;
+    const radiusUnit = R * 0.097;
+    for (let i = 0; i < globes.length; i++) {
+      const g = globes[i];
+      g.theta = (i / COUNT) * Math.PI * 2 + spin;
+      updateGlobe(g, t, dt, ringY, radiusUnit, camera);
+      /* the depth sandwich: a globe nearer the camera than the wordmark plane
+         is drawn on the canvas ABOVE the <h1>, one behind it on the canvas
+         below. Reparenting is how a globe crosses the word. */
+      const target = g.group.position.z >= 0 ? front : back;
+      if (g.group.parent !== target.scene) {
+        target.scene.add(g.group);
+        target.scene.add(g.occ);
+      }
+      g.occ.visible = target === front;
     }
-    g.occ.visible = target === front;
+    back.composer.render();
+    front.composer.render();
   }
 
-  back.composer.render();
-  front.composer.render();
+  if (stripVisible) {
+    updateStrip(t, dt);
+    strip.composer.render();
+  }
 }
 
 resize();
-window.addEventListener('resize', resize);
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(resize);
+resizeStrip();
+window.addEventListener('resize', () => { resize(); resizeStrip(); });
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { resize(); resizeStrip(); });
 requestAnimationFrame(frame);
 })();
 </script>
