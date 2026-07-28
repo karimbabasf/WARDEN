@@ -36,20 +36,35 @@
      add back: <link rel="preload" as="font" type="font/woff2" href="..." crossorigin> -->
 <style>
 /* ── type ─────────────────────────────────────────────────────────────────
-   ONE text family, Expose (variable 400-900), carrying the wordmark at 800 and
-   body at 400. A single face with a real weight gap reads as a decision; two
-   unrelated faces read as a moodboard. Picked by rendering the shortlist INSIDE
-   this hero at full size with the ring live, not off a specimen row: the earlier
-   dot matrix logotype dissolved into the globes at 180px and the condensed
-   candidates shrank the ring, which is measured off the mark's width.
-   Numerals, labels and prices are the app's own mono stack (local SF Mono /
-   Menlo, zero payload), which is also how WARDEN itself sets every readout, so
-   the site and the product speak the same language. 28.6KB of webfont total,
-   down from 59KB. */
+   Three roles, and the split is deliberate rather than a moodboard.
+
+   LOGOTYPE  Expose 800, on the word WARDEN and nothing else. A logotype is a
+             mark, not a text face: its job is to be dense and tight at 200px,
+             which is exactly what makes it the wrong thing to read a paragraph
+             in. The ring's radius is measured off this mark's width, so the
+             face also sets the hero's geometry.
+   TEXT      Switzer (variable 100-900), every heading and every sentence. Set
+             against the shortlist at the real headline size on a rendered
+             specimen sheet, not picked from memory: Expose ran visibly narrow
+             and tight-fitted at body size (the "compressed" read), the rounded
+             geometrics went soft, and Switzer was the one neutral grotesque
+             that held even colour on black at 15px and still had a display
+             weight worth using. Simplicity and professionalism, literally.
+   READOUTS  Numerals, labels and prices stay on the app's own mono stack
+             (local SF Mono / Menlo, zero payload), which is how WARDEN itself
+             sets every readout, so the site and the product speak the same
+             language on the one axis that matters.
+
+   70KB of webfont total. */
 @font-face{
   font-family:Expose;
   src:url("fonts/expose.woff2") format("woff2-variations");
   font-weight:400 900; font-style:normal; font-display:swap;
+}
+@font-face{
+  font-family:Switzer;
+  src:url("fonts/switzer.woff2") format("woff2-variations");
+  font-weight:100 900; font-style:normal; font-display:swap;
 }
 @font-face{ /* metric matched fallback so the wordmark does not shift on load */
   font-family:MarkFallback;
@@ -76,7 +91,7 @@
   --slate:#8fa0b8;
 
   --mark:Expose,MarkFallback,sans-serif;
-  --sans:Expose,"Helvetica Neue",sans-serif;
+  --sans:Switzer,"Helvetica Neue",sans-serif;
   --mono:"SF Mono",Menlo,ui-monospace,monospace;
 
   --r-ctl:4px;             /* machined geometry: one control radius, one surface radius */
@@ -90,10 +105,32 @@ html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
 body{
   background:var(--void); color:var(--ink);
   font-family:var(--sans); font-weight:400;
-  font-size:17px; line-height:1.6; letter-spacing:0;
+  /* untracked. Switzer is fitted for text at this size and the -.003em nudge
+     that Expose wanted only smeared it. Negative tracking is a DISPLAY tool
+     here, applied on h1/h2/lede and nowhere else. */
+  font-size:17px; line-height:1.62; letter-spacing:0;
   -webkit-font-smoothing:antialiased;
   overflow-x:hidden;
 }
+
+/* ── the sky ──────────────────────────────────────────────────────────────
+   WARDEN's own StarCatalog, running behind the whole page rather than behind
+   one section: the app's board sits inside a deep-space field, so a site that
+   only had it under the hero would read as a hero effect instead of as the
+   product's own environment. Fixed rather than scrolled, because the sky is
+   the thing you move THROUGH.
+
+   z-index 0 with everything above it on the normal flow. The page's own
+   surfaces (cards, the screenshot frame, the window bar) stay opaque, so the
+   field reads only in the gutters and behind the type, which is where it
+   belongs. pointer-events:none: the magnet reads the cursor off the window,
+   it never wants the cursor itself. */
+#sky{
+  position:fixed;inset:0;width:100%;height:100%;
+  z-index:0;pointer-events:none;display:block;
+}
+/* Everything that is not the sky sits above it. */
+.rail,main,footer{position:relative;z-index:1}
 ::selection{background:var(--claude);color:#0a0503}
 a{color:inherit}
 :focus-visible{outline:2px solid var(--codex);outline-offset:3px;border-radius:2px}
@@ -136,14 +173,26 @@ img{max-width:100%;height:auto;display:block}
    painted over by them. One shared orbit solves both layers. */
 .orbit{
   position:relative;
-  height:clamp(400px,56vh,580px);
+  height:clamp(450px,64vh,660px);
   display:grid;place-items:center;
 }
 /* The canvases overhang the stage box top and bottom. The ring is taller than
-   the wordmark's band, and clipping it at the box edge sliced globes in half. */
+   the wordmark's band, and clipping it at the box edge sliced globes in half.
+
+   They also FADE OUT at those edges, and that is not decoration. A composer
+   pass does not hand back the page's exact black: ACES tone mapping plus a
+   bloom buffer lift pure black by a hair, so a canvas sitting on a #020403
+   page is a very slightly lighter rectangle, and the eye finds a straight
+   horizontal step across a dark page instantly. It read as a seam cutting the
+   page in half. Ramping the last ~130px of canvas to nothing turns that step
+   into a gradient no one can see. The ring's own bodies never reach into the
+   ramp: their vertical extent is ~185px from the centre against a ~456px
+   canvas half-height, so the fade only ever eats empty space. */
 .orbit canvas{
   position:absolute;left:0;right:0;top:-168px;bottom:-168px;
   width:100%;height:calc(100% + 336px);display:block;
+  -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 130px,#000 calc(100% - 130px),transparent 100%);
+  mask-image:linear-gradient(180deg,transparent 0,#000 130px,#000 calc(100% - 130px),transparent 100%);
 }
 /* Both canvases are transparent and both are inert. A positioned z-index:1
    element paints ABOVE in-flow content, so an opaque back canvas overhanging the
@@ -151,22 +200,48 @@ img{max-width:100%;height:auto;display:block}
 #ring-back{z-index:1;pointer-events:none}
 #ring-front{z-index:3;pointer-events:none}
 
+/* The wordmark carries real depth, and the depth is PHYSICAL: a lit top lip,
+   a short hard extrusion cooling as it falls away, then one cast shadow. No
+   glow, no bevel filter, no outline. That is the app's own depth rule (a tone
+   step, an edge, a highlight, one key shadow) applied to type, and it is the
+   reason the mark now sits ON the page instead of being printed on it.
+
+   Every offset is in em, so the extrusion scales with the fluid font-size
+   instead of turning into a slab on a phone and a hairline on a display. The
+   whole stack is 0.058em deep: at the 224px cap that is ~13px, which reads as
+   a machined plate edge rather than a cartoon 3D word.
+
+   Solid fill on purpose. The obvious alternative, a gradient via
+   background-clip:text, forces text-fill-color:transparent, and a transparent
+   fill lets every one of these shadows show THROUGH the letterforms, which
+   turns an extrusion into a smear. */
 .mark{
   position:relative;z-index:2;
   font-family:var(--mark);font-weight:800;
-  font-size:clamp(3rem,12.4vw,11rem);
+  font-size:clamp(3.2rem,15vw,14rem);
   line-height:.9;
-  letter-spacing:-.018em;
-  color:var(--ink);
+  letter-spacing:-.02em;
+  color:#f4f8f6;
   white-space:nowrap;
   user-select:none;
+  text-shadow:
+    0 -.004em 0 rgba(255,255,255,.75),
+    0 .009em 0 #c3cfca,
+    0 .018em 0 #97a5a0,
+    0 .027em 0 #6d7b76,
+    0 .036em 0 #4c5854,
+    0 .046em 0 #313b38,
+    0 .058em 0 #1b2220,
+    0 .085em .1em rgba(0,0,0,.65),
+    0 .2em .32em rgba(0,0,0,.45);
 }
 
 .lede{
-  max-width:34ch;margin:0 auto;padding:0 32px;
+  max-width:34ch;margin:30px auto 0;padding:0 32px;
   text-align:center;color:var(--ink);
   font-size:clamp(24px,2.9vw,38px);line-height:1.16;
   font-weight:600;letter-spacing:-.018em;
+  text-wrap:balance;
 }
 .sub{
   max-width:56ch;margin:18px auto 0;padding:0 32px;
@@ -199,28 +274,55 @@ img{max-width:100%;height:auto;display:block}
 .btn-sm{padding:9px 16px;font-size:14px}
 .note{margin-top:18px;text-align:center;color:var(--ink-3)}
 
-/* ── the three tells: what you get, before any prose ──────────────────── */
+/* ── the three tells: what you get, before any prose ──────────────────────
+   Was a 1px-gap grid over a rule-coloured background with opaque cells, which
+   is the CSS trick for hairline dividers and reads as a spreadsheet: three
+   cramped boxes, 26px of padding around 15px text, everything touching. Now
+   it is one ruled band with real column padding and a hairline only BETWEEN
+   the columns.
+
+   The cells are transparent, not var(--void). Opaque cells would punch three
+   black rectangles through the star field behind them. Everything on this page
+   that does not need to be a surface is see-through for the same reason. */
 .tells{
-  margin-top:72px;padding-top:0;
-  display:grid;grid-template-columns:repeat(3,1fr);gap:1px;
-  background:var(--rule-2);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);
+  margin-top:88px;
+  display:grid;grid-template-columns:repeat(3,1fr);
+  border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);
 }
-.tells div{background:var(--void);padding:26px 30px 28px}
-.tells h2{font-size:19px;font-weight:600;letter-spacing:-.012em;margin-bottom:7px;font-family:var(--sans);line-height:1.3}
-.tells p{color:var(--ink-2);font-size:15px;line-height:1.5;max-width:34ch}
+.tells div{padding:38px 44px 40px 0}
+.tells div+div{padding-left:44px;border-left:1px solid var(--rule-2)}
+.tells h2{
+  font-size:20px;font-weight:600;letter-spacing:-.015em;line-height:1.28;
+  margin-bottom:10px;font-family:var(--sans);max-width:none;
+}
+.tells p{color:var(--ink-2);font-size:16px;line-height:1.55;max-width:32ch}
 
 /* ── section furniture ────────────────────────────────────────────────── */
 section{scroll-margin-top:24px}
-.band{padding:112px 0 0;border-top:1px solid var(--rule)}
+/* Bands close themselves. They used to be padded only at the top, so the last
+   line of every section sat hard against the next section's rule: the legend's
+   third column literally touched it. A section that opens a gap has to close
+   one. */
+.band{padding:118px 0 104px;border-top:1px solid var(--rule)}
 .band:first-of-type{border-top:0}
-.head{display:grid;grid-template-columns:5fr 7fr;gap:56px;align-items:end;margin-bottom:48px}
-h2{font-family:var(--sans);font-weight:700;font-size:clamp(2rem,4.2vw,3.2rem);line-height:1.03;letter-spacing:-.028em}
-.head p{color:var(--ink-2);max-width:56ch;font-size:17px}
+/* Baseline, not end. Aligning the column BOTTOMS meant a two-line heading
+   dragged its paragraph down with it and left a diagonal of empty space across
+   the middle of the head. First baselines line up regardless of how either
+   column wraps. */
+.head{display:grid;grid-template-columns:5fr 6fr;gap:64px;align-items:baseline;margin-bottom:56px}
+h2{
+  font-family:var(--sans);font-weight:600;
+  font-size:clamp(2rem,4vw,3.05rem);line-height:1.06;letter-spacing:-.028em;
+  /* stops a heading dropping one orphan word onto its own line, which is what
+     put "room." and "do" alone under their own openers */
+  text-wrap:balance;max-width:19ch;
+}
+.head p{color:var(--ink-2);max-width:52ch;font-size:17px;line-height:1.6}
 .kicker{color:var(--ink-4);margin-bottom:18px;display:block}
 
 /* ── proof: the actual product ────────────────────────────────────────── */
 .shot{
-  position:relative;border:1px solid var(--rule);border-radius:6px;overflow:hidden;
+  position:relative;border:1px solid var(--rule);border-radius:var(--r-srf);overflow:hidden;
   background:var(--surface);
   box-shadow:0 1px 0 rgba(255,255,255,.05) inset, 0 30px 80px -40px rgba(0,0,0,.9);
 }
@@ -251,15 +353,43 @@ h2{font-family:var(--sans);font-weight:700;font-size:clamp(2rem,4.2vw,3.2rem);li
 .keys p{color:var(--ink-2);font-size:15px;line-height:1.5}
 .keys b{color:var(--ink);font-weight:600}
 
-/* ── read: the live legend ────────────────────────────────────────────── */
+/* ── read: the live legend ────────────────────────────────────────────────
+   Three complaints, three fixes. The copy was compressed (15px on a 1.5 lede
+   inside a 28px gutter), it sat hard against the next section's rule, and each
+   globe floated off-centre from the paragraph it was explaining, because the
+   canvas centred bodies on grid thirds while the text was inset by a right
+   gutter. The band now closes its own bottom, the measure is 16px on 1.6, and
+   the anchors are measured off the real <li> text box in resizeStrip rather
+   than assumed to be thirds.
+
+   The hairline over each label is what turns three floating objects into a
+   legend: it ties the body above to the fact below. */
 .channels{position:relative;display:grid;grid-template-columns:repeat(3,1fr)}
+/* Same lifted-black problem as the hero canvases, and on a 232px box in the
+   middle of the page it showed up as a faintly lighter rectangle sitting behind
+   the orbs, which is most of why this section read as cheap. Faded on all four
+   edges here, because unlike the hero this canvas has visible left and right
+   boundaries too. Two ramps intersected: a mask is a mask, so the darker of the
+   two wins at every pixel. */
 #orb-strip{
-  position:absolute;left:0;top:0;width:100%;height:190px;display:block;
+  position:absolute;left:0;top:0;width:100%;height:232px;display:block;
   pointer-events:none;
+  -webkit-mask-image:
+    linear-gradient(180deg,transparent 0,#000 40px,#000 calc(100% - 40px),transparent 100%),
+    linear-gradient(90deg,transparent 0,#000 130px,#000 calc(100% - 130px),transparent 100%);
+  mask-image:
+    linear-gradient(180deg,transparent 0,#000 40px,#000 calc(100% - 40px),transparent 100%),
+    linear-gradient(90deg,transparent 0,#000 130px,#000 calc(100% - 130px),transparent 100%);
+  -webkit-mask-composite:source-in;
+  mask-composite:intersect;
 }
-.channels li{list-style:none;padding:206px 28px 0 0}
-.channels dt{color:var(--ink-3);margin-bottom:9px}
-.channels dd{color:var(--ink-2);font-size:15px;line-height:1.5;max-width:34ch}
+.channels li{list-style:none;padding:268px 48px 0 0}
+.channels li:last-child{padding-right:0}
+.channels dt{
+  color:var(--ink-3);border-top:1px solid var(--rule-2);
+  padding-top:18px;margin-bottom:12px;
+}
+.channels dd{color:var(--ink-2);font-size:16px;line-height:1.6;max-width:34ch}
 .channels dd b{color:var(--ink);font-weight:600}
 .g-claude{color:var(--claude)}.g-codex{color:var(--codex)}.g-slate{color:var(--slate)}
 .gly{font-family:var(--mono);font-size:.92em}
@@ -275,73 +405,78 @@ h2{font-family:var(--sans);font-weight:700;font-size:clamp(2rem,4.2vw,3.2rem);li
 .row p{color:var(--ink-2);font-size:16px;max-width:64ch}
 .row p b{color:var(--ink);font-weight:600}
 
-.spec{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-2);margin-top:44px;border:1px solid var(--rule-2)}
-.spec div{background:var(--void);padding:18px 22px}
-.spec dt{color:var(--ink-4);margin-bottom:7px}
+/* real hairlines instead of a 1px grid gap over a tinted background: opaque
+   cells would cut four black rectangles out of the sky behind them */
+.spec{display:grid;grid-template-columns:repeat(4,1fr);margin-top:52px;border:1px solid var(--rule-2)}
+.spec div{padding:20px 24px}
+.spec div+div{border-left:1px solid var(--rule-2)}
+.spec dt{color:var(--ink-4);margin-bottom:8px}
 .spec dd{font-size:15px;color:var(--ink);font-weight:500}
 
-/* ── pricing ──────────────────────────────────────────────────────────── */
-.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:8px}
+/* ── pricing ──────────────────────────────────────────────────────────────
+   The old card read as a toy, and it was three specific things doing it: a
+   solid tangerine sticker straddling the top border, orbit rings spinning
+   around every machine dot and speeding up on hover, and a second tangerine
+   shout on the savings line. A sticker, a fidget and a discount barker.
+
+   Same information, instrument grade. The label moves INSIDE the card as a
+   ruled mono line, the dots hold still, and tangerine is spent only where it
+   carries meaning everywhere else on this page: harness identity. */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:8px}
 .tier{
   position:relative;
-  background:var(--surface);border:1px solid var(--rule);border-radius:6px;
-  padding:28px 26px 26px;
+  background:var(--surface);border:1px solid var(--rule);border-radius:var(--r-srf);
+  padding:24px 26px 26px;
   display:flex;flex-direction:column;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.05);
   transition:transform var(--t-base) var(--ease),border-color var(--t-base) var(--ease),background-color var(--t-base) var(--ease);
 }
-.tier:hover{transform:translateY(-4px);border-color:#2b3a34;background:var(--surface-2)}
-.tier.pick{border-color:#3a4b43}
-.tier.pick::before{
-  content:"MOST TAKEN";position:absolute;top:-1px;right:18px;
-  transform:translateY(-50%);
-  font-family:var(--mono);font-size:10px;letter-spacing:.14em;font-weight:600;
-  background:var(--claude);color:#170a02;padding:4px 9px;border-radius:2px;
+.tier:hover{transform:translateY(-2px);border-color:#2b3a34;background:var(--surface-2)}
+.tier.pick{border-color:#37473f;background:var(--surface-2)}
+/* every card carries the slot so the three headers sit on one line; only the
+   picked one fills it in. */
+.slot{
+  display:block;min-height:15px;margin-bottom:16px;
+  color:var(--ink-4);font-family:var(--mono);font-size:10px;
+  letter-spacing:.16em;font-weight:600;
 }
-/* the machine count, drawn rather than stated: one orb per Mac. */
-.orbs{display:flex;gap:11px;height:32px;align-items:center;margin-bottom:20px}
+.tier.pick .slot{color:var(--ink-2)}
+
+/* the machine count, drawn rather than stated: one dot per Mac, in the harness
+   colours the board itself uses. Static. The orbit ring that used to spin
+   around each one was the single most juvenile thing on the page. */
+.orbs{display:flex;gap:9px;height:20px;align-items:center;margin-bottom:18px}
 .orb{
-  width:26px;height:26px;border-radius:50%;position:relative;
-  border:1px solid rgba(255,255,255,.34);
-  background:radial-gradient(circle at 50% 50%, rgba(255,255,255,.14), rgba(255,255,255,0) 68%);
+  width:18px;height:18px;border-radius:50%;position:relative;
+  border:1px solid rgba(255,255,255,.22);
 }
 .orb::after{
-  content:"";position:absolute;inset:7px;border-radius:50%;
-  background:var(--claude);opacity:.85;
+  content:"";position:absolute;inset:5px;border-radius:50%;
+  background:var(--claude);opacity:.9;
 }
-/* the cradle ring, flattened to an ellipse so it reads as an orbit seen edge on
-   rather than a halo. Speeds up on hover: the only motion on the card that
-   answers the pointer, which is enough. */
-.orb::before{
-  content:"";position:absolute;inset:-6px;border-radius:50%;
-  border:1px solid rgba(255,255,255,.16);
-  animation:orbspin 9s linear infinite;
-  transform-origin:50% 50%;
-  scale:1 .38;
-}
-.tier:hover .orb::before{animation-duration:2.6s}
 .tier:nth-child(2) .orb:nth-child(2)::after{background:var(--codex)}
 .tier:nth-child(3) .orb:nth-child(2)::after{background:var(--codex)}
 .tier:nth-child(3) .orb:nth-child(3)::after{background:var(--slate)}
-@keyframes orbspin{from{rotate:0deg}to{rotate:360deg}}
 
 .tier h3{font-size:15px;font-weight:600;color:var(--ink-2);letter-spacing:-.005em}
-.price{display:flex;align-items:baseline;gap:10px;margin:10px 0 2px}
-.price .now{font-family:var(--mono);font-size:44px;font-weight:600;letter-spacing:-.03em;color:var(--ink);line-height:1}
-.price .was{font-family:var(--mono);font-size:17px;color:var(--ink-4);text-decoration:line-through;text-decoration-thickness:1px}
+.price{display:flex;align-items:baseline;gap:10px;margin:12px 0 3px}
+.price .now{font-family:var(--mono);font-size:40px;font-weight:500;letter-spacing:-.03em;color:var(--ink);line-height:1}
+.price .was{font-family:var(--mono);font-size:16px;color:var(--ink-4);text-decoration:line-through;text-decoration-thickness:1px}
 .save{
   font-family:var(--mono);font-size:10px;letter-spacing:.12em;font-weight:600;
-  color:var(--claude);
+  color:var(--ink-3);
   opacity:0;transition:opacity var(--t-travel) var(--ease) .28s;
 }
 .in .save{opacity:1}
-.tier .per{color:var(--ink-4);font-family:var(--mono);font-size:11px;letter-spacing:.08em;margin-bottom:16px}
-.tier p.what{color:var(--ink-2);font-size:15px;line-height:1.5;margin-bottom:22px;flex:1}
+.tier .per{color:var(--ink-4);font-family:var(--mono);font-size:11px;letter-spacing:.08em;margin-bottom:18px}
+.tier p.what{color:var(--ink-2);font-size:15px;line-height:1.55;margin-bottom:24px;flex:1}
 .tier .btn{width:100%;justify-content:center}
-.terms{margin-top:22px;color:var(--ink-4);text-align:center}
+.terms{margin-top:24px;color:var(--ink-4);text-align:center}
 
 /* ── close ────────────────────────────────────────────────────────────── */
-.close{padding:116px 0 96px;text-align:center;border-top:1px solid var(--rule);margin-top:112px}
+/* margin-top is 0 now that every band pads its own bottom: the two used to
+   stack into a 228px trench. */
+.close{padding:118px 0 104px;text-align:center;border-top:1px solid var(--rule)}
 .close h2{max-width:17ch;margin:0 auto 20px}
 .close p{color:var(--ink-2);max-width:48ch;margin:0 auto 30px}
 
@@ -349,32 +484,45 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
 .foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--ink-4)}
 
 @media (max-width:980px){
+  /* the three-up strips become stacks: the vertical hairline that separated
+     columns becomes the horizontal one that separates rows */
   .tells{grid-template-columns:1fr}
+  .tells div{padding:30px 0 32px}
+  .tells div+div{padding-left:0;border-left:0;border-top:1px solid var(--rule-2)}
+  .tells p{max-width:46ch}
   .keys{grid-template-columns:1fr;gap:16px}
   .tiers{grid-template-columns:1fr}
-  .head{grid-template-columns:1fr;gap:20px;align-items:start}
+  .head{grid-template-columns:1fr;gap:20px;align-items:start;margin-bottom:44px}
+  h2{max-width:none}
   .row{grid-template-columns:1fr;gap:12px}
   .row .idx{padding-top:0}
   .spec{grid-template-columns:repeat(2,1fr)}
+  .spec div{border-top:1px solid var(--rule-2)}
+  .spec div:nth-child(-n+2){border-top:0}
+  .spec div:nth-child(odd){border-left:0}
   .rail .set{display:none}
   .wrap{padding:0 20px}
+  /* the live orbs need a row each to mean anything, and three stacked canvases
+     is not worth the second GL context on a phone: the dt keeps its rule, so
+     the legend still reads as a legend without them */
   .channels{grid-template-columns:1fr}
   #orb-strip{display:none}
-  .channels li{padding:0 0 22px;border-bottom:1px solid var(--rule-2)}
-  .channels li:last-child{border-bottom:0}
+  .channels li{padding:0 0 26px}
+  .channels li:last-child{padding-bottom:0}
+  .channels dd{max-width:46ch}
   .pin{display:none}
 }
 @media (max-width:640px){
   /* narrow: the stage collapses toward the wordmark so the ring stops sitting in
      a field of dead space, and the mark takes more of the width to stay dominant */
-  .orbit{height:clamp(280px,40vh,380px)}
+  .orbit{height:clamp(300px,42vh,400px)}
   .orbit canvas{top:-104px;bottom:-104px;height:calc(100% + 208px)}
-  .mark{font-size:clamp(2.9rem,15.5vw,5rem)}
+  .mark{font-size:clamp(3rem,17vw,5.4rem)}
   .lede,.sub,.actions{padding:0 20px}
   .lede{font-size:26px}
-  .band{padding-top:80px}
-  .close{padding:88px 0 72px;margin-top:80px}
-  .tells{margin-top:52px}
+  .band{padding:82px 0 74px}
+  .close{padding:88px 0 72px}
+  .tells{margin-top:56px}
   .rail nav a.mono{display:none}
 }
 /* Anything that captures the page without scrolling it (print, a screenshot
@@ -390,6 +538,8 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
 </style>
 </head>
 <body>
+
+<canvas id="sky" aria-hidden="true"></canvas>
 
 <div class="rail">
   <b>WARDEN</b>
@@ -422,12 +572,12 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
 
   <div class="wrap">
     <div class="tells">
-      <div class="rise"><h2>One board, every agent</h2>
-        <p>Every session on the machine, side by side, whatever is driving it.</p></div>
-      <div class="rise" style="--d:.08s"><h2>Stalled or working, instantly</h2>
-        <p>A working agent blazes. One that has quietly died goes dim and stays dim.</p></div>
-      <div class="rise" style="--d:.16s"><h2>Context and spend, live</h2>
-        <p>Watch a session fill its window and run up a bill before it surprises you.</p></div>
+      <div class="rise"><h2>Every session on one screen</h2>
+        <p>Claude Code, Codex, and anything else you are running, side by side and live.</p></div>
+      <div class="rise" style="--d:.08s"><h2>A dead agent looks dead</h2>
+        <p>Working sessions blaze. One that quietly stopped goes dim and stays dim.</p></div>
+      <div class="rise" style="--d:.16s"><h2>Context and cost, in the open</h2>
+        <p>Watch a window fill and a bill climb while you can still do something about it.</p></div>
     </div>
   </div>
 </section>
@@ -545,6 +695,7 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
 
     <div class="tiers">
       <div class="tier rise">
+        <span class="slot"></span>
         <div class="orbs"><span class="orb"></span></div>
         <h3>One Mac</h3>
         <div class="price"><span class="now">$15</span></div>
@@ -554,6 +705,7 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
       </div>
 
       <div class="tier pick rise" style="--d:.08s">
+        <span class="slot">MOST TAKEN</span>
         <div class="orbs"><span class="orb"></span><span class="orb"></span></div>
         <h3>Two Macs</h3>
         <div class="price"><span class="now">$25</span><span class="was">$30</span></div>
@@ -563,6 +715,7 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
       </div>
 
       <div class="tier rise" style="--d:.16s">
+        <span class="slot"></span>
         <div class="orbs"><span class="orb"></span><span class="orb"></span><span class="orb"></span></div>
         <h3>Three Macs</h3>
         <div class="price"><span class="now">$30</span><span class="was">$45</span></div>
@@ -648,6 +801,7 @@ const FRONT = document.getElementById('ring-front');
 const ORBIT = document.getElementById('orbit');
 const MARK  = document.querySelector('.mark');
 const STRIP = document.getElementById('orb-strip');
+const SKY   = document.getElementById('sky');
 
 const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -672,7 +826,12 @@ const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /* No WebGL (or the vendor bundle failed to load): drop the canvases and let the
    wordmark carry the hero on its own rather than shipping a broken frame. */
-if (typeof W3 === 'undefined') { BACK.remove(); FRONT.remove(); if (STRIP) STRIP.remove(); return; }
+if (typeof W3 === 'undefined') {
+  BACK.remove(); FRONT.remove();
+  if (STRIP) STRIP.remove();
+  if (SKY) SKY.remove();
+  return;
+}
 const { THREE, EffectComposer, RenderPass, EffectPass, BloomEffect } = W3;
 
 const BG    = '#020403';                       /* RadarConstellation.tsx:46 */
@@ -685,19 +844,61 @@ const HARNESS = {
 };
 const HARNESS_IDS = Object.keys(HARNESS);
 
-/* Camera lift above the ring plane. This is the whole "saturn" dial: the ring's
-   vertical half-spread on screen is Rpx * sin(TILT), so at 11.5 degrees the near
-   globes land ~103px below the cap band, which on a ~110px wordmark drops them
-   clean under the baseline and kills the lapping. At 8 they cross the lower
-   half of the letters and the far ones cross the upper half, which is the
-   overlap Karim asked for, and it still reads as an oval rather than a line. */
-const TILT   = 8 * Math.PI / 180;
-const PERIOD = 80;                    /* seconds per revolution */
-/* 8, not 10. At 10 the ring stopped reading as a ring: globes overlapped each
-   other across the whole wordmark and the hero looked busy rather than ordered.
-   Eight leaves visible spacing at the extremes, where the ellipse is densest. */
-const COUNT  = 8;
-const R      = 3.2;                   /* ring radius, world units */
+/* Camera lift above the ring plane: the whole "saturn" dial. The ring's vertical
+   half-spread on screen is Rpx * sin(TILT), so this one number decides how much
+   of the wordmark the ring laps.
+
+     8    the ellipse is nearly a line and every body drags across the middle of
+          the letters. Bodies ON the word.
+     16   overcorrected. Half-spread ~155px plus a body radius threw the near
+          arc past the bottom of the stage and into the lede underneath, and
+          opened the oval so far that twenty bodies stopped reading as a ring
+          at all and started reading as scatter.
+     12   half-spread ~116px against a ~80px half-cap-height. The near arc
+          clears the baseline and the far arc clears the cap band, with enough
+          left over for the body itself, and the ellipse still closes visibly
+          at roughly 1:0.21.
+
+   The tilt alone was never going to be enough, and that is the part worth
+   writing down: it only opens the ring VERTICALLY. A ring whose diameter barely
+   exceeds the word parks bodies on the letters at every angle no matter how far
+   it is leaned. Both dials had to move, this one and the radius in resize(). */
+const TILT   = 12 * Math.PI / 180;
+
+/* TWO rings, not one, and that is the whole answer to "more globes".
+   Eight was the old ceiling for a single ring, and ten in that same ring was
+   already too many: bodies overlapped each other across the whole wordmark and
+   the hero read as busy rather than ordered. Crowding an ellipse is not how you
+   add mass to an orbital system, adding an orbit is.
+
+   So: thirteen on the main ring, and seven more on a second one that is
+   slightly tighter, faster, counter-rotating, and leaning 0.40 rad out of the
+   first's plane. The two ellipses CROSS. Twenty bodies now read as a system
+   with depth, and the second ring gets its own size class (unit .60) so it
+   reads as satellites rather than as the main ring drifting out of formation.
+
+   The second ring is deliberately NOT a small inner one. At R 2.15 it was
+   narrower than the wordmark itself, so every one of its bodies lived on top of
+   the letters no matter how far it was leaned over: a ring inside the word can
+   only ever be a ring on the word. At 3.05 it is nearly as wide as the main
+   ring, so its bodies orbit the word too, and the 0.40 lean is what sends them
+   through the empty space above the cap band and below the baseline instead of
+   across the type.
+
+     count   bodies on the ring
+     R       ring radius, world units
+     period  seconds per revolution
+     dir     +1 or -1, the direction it turns
+     incline rotation of the ring's plane about X, radians
+     unit    size class, multiplied into every body's scale on that ring */
+const RINGS = [
+  { count: 13, R: 3.35, period: 80, dir:  1, incline: 0,    unit: 1.00 },
+  { count: 7,  R: 2.95, period: 54, dir: -1, incline: 0.20, unit: 0.60 },
+];
+/* the camera is fitted to the OUTER ring, so that is the radius the layout
+   maths in resize() is measured against */
+const R     = RINGS[0].R;
+const COUNT = RINGS.reduce((n, ring) => n + ring.count, 0);
 
 /* == drei's wireframe material, ported ===================================
    node_modules/@react-three/drei/materials/WireframeMaterial.js, unchanged.
@@ -836,43 +1037,36 @@ function radialTexture(size, stops) {
 const glowTex = radialTexture(128, [[0, 1], [0.18, 0.8], [0.5, 0.22], [1, 0]]);
 const dotTex  = radialTexture(48,  [[0, 1], [0.4, 0.75], [1, 0]]);
 
-/* == OCCLUSION ===========================================================
-   A front globe has to hide the letters behind it, and HOW it does that is
-   the difference between a body and a stain. The previous version was a soft
-   radial sprite: 0.86 alpha at the centre falling to zero by the rim, sized
-   at 1.75x the globe. Because a sprite of scale S spans S world units, that
-   disc was actually SMALLER in radius than the globe it belonged to, and its
-   gradient meant every letter under it got partially greyed across a wide
-   soft footprint. On screen that is a smudge sliding over the type, and it
-   read as cheap because it is not how anything occludes anything.
+/* == SHADING =============================================================
+   What a globe does to the letters it crosses. This has been all three ways
+   now, and the run is worth keeping written down because the endpoints are
+   both wrong.
 
-   This is a billboarded disc in the page's own colour at exactly the globe's
-   silhouette radius, fully opaque, hard edged. A globe crossing the wordmark
-   now takes a clean circular bite out of it and its lattice sits on a solid
-   sphere, which is what a body passing in front actually looks like. The
-   composer runs 4x multisampling so the rim stays smooth, and the disc is
-   toneMapped:false so it stays exactly BG and stays invisible everywhere it
-   is not covering type. Every glow the globe carries (halo, gem, nodes) has a
-   world radius below 0.75x the shell, so all of it now lands on the disc
-   instead of washing across the letters.
+     smudge   a soft sprite at 0.86 centre alpha and 1.75x the globe. Because a
+              sprite of scale S spans S world units, that disc was actually
+              SMALLER in radius than its globe while spreading grey across a
+              wide soft footprint. A stain sliding over the type.
+     bite     a hard opaque disc in the page's own colour at exactly the
+              silhouette radius. Honest occlusion, and it looked like a body,
+              but on a black page a black circle reads as a HOLE punched in the
+              hero: the globes were driving around wearing black plates.
+     shell    where it is now. The lattice is a glass shell, not a solid, so
+              the wordmark stays legible straight through it and the body is
+              carried by one soft, very light shadow instead of by hiding
+              anything. Peak alpha .42 at the centre, gone by the rim.
 
-   Built by hand as a triangle fan rather than with THREE.CircleGeometry: the
-   vendor bundle is tree-shaken to the ~34 classes this page actually uses, so
-   reaching for a new primitive silently returns undefined and throws at module
-   scope, taking the whole hero down. BufferGeometry and Float32BufferAttribute
-   are already in the bundle. Cheaper than rebuilding 572KB for one disc. */
-function discGeometry(segments) {
-  const pos = [];
-  for (let i = 0; i < segments; i++) {
-    const a0 = (i / segments) * Math.PI * 2;
-    const a1 = ((i + 1) / segments) * Math.PI * 2;
-    pos.push(0, 0, 0, Math.cos(a0), Math.sin(a0), 0, Math.cos(a1), Math.sin(a1), 0);
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  return g;
-}
-const OCC_GEO = discGeometry(96);
+   That is a deliberate trade: strict occlusion is more physically honest, but
+   this hero is a wordmark first and a diorama second, and a transparent shell
+   over live type is the version that reads. The shadow is what keeps a globe
+   from looking like a decal, and being soft is what keeps it from looking
+   like the plate again.
+
+   A Sprite rather than a disc mesh: sprites billboard themselves, so the
+   camera quaternion no longer has to be copied per globe per frame, and the
+   radial falloff comes free from the texture instead of needing UVs on a
+   hand-built triangle fan. */
+const shadeTex = radialTexture(128, [[0, 1], [0.3, 0.9], [0.58, 0.46], [0.82, 0.12], [1, 0]]);
+const SHADE = 0.42;
 
 /* == AgentCore geometry (AgentCore.tsx:63-145, verbatim) ================== */
 function ringGeometry(radius, segments = 96) {
@@ -976,7 +1170,9 @@ function makeGlobe(i, over) {
     phase: 'alive',
     lscale: 1,
     sim: { scale: 0.0001, glow: 0.5, live: 0, core: 1 },
-    theta: (i / COUNT) * Math.PI * 2,
+    ring: o.ring || null,          /* which orbit this body belongs to */
+    slot: o.slot || 0,             /* its seat on that ring */
+    theta: o.ring ? ((o.slot || 0) / o.ring.count) * Math.PI * 2 : 0,
     anchor: o.anchor || null,      /* legend globes sit still instead of orbiting */
   };
 
@@ -1071,11 +1267,13 @@ function makeGlobe(i, over) {
     g.group.add(g.ringA, g.ringB, g.heart);
   }
 
-  /* the landing-only occluder, mounted OUTSIDE the group so it never takes the
-     globe's spin, and drawn first so it can never erase another globe's lines. */
-  g.occ = new THREE.Mesh(OCC_GEO, new THREE.MeshBasicMaterial({
-    color: new THREE.Color(BG), toneMapped: false,
-    transparent: true, opacity: 1, depthTest: false, depthWrite: false,
+  /* the landing-only body shadow, mounted OUTSIDE the group so it never takes
+     the globe's spin, and drawn first so it can never darken another globe's
+     lattice. SpriteMaterial multiplies its map by `color`, so a white radial
+     alpha ramp under the page's own colour is a soft dark disc for free. */
+  g.occ = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: shadeTex, color: new THREE.Color(BG), toneMapped: false,
+    transparent: true, opacity: SHADE, depthTest: false, depthWrite: false,
   }));
   g.occ.renderOrder = -1;
 
@@ -1129,7 +1327,8 @@ function updateGlobe(g, t, dt, ringY, radiusUnit, cam) {
   const pulseWave = Math.sin(t * 1.5 + g.seed * 6.28);
   const idleBreath = Math.sin(t * 0.5 + g.seed * 6.28) * 0.045;
 
-  const targetScale = radiusUnit * (g.isRoot ? 1.16 : 0.84) * (0.78 + g.ctx * 0.46)
+  const unit = g.ring ? g.ring.unit : 1;
+  const targetScale = radiusUnit * unit * (g.isRoot ? 1.16 : 0.84) * (0.78 + g.ctx * 0.46)
                     * Math.max(0, g.lscale);
   const scaleLambda = g.phase === 'imploding' ? 18 : g.lscale < 0.999 ? 10 : 6;
   s.scale = damp(s.scale, targetScale, scaleLambda, dt);
@@ -1145,10 +1344,15 @@ function updateGlobe(g, t, dt, ringY, radiusUnit, cam) {
   if (g.anchor) {
     g.group.position.set(g.anchor.x, g.anchor.y + Math.sin(t * 0.6 + g.seed * 6.28) * 0.04, g.anchor.z);
   } else {
-    const x = Math.cos(g.theta) * R;
-    const z = Math.sin(g.theta) * R;
-    const y = ringY + Math.sin(t * 0.6 + g.seed * 6.28) * 0.05;
-    g.group.position.set(x, y, z);
+    const ring = g.ring || RINGS[0];
+    const x0 = Math.cos(g.theta) * ring.R;
+    const z0 = Math.sin(g.theta) * ring.R;
+    /* incline the ring's plane about X, so the inner ellipse crosses the outer
+       one instead of nesting flat inside it: (x,0,z) -> (x, -z sin i, z cos i).
+       At incline 0 this is exactly the old single-ring maths. */
+    const y = ringY - z0 * Math.sin(ring.incline)
+            + Math.sin(t * 0.6 + g.seed * 6.28) * 0.05;
+    g.group.position.set(x0, y, z0 * Math.cos(ring.incline));
   }
   g.group.rotation.y += dt * spinRate(g.isRoot, liveK);
 
@@ -1203,14 +1407,237 @@ function updateGlobe(g, t, dt, ringY, radiusUnit, cam) {
     g.heartMat.opacity = 0.9 * s.core;
   }
 
-  /* the occluder tracks the globe: same centre, the globe's true silhouette
-     radius, and billboarded so it is always a full disc rather than an ellipse.
-     The shell is IcosahedronGeometry(1) under group.scale, so the silhouette
-     radius IS s.scale * breathe; 1.02 covers the lattice's outermost stroke. */
+  /* the shadow tracks the globe. A Sprite of scale S spans S world units, so
+     its RADIUS is S/2: at 2.3 the shadow reaches 1.15x the silhouette, which
+     is just past the lattice's outermost stroke, and the ramp has faded to
+     nothing by then. Billboarding is the sprite's own job, which is why the
+     camera is no longer needed here. */
   g.occ.position.copy(g.group.position);
-  if (cam) g.occ.quaternion.copy(cam.quaternion);
-  g.occ.scale.setScalar(s.scale * breathe * 1.02);
-  g.occ.material.opacity = Math.max(0, Math.min(1, g.lscale));
+  g.occ.scale.setScalar(s.scale * breathe * 2.3);
+  g.occ.material.opacity = SHADE * Math.max(0, Math.min(1, g.lscale));
+}
+
+/* == the sky =============================================================
+   StarCatalog.tsx, ported the same way the globes were: same mulberry32 so the
+   field is deterministic, same three nested shells at r 76/52/33, same 1/z size
+   law under a hard pixel cap, same low-skewed brightness (rng*rng) that makes
+   most of it dust and a few of it stars, same rare coral/teal scatter, same
+   glacial per-shell drift. Counts are scaled down (the app runs 40k points on a
+   window that is always in front of you; a landing page pays for that on every
+   scroll) but the density reads the same because the shells are what carry it.
+
+   ONE departure, and it is the whole reason this field answers back instead of
+   sitting there: the cursor is a magnet. Every star is pulled toward it in
+   SCREEN space
+   in the vertex stage, on a gaussian falloff about half a viewport wide, and
+   brightens and swells as it comes. Doing it in the vertex shader rather than
+   on positions means 17k stars react for the cost of a uniform update, and
+   doing it in screen space is what makes it read as attraction to the cursor
+   rather than to some point floating in the scene.
+
+   The pull is scaled per shell (near reacts most, far least), so the response
+   itself has depth: the sky does not slide as one sheet.
+
+   No composer. Bloom on a field this faint is invisible and the extra
+   full-screen buffer is not free. */
+const SKY_VERT = `
+  uniform float uTime;
+  uniform float uPixelRatio;
+  uniform float uSizeScale;
+  uniform float uMaxSize;
+  uniform float uTwinkleAmp;
+  uniform vec2  uMouse;      /* pointer in NDC */
+  uniform float uPull;       /* 0 at rest, eases to this shell's share */
+  uniform float uAspect;
+  attribute float aSize;
+  attribute float aPhase;
+  attribute float aTwinkle;
+  attribute vec3 aColor;
+  varying vec3 vColor;
+  varying float vAlpha;
+  void main() {
+    vColor = aColor;
+    float tw = 1.0 - uTwinkleAmp + uTwinkleAmp * (0.5 + 0.5 * sin(uTime * aTwinkle + aPhase));
+    vAlpha = tw;
+
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = min(aSize * uSizeScale * uPixelRatio * (1.0 / -mv.z), uMaxSize);
+    vec4 clip = projectionMatrix * mv;
+
+    if (uPull > 0.0 && clip.w > 0.0) {
+      vec2 ndc = clip.xy / clip.w;
+      vec2 d = uMouse - ndc;
+      d.x *= uAspect;                        /* circular in pixels, not in NDC */
+      float dist = length(d);
+      float f = exp(-dist * dist * 4.5);     /* ~1 under the cursor, gone by a viewport */
+      vec2 dir = dist > 1e-4 ? d / dist : vec2(0.0);
+      vec2 off = dir * f * uPull * 0.075;    /* ~34px of travel at the peak */
+      off.x /= uAspect;
+      clip.xy += off * clip.w;
+      vAlpha *= 1.0 + f * uPull * 1.5;
+      gl_PointSize = min(gl_PointSize * (1.0 + f * uPull * 0.6), uMaxSize * 1.7);
+    }
+    gl_Position = clip;
+  }
+`;
+const SKY_FRAG = `
+  uniform float uOpacity;
+  varying vec3 vColor;
+  varying float vAlpha;
+  void main() {
+    vec2 d = gl_PointCoord - 0.5;
+    float r = length(d);
+    if (r > 0.5) discard;
+    float soft = smoothstep(0.5, 0.06, r);
+    gl_FragColor = vec4(vColor, soft * vAlpha * uOpacity);
+  }
+`;
+
+/* deterministic RNG so the sky is the same sky on every load (StarCatalog.tsx:26) */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const SKY_WHITE = new THREE.Color('#cfe2ff');   /* StarCatalog.tsx:37-39 */
+const SKY_CORAL = new THREE.Color('#ff7d50');
+const SKY_TEAL  = new THREE.Color('#2de2c0');
+const MAX_STAR_PX = 2.2;                        /* :49 */
+const SKY_LAYERS = [
+  { count: 9000, radius: 76, spread: 12, sizeScale: 108, sizeMin: 0.8, sizeMax: 1.9, opacity: 0.36, drift: 0.0045, tilt: 0.0016, seed: 0x51ed1, pull: 0.35 },
+  { count: 5200, radius: 52, spread: 9,  sizeScale: 80,  sizeMin: 0.8, sizeMax: 2.1, opacity: 0.44, drift: 0.0075, tilt: 0.0026, seed: 0x9a2b7, pull: 0.68 },
+  { count: 2600, radius: 33, spread: 7,  sizeScale: 56,  sizeMin: 0.8, sizeMax: 1.9, opacity: 0.52, drift: 0.0125, tilt: 0.0040, seed: 0x1c0de, pull: 1.00 },
+];
+
+function starGeometry(spec) {
+  const rng = mulberry32(spec.seed);
+  const n = spec.count;
+  const pos = new Float32Array(n * 3);
+  const col = new Float32Array(n * 3);
+  const siz = new Float32Array(n);
+  const pha = new Float32Array(n);
+  const twi = new Float32Array(n);
+  const c = new THREE.Color();
+  for (let i = 0; i < n; i++) {
+    /* even directions on the sphere, jittered radius so the shell has thickness */
+    const theta = 2 * Math.PI * rng();
+    const phi = Math.acos(2 * rng() - 1);
+    const r = spec.radius + (rng() - 0.5) * 2 * spec.spread;
+    const sp = Math.sin(phi);
+    pos[i * 3]     = r * sp * Math.cos(theta);
+    pos[i * 3 + 1] = r * sp * Math.sin(theta);
+    pos[i * 3 + 2] = r * Math.cos(phi);
+
+    const tint = rng();
+    const bright = 0.32 + rng() * rng() * 0.95;   /* skewed low: dust, with a few real stars */
+    if (tint > 0.93)      c.copy(SKY_WHITE).lerp(SKY_CORAL, 0.45);
+    else if (tint > 0.86) c.copy(SKY_WHITE).lerp(SKY_TEAL, 0.45);
+    else                  c.copy(SKY_WHITE);
+    col[i * 3] = c.r * bright; col[i * 3 + 1] = c.g * bright; col[i * 3 + 2] = c.b * bright;
+
+    const sk = rng() * rng();
+    siz[i] = spec.sizeMin + (spec.sizeMax - spec.sizeMin) * sk;
+    pha[i] = rng() * Math.PI * 2;
+    twi[i] = 0.25 + rng() * 0.9;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position',  new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aColor',    new THREE.BufferAttribute(col, 3));
+  g.setAttribute('aSize',     new THREE.BufferAttribute(siz, 1));
+  g.setAttribute('aPhase',    new THREE.BufferAttribute(pha, 1));
+  g.setAttribute('aTwinkle',  new THREE.BufferAttribute(twi, 1));
+  return g;
+}
+
+/* the pointer, in NDC, damped toward its target so the field never snaps */
+const mouse = { x: 0, y: 0, tx: 0, ty: 0, pull: 0, want: 0 };
+let sky = null;
+if (SKY && !REDUCED) {
+  try {
+    const dpr = Math.min(window.devicePixelRatio, 2);
+    const renderer = new THREE.WebGLRenderer({ canvas: SKY, antialias: false, alpha: true, powerPreference: 'low-power' });
+    renderer.setPixelRatio(dpr);
+    renderer.setClearColor(new THREE.Color(BG), 0);
+    const scene = new THREE.Scene();
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 400);
+    const layers = SKY_LAYERS.map((spec) => {
+      const mat = new THREE.ShaderMaterial({
+        uniforms: {
+          uTime:       { value: 0 },
+          uPixelRatio: { value: dpr },
+          uSizeScale:  { value: spec.sizeScale },
+          uMaxSize:    { value: MAX_STAR_PX * dpr },
+          uOpacity:    { value: spec.opacity },
+          uTwinkleAmp: { value: 0.45 },
+          /* a bare {x,y} rather than a Vector2: three's setValueV2f only reads
+             .x/.y, and Vector2 is the one class this page would otherwise pull
+             into the tree-shaken vendor bundle for a single uniform. */
+          uMouse:      { value: { x: 0, y: 0 } },
+          uPull:       { value: 0 },
+          uAspect:     { value: 1 },
+        },
+        vertexShader: SKY_VERT, fragmentShader: SKY_FRAG,
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      });
+      const pts = new THREE.Points(starGeometry(spec), mat);
+      pts.frustumCulled = false;      /* the camera sits INSIDE every shell */
+      scene.add(pts);
+      return { spec, mat, pts };
+    });
+    sky = { renderer, scene, cam, layers };
+  } catch (err) {
+    console.warn('WARDEN sky: no third GL context, dropping the star field.', err);
+    SKY.remove();
+    sky = null;
+  }
+} else if (SKY && REDUCED) {
+  /* a field that neither drifts nor answers the cursor is just noise behind
+     text, so reduced motion gets no sky at all rather than a frozen one */
+  SKY.remove();
+}
+
+function resizeSky() {
+  if (!sky) return;
+  const w = window.innerWidth, h = window.innerHeight;
+  sky.cam.aspect = w / h;
+  sky.cam.updateProjectionMatrix();
+  sky.renderer.setSize(w, h, false);
+  for (const l of sky.layers) l.mat.uniforms.uAspect.value = w / h;
+}
+
+if (sky) {
+  window.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch') return;      /* a finger is not a cursor */
+    mouse.tx = (e.clientX / window.innerWidth) * 2 - 1;
+    mouse.ty = -((e.clientY / window.innerHeight) * 2 - 1);
+    mouse.want = 1;
+  }, { passive: true });
+  window.addEventListener('pointerleave', () => { mouse.want = 0; });
+  document.addEventListener('mouseleave', () => { mouse.want = 0; });
+}
+
+function updateSky(t, dt) {
+  if (!sky) return;
+  /* the pointer is damped, not tracked: at lambda 9 the field trails the cursor
+     by a few frames, which is what makes it feel like it is being DRAGGED
+     rather than redrawn under the mouse. */
+  mouse.x = damp(mouse.x, mouse.tx, 9, dt);
+  mouse.y = damp(mouse.y, mouse.ty, 9, dt);
+  mouse.pull = damp(mouse.pull, mouse.want, 4, dt);
+  for (const l of sky.layers) {
+    l.mat.uniforms.uTime.value = t;
+    l.mat.uniforms.uMouse.value.x = mouse.x;   /* plain {x,y}, see the uniform */
+    l.mat.uniforms.uMouse.value.y = mouse.y;
+    l.mat.uniforms.uPull.value = mouse.pull * l.spec.pull;
+    l.pts.rotation.y += dt * l.spec.drift;
+    l.pts.rotation.x += dt * l.spec.tilt;
+  }
+  sky.renderer.render(sky.scene, sky.cam);
 }
 
 /* == scene =============================================================== */
@@ -1257,7 +1684,9 @@ try {
 }
 
 const globes = [];
-for (let i = 0; i < COUNT; i++) globes.push(makeGlobe(i));
+for (const ring of RINGS) {
+  for (let k = 0; k < ring.count; k++) globes.push(makeGlobe(globes.length, { ring, slot: k }));
+}
 
 /* == layout: the ring is measured off the wordmark, so it adapts to the face */
 let ringY = 0;
@@ -1268,7 +1697,13 @@ function resize() {
   const H = b.height + 336;                 /* the canvases overhang, see CSS */
   if (W < 2 || H < 2) return;
 
-  const Rpx = Math.min(m.width * 0.545 + 30, W * 0.42);
+  /* The ring has to be wider than the WORD, not merely as wide as it. At .545
+     the ring's diameter (~910px) barely cleared a 780px wordmark, so the arc
+     ran along the letters for most of its travel and the hero read as globes
+     sitting on the type. At .72 the diameter is ~1150px, which puts the two
+     extremes well outside the word's edges and gives the near and far arcs
+     somewhere to be that is not on top of it. The viewport cap moved with it. */
+  const Rpx = Math.min(m.width * 0.72 + 30, W * 0.46);
   const worldPerPx = R / Rpx;
   const D = (worldPerPx * H) / (2 * Math.tan((34 * Math.PI / 180) / 2));
 
@@ -1307,9 +1742,17 @@ let strip = null;
 if (STRIP) {
   try {
     const stripCam = new THREE.PerspectiveCamera(28, 1, 0.1, 100);
+    /* Tighter bloom than the hero's, and this is the fix for the faint lighter
+       RECTANGLE that used to sit behind these three orbs. It was never a black
+       level problem: at radius .8 with mipmapBlur the gems' glow spreads across
+       the entire buffer at low intensity, which on a full-width hero canvas is
+       invisible and inside a 232px box is a haze that stops dead at the canvas
+       edge. Pulling the radius in and lifting the threshold keeps the glow on
+       the cores where it belongs, and the edge fade in the CSS takes what is
+       left. */
     strip = makeStage(STRIP, stripCam, {
-      intensity: 1.15, luminanceThreshold: 0.22, luminanceSmoothing: 0.9,
-      mipmapBlur: true, radius: 0.8,
+      intensity: 0.95, luminanceThreshold: 0.35, luminanceSmoothing: 0.85,
+      mipmapBlur: true, radius: 0.45,
     });
     strip.cam = stripCam;
     /* One per channel: [0] size, [1] liveness, [2] harness hue. All three are
@@ -1344,8 +1787,20 @@ function resizeStrip() {
   c.position.set(0, 0, (wh / 2) / Math.tan((STRIP_FOV * Math.PI / 180) / 2));
   c.lookAt(0, 0, 0);
   c.updateProjectionMatrix();
-  /* three columns: centre each globe on its column, matching the CSS grid */
-  strip.globes.forEach((g, i) => { g.anchor.x = (-ww / 3) + (i * ww / 3); });
+  /* Centre each globe on the paragraph it explains, measured off the real <li>
+     box. The old maths put them on grid THIRDS, but every column carries a
+     right-hand gutter, so the text block's centre sits ~58px left of its
+     third's centre and every globe hovered off to the right of its own caption.
+     Measuring means the alignment survives any future change to the gutter. */
+  const items = document.querySelectorAll('.channels li');
+  strip.globes.forEach((g, i) => {
+    const li = items[i];
+    if (!li) return;
+    const box = li.getBoundingClientRect();
+    const padR = parseFloat(getComputedStyle(li).paddingRight) || 0;
+    const cx = box.left + (box.width - padR) / 2;
+    g.anchor.x = ((cx - r.left) / W - 0.5) * ww;
+  });
   strip.renderer.setSize(W, H, false);
   strip.composer.setSize(W, H);
 }
@@ -1396,11 +1851,18 @@ function frame() {
 
   if (heroVisible) {
     turnover(t);
-    const spin = REDUCED ? 0 : (t / PERIOD) * Math.PI * 2;
-    const radiusUnit = R * 0.097;
+    /* body size, as a fraction of the ring radius. Dropped from .097 when the
+       ring widened: a body is sized in WORLD units, so widening the ring shrank
+       the world-per-pixel scale and every globe grew ~23% on screen without
+       anyone asking it to. Twenty of those crowded the stage edge to edge. */
+    const radiusUnit = R * 0.067;
     for (let i = 0; i < globes.length; i++) {
       const g = globes[i];
-      g.theta = (i / COUNT) * Math.PI * 2 + spin;
+      const ring = g.ring || RINGS[0];
+      /* each ring turns at its own rate and in its own direction, so the two
+         ellipses are never in lockstep and the crossings keep changing */
+      const spin = REDUCED ? 0 : (t / ring.period) * Math.PI * 2 * ring.dir;
+      g.theta = (g.slot / ring.count) * Math.PI * 2 + spin;
       updateGlobe(g, t, dt, ringY, radiusUnit, camera);
       /* the depth sandwich: a globe nearer the camera than the wordmark plane
          is drawn on the canvas ABOVE the <h1>, one behind it on the canvas
@@ -1420,11 +1882,17 @@ function frame() {
     updateStrip(t, dt);
     strip.composer.render();
   }
+
+  /* the sky is fixed, so it is always on screen and always drawn. It is three
+     draw calls of pure points with no post pass, which is the cheapest thing
+     on this page by a wide margin. */
+  updateSky(t, dt);
 }
 
 resize();
 resizeStrip();
-window.addEventListener('resize', () => { resize(); resizeStrip(); });
+resizeSky();
+window.addEventListener('resize', () => { resize(); resizeStrip(); resizeSky(); });
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { resize(); resizeStrip(); });
 requestAnimationFrame(frame);
 })();
