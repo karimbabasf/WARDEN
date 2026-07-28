@@ -36,3 +36,7 @@ status.sh
 
 # Browser-audit output (screenshots + audit.json) from the UI verification pass.
 /.design/
+
+# landing verification artifacts (look.mjs)
+landing/.design/
+/.design/
