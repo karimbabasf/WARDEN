@@ -2163,15 +2163,21 @@ function frame() {
       const spin = REDUCED ? 0 : (t / ring.period) * Math.PI * 2 * ring.dir;
       g.theta = (g.slot / ring.count) * Math.PI * 2 + spin;
       updateGlobe(g, t, dt, ringY, radiusUnit, camera);
-      /* the depth sandwich: a globe nearer the camera than the wordmark plane
-         is drawn on the canvas ABOVE the <h1>, one behind it on the canvas
-         below. Reparenting is how a globe crosses the word. */
-      const target = g.group.position.z >= 0 ? front : back;
+      /* EVERY body rides on the front canvas, so the ring is always over the
+         wordmark. The two-canvas sandwich is still here and still wired: the
+         split used to be `position.z >= 0 ? front : back`, which let the far
+         arc pass BEHIND the letters and the near arc in front, and that is the
+         honest depth read for an orbit. Karim asked for them on top instead,
+         so the far arc now paints over the word as well. One line to put back.
+
+         `back` keeps rendering because it still owns half the lighting rig and
+         costs a pass over an empty scene; nothing draws into it. */
+      const target = front;
       if (g.group.parent !== target.scene) {
         target.scene.add(g.group);
         target.scene.add(g.occ);
       }
-      g.occ.visible = target === front;
+      g.occ.visible = true;
     }
     back.composer.render();
     front.composer.render();
