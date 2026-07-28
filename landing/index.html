@@ -217,46 +217,53 @@ img{max-width:100%;height:auto;display:block}
 #ring-back{z-index:1;pointer-events:none}
 #ring-front{z-index:3;pointer-events:none}
 
-/* The wordmark carries real depth, and the depth is PHYSICAL: a lit top lip,
-   a short hard extrusion cooling as it falls away, then one cast shadow. No
-   glow, no bevel filter, no outline. That is the app's own depth rule (a tone
-   step, an edge, a highlight, one key shadow) applied to type, and it is the
-   reason the mark now sits ON the page instead of being printed on it.
+/* The wordmark is PRINTED on the page, not extruded off it, and that is a
+   reversal of what was here before. The old mark carried a seven-step hard
+   extrusion 0.058em deep (~13px at the cap) plus two cast shadows, and Karim's
+   read of it was that it did not fit: "too thick, too white". Both halves of
+   that trace to the same thing. The extrusion is a skeuomorphic 3D-word effect,
+   and every other surface on this page and in the app is flat precision
+   instrument chrome, so it was the one object here speaking a different
+   language. It also added real visual mass, which is where "too thick" came
+   from as much as the weight did.
 
-   Every offset is in em, so the extrusion scales with the fluid font-size
-   instead of turning into a slab on a phone and a hairline on a display. The
-   whole stack is 0.058em deep: at the 224px cap that is ~13px, which reads as
-   a machined plate edge rather than a cartoon 3D word.
+   So: no extrusion, one soft key shadow to seat it, and a face pulled off pure
+   white to a cool steel. The app's depth rule says a tone step, an edge, a
+   highlight and ONE tight key shadow, and at display type only the last of
+   those has anything to attach to. Weight 700 rather than 800 for the same
+   reason, and it relates properly to the lede's 600 underneath.
+
+   The point of all three moves together is that the globes should be the
+   loudest thing in the hero. A near-white 800 slab with a 13px plate edge
+   outshone the object the page is actually selling.
 
    Solid fill on purpose. The obvious alternative, a gradient via
    background-clip:text, forces text-fill-color:transparent, and a transparent
-   fill lets every one of these shadows show THROUGH the letterforms, which
-   turns an extrusion into a smear. */
+   fill lets the shadow show THROUGH the letterforms, which turns a seat into a
+   smear. */
 .mark{
   position:relative;z-index:2;
   /* Switzer, the same face as the lede underneath, not the display face. The
      mark and the sentence under it now set in one voice, which is what stops
      the hero reading as a logo dropped on top of a paragraph. */
-  font-family:var(--sans);font-weight:800;
+  font-family:var(--sans);font-weight:700;
   font-size:clamp(3rem,13vw,12.2rem);
   line-height:.9;
   /* Switzer is fitted for TEXT, so at display size it sets loose. -.025em is
      the tracking that closes it up to a wordmark; the lede runs -.018em at a
      quarter of this size and the relationship holds. */
   letter-spacing:-.025em;
-  color:#f4f8f6;
+  /* cool steel, not paper. #f4f8f6 was effectively pure white and it sat a full
+     step above --ink (#e9f1ed), which every other bright thing on the page is
+     keyed to, so the mark was brighter than the brightest body text. */
+  color:#cfdbd6;
   white-space:nowrap;
   user-select:none;
+  /* one key shadow, in em so it tracks the fluid size. The tight pass seats the
+     letters, the wide one gives the page something to seat them ON. */
   text-shadow:
-    0 -.004em 0 rgba(255,255,255,.75),
-    0 .009em 0 #c3cfca,
-    0 .018em 0 #97a5a0,
-    0 .027em 0 #6d7b76,
-    0 .036em 0 #4c5854,
-    0 .046em 0 #313b38,
-    0 .058em 0 #1b2220,
-    0 .085em .1em rgba(0,0,0,.65),
-    0 .2em .32em rgba(0,0,0,.45);
+    0 .012em .02em rgba(0,0,0,.5),
+    0 .06em .12em rgba(0,0,0,.45);
 }
 
 .lede{
