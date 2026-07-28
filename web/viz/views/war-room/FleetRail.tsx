@@ -155,10 +155,22 @@ function Strip({
   );
 }
 
+/**
+ * The rack's one-line census, shared by the open head and the folded tab so the
+ * two can never disagree about how many sessions are live.
+ */
+export function fleetSummary(sessions: number, working: number): string {
+  const head = `${sessions} session${sessions === 1 ? '' : 's'}`;
+  return working > 0 ? `${head} · ${working} working` : head;
+}
+
 export type FleetRailProps = {
   agents: RadarAgent[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** Folded: the rack is off the board, down to a tab that brings it back. */
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
   /** Rendered under the fleet: the observer dock (watch someone else's swarm). */
   footer?: ReactNode;
 };
@@ -172,7 +184,14 @@ export type FleetRailProps = {
  * every time an agent flips working/idle is unusable: you lose the row you were
  * reading. Position is the index the eye trusts.
  */
-export function FleetRail({ agents, selectedId, onSelect, footer }: FleetRailProps) {
+export function FleetRail({
+  agents,
+  selectedId,
+  onSelect,
+  collapsed,
+  onToggleCollapsed,
+  footer,
+}: FleetRailProps) {
   const roots = useMemo(
     () =>
       agents
@@ -197,36 +216,74 @@ export function FleetRail({ agents, selectedId, onSelect, footer }: FleetRailPro
   }, [agents]);
 
   const working = roots.filter((a) => a.status === 'working').length;
+  const summary = fleetSummary(roots.length, working);
 
+  // Folded, the rack is a tab and nothing else: a fixed-width pill in the exact
+  // slot the head used to occupy, so unfolding does not make anything jump. The
+  // census drops to the raw session count and moves into the label, because the
+  // tab's whole job is to hand the board back its left third.
+  //
+  // The body is HIDDEN, never unmounted. The observer dock lives in the footer and
+  // holds the live peer watch (its selection, its `observe:frame` listener) in its
+  // own state, so unmounting it on a fold would silently freeze a peer's board on
+  // its last frame. Folding is chrome, not a teardown.
   return (
-    <aside className="wd-fleet" aria-label="Fleet">
-      <div className="wd-fleet-head">
-        <span className="wd-card-kicker">Fleet</span>
-        <span className="wd-fleet-count">
-          {roots.length} session{roots.length === 1 ? '' : 's'}
-          {working > 0 ? ` · ${working} working` : ''}
-        </span>
+    <aside className={`wd-fleet${collapsed ? ' is-folded' : ''}`} aria-label="Fleet">
+      {collapsed ? (
+        <button
+          type="button"
+          className="wd-fleet-tab"
+          aria-expanded={false}
+          aria-label={`Show the fleet: ${summary}`}
+          title={`${summary} (F)`}
+          onClick={onToggleCollapsed}
+        >
+          <span className="wd-card-kicker">Fleet</span>
+          <span className="wd-fleet-count">{roots.length}</span>
+          <span className="wd-fleet-fold-glyph" aria-hidden>
+            »
+          </span>
+        </button>
+      ) : null}
+
+      <div className="wd-fleet-body">
+        <div className="wd-fleet-head">
+          <span className="wd-card-kicker">Fleet</span>
+          <span className="wd-fleet-count">{summary}</span>
+          <button
+            type="button"
+            className="wd-fleet-fold"
+            aria-expanded
+            aria-label="Hide the fleet"
+            title="Hide the fleet (F)"
+            onClick={onToggleCollapsed}
+          >
+            <span className="wd-fleet-fold-glyph" aria-hidden>
+              «
+            </span>
+          </button>
+        </div>
+
+        {roots.length === 0 ? (
+          <p className="wd-fleet-empty">
+            No sessions yet. Open Claude Code or Codex and they appear here.
+          </p>
+        ) : (
+          <ul className="wd-fleet-list">
+            {roots.map((a) => (
+              <Strip
+                key={a.id}
+                agent={a}
+                selected={a.id === selectedId}
+                childCount={childCounts.get(a.id) ?? 0}
+                onSelect={onSelect}
+              />
+            ))}
+          </ul>
+        )}
+
+        {footer ? <div className="wd-fleet-footer">{footer}</div> : null}
       </div>
-
-      {roots.length === 0 ? (
-        <p className="wd-fleet-empty">
-          No sessions yet. Open Claude Code or Codex and they appear here.
-        </p>
-      ) : (
-        <ul className="wd-fleet-list">
-          {roots.map((a) => (
-            <Strip
-              key={a.id}
-              agent={a}
-              selected={a.id === selectedId}
-              childCount={childCounts.get(a.id) ?? 0}
-              onSelect={onSelect}
-            />
-          ))}
-        </ul>
-      )}
-
-      {footer ? <div className="wd-fleet-footer">{footer}</div> : null}
     </aside>
   );
 }

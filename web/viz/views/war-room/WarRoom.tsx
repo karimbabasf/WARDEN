@@ -65,7 +65,7 @@ export function activeFor(
  * A fixed-position element always reports `offsetParent === null`, so visibility
  * is judged by measured width instead.
  */
-function useRailInsets(dockOpen: boolean): { left: number; right: number } {
+function useRailInsets(dockOpen: boolean, fleetFolded: boolean): { left: number; right: number } {
   const [insets, setInsets] = useState({ left: 0, right: 0 });
 
   useEffect(() => {
@@ -89,9 +89,35 @@ function useRailInsets(dockOpen: boolean): { left: number; right: number } {
       window.clearTimeout(t);
       window.removeEventListener('resize', measure);
     };
-  }, [dockOpen]);
+    // Folding the rack changes the free channel as much as opening the dock does,
+    // so it has to re-measure or the camera keeps framing around a rail that is
+    // no longer there.
+  }, [dockOpen, fleetFolded]);
 
   return insets;
+}
+
+const FLEET_FOLD_KEY = 'warden.fleet.folded';
+
+/**
+ * The fold is a workspace preference, not view state: it survives a reload. Both
+ * sides are guarded because `localStorage` throws outright in a locked-down
+ * webview, and a fold that cannot be remembered must still be a fold that works.
+ */
+export function readFleetFolded(): boolean {
+  try {
+    return window.localStorage.getItem(FLEET_FOLD_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeFleetFolded(folded: boolean): void {
+  try {
+    window.localStorage.setItem(FLEET_FOLD_KEY, folded ? '1' : '0');
+  } catch {
+    /* no storage: the fold still toggles, it just does not survive a reload */
+  }
 }
 
 export function isDiscoveryHomeDoubleClickAllowed({
@@ -251,7 +277,18 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
   const active = activeFor(scene.summoned, visHidden, scene.minimized);
   // The board never folds (no tab swap), so the forest scale is a constant 1.
   const foldScale = useRef(1);
-  const railInsets = useRailInsets(selectedId !== null);
+  // The fleet rack folds away to a tab. It is the widest piece of chrome over the
+  // scope, so it is the first thing you want gone when you are watching the board
+  // rather than reading a strip.
+  const [fleetFolded, setFleetFolded] = useState(readFleetFolded);
+  const onToggleFleet = useCallback(() => {
+    setFleetFolded((cur) => {
+      const next = !cur;
+      writeFleetFolded(next);
+      return next;
+    });
+  }, []);
+  const railInsets = useRailInsets(selectedId !== null, fleetFolded);
   // The peer board you are currently watching, lifted out of the observer dock.
   const [watched, setWatched] = useState<{ peer: { id: string; label: string }; state: ObservedState | null } | null>(
     null,
@@ -436,10 +473,16 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
         e.preventDefault();
         setHomeSignal((s) => s + 1);
       }
+      // F folds the fleet rack away and back. A panel you can hide needs a way
+      // back that does not depend on finding a 12px tab first.
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        onToggleFleet();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [onToggleFleet]);
 
   // Esc backs out one level: while a globe is focused, Esc deselects it (swallowed in
   // the capture phase). With nothing selected this listener is inert.
@@ -485,7 +528,7 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
 
   return (
     <div
-      className={`viz-root wd-radar-root${selectedRadarAgent ? ' has-dock' : ''}`}
+      className={`viz-root wd-radar-root${selectedRadarAgent ? ' has-dock' : ''}${fleetFolded ? ' fleet-folded' : ''}`}
       onDoubleClick={onDiscoveryHomeDoubleClick}
     >
       <Canvas
@@ -552,6 +595,8 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
         agents={radarModel.agents}
         selectedId={selectedId}
         onSelect={onRadarJump}
+        collapsed={fleetFolded}
+        onToggleCollapsed={onToggleFleet}
         footer={<PeersPanel onWatchedPeer={onWatchedPeer} />}
       />
 

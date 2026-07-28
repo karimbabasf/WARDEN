@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 //
 // FilterBar is the harness emphasis filter dock over the radar board. It renders one
-// chip per distinct live harness (plus a quiet Unknown fallback when the board is
-// empty), a chip toggles a single EmphasisFilter, and clicking the lit chip clears it.
-// Rendered under jsdom (house no-deps style).
+// chip per distinct live harness, but only once there are two or more of them to
+// choose between; a chip toggles a single EmphasisFilter, and clicking the lit chip
+// clears it. Rendered under jsdom (house no-deps style).
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { FilterBar } from './FilterBar';
+import { FilterBar, filterHarnesses } from './FilterBar';
 import type { EmphasisFilter } from '@/viz/shared/lib/emphasis';
 
 let container: HTMLDivElement | null = null;
@@ -41,14 +41,23 @@ describe('FilterBar', () => {
     expect(el.querySelectorAll('.wd-chip-harness').length).toBe(2);
   });
 
-  it('falls back to a single quiet Unknown chip when the board is empty', () => {
+  it('renders nothing on an empty board', () => {
     const el = render(<FilterBar agents={[]} filter={null} onFilter={() => {}} />);
-    expect(el.querySelectorAll('.wd-chip-harness').length).toBe(1);
+    expect(el.querySelector('.wd-filterbar')).toBeNull();
+  });
+
+  it('renders nothing when only one harness is live (the chip would filter nothing)', () => {
+    const el = render(
+      <FilterBar agents={[{ harness: 'claude_code' }, { harness: 'claude_code' }]} filter={null} onFilter={() => {}} />,
+    );
+    expect(el.querySelector('.wd-filterbar')).toBeNull();
   });
 
   it('toggles the harness filter on when a chip is clicked', () => {
     const onFilter = vi.fn();
-    const el = render(<FilterBar agents={[{ harness: 'codex' }]} filter={null} onFilter={onFilter} />);
+    const el = render(
+      <FilterBar agents={[{ harness: 'codex' }, { harness: 'claude_code' }]} filter={null} onFilter={onFilter} />,
+    );
     const chip = el.querySelector('.wd-chip-harness') as HTMLButtonElement;
     act(() => chip.click());
     expect(onFilter).toHaveBeenCalledWith({ kind: 'harness', harness: 'codex' });
@@ -57,10 +66,23 @@ describe('FilterBar', () => {
   it('clears the filter when the already-lit chip is clicked', () => {
     const onFilter = vi.fn();
     const lit: EmphasisFilter = { kind: 'harness', harness: 'codex' };
-    const el = render(<FilterBar agents={[{ harness: 'codex' }]} filter={lit} onFilter={onFilter} />);
+    const el = render(
+      <FilterBar agents={[{ harness: 'codex' }, { harness: 'claude_code' }]} filter={lit} onFilter={onFilter} />,
+    );
     const chip = el.querySelector('.wd-chip-harness.is-active') as HTMLButtonElement;
     expect(chip).not.toBeNull();
     act(() => chip.click());
     expect(onFilter).toHaveBeenCalledWith(null);
+  });
+});
+
+describe('filterHarnesses', () => {
+  it('is empty below two harnesses and dedupes above it', () => {
+    expect(filterHarnesses([])).toEqual([]);
+    expect(filterHarnesses([{ harness: 'claude_code' }, { harness: 'claude_code' }])).toEqual([]);
+    expect(filterHarnesses([{ harness: 'claude_code' }, { harness: 'codex' }, { harness: 'codex' }])).toEqual([
+      'claude_code',
+      'codex',
+    ]);
   });
 });

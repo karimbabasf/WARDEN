@@ -117,6 +117,9 @@
   --side-margin: 14px;
   --rail-w: clamp(268px, 21vw, 340px);
   --panel-w: var(--rail-w);   /* legacy alias: the right rail's width */
+  /* What the fleet rack shrinks to when folded. Fixed, not intrinsic, so
+     `--rail-left-occupied` can name the folded width exactly. */
+  --fleet-tab-w: 104px;
 
   /* ── z-index scale ── */
   --z-canvas: 0;
@@ -255,6 +258,9 @@ html, body {
 }
 .wd-radar-root.has-dock { --rail-right-occupied: calc(var(--rail-w) + var(--side-margin)); }
 .wd-radar-root.no-fleet { --rail-left-occupied: 0px; }
+/* Folded, the rack is a tab: the free channel widens by most of a rail and the
+   breadcrumb, the filter dock and the camera all re-centre onto it. */
+.wd-radar-root.fleet-folded { --rail-left-occupied: calc(var(--fleet-tab-w) + var(--side-margin)); }
 
 .wd-filterbar {
   position: absolute;
@@ -1548,6 +1554,9 @@ html, body {
 .wd-breadcrumb:empty { display: none; }
 
 /* ── left rail: the strip rack ───────────────────────────────────────────── */
+/* The aside is a bare positioned box: the surface (panel, border, shadow) lives on
+   whichever child is showing, the body or the folded tab. That is what lets the two
+   swap without the chrome popping in ahead of its contents. */
 .wd-fleet {
   position: fixed;
   top: var(--top-safe);
@@ -1559,11 +1568,68 @@ html, body {
   flex-direction: column;
   min-height: 0;
   pointer-events: auto;
+}
+.wd-fleet.is-folded { width: var(--fleet-tab-w); }
+
+.wd-fleet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--panel);
   border: 1px solid var(--hair);
   border-radius: var(--r-surface);
   box-shadow: var(--key-lg), var(--lift);
   animation: wd-rail-in var(--t-travel) var(--ease-out) both;
+}
+/* Hidden, not unmounted (see FleetRail.tsx: the observer dock lives in here). A
+   none -> flex flip restarts wd-rail-in, so unfolding slides the rack back in. */
+.wd-fleet.is-folded .wd-fleet-body { display: none; }
+
+/* The folded tab. Same slot the head occupied, so nothing jumps on unfold. */
+.wd-fleet-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-radius: var(--r-surface);
+  box-shadow: var(--key-lg), var(--lift);
+  color: var(--ink-faint);
+  cursor: pointer;
+  animation: wd-rail-in var(--t-travel) var(--ease-out) both;
+  transition: border-color var(--t-micro) var(--ease-out), background var(--t-micro) var(--ease-out);
+}
+.wd-fleet-tab:hover { border-color: var(--hair-bright); background: var(--surface-2); }
+.wd-fleet-tab:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--hair-bright); }
+.wd-fleet-tab .wd-fleet-count { margin-left: auto; color: var(--ink); }
+
+/* The fold control in the open head. A hairline square, quiet until you reach it.
+   24px is the floor, not a look: below it the hit target fails the audit. */
+.wd-fleet-fold {
+  flex: none;
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-control);
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color var(--t-micro) var(--ease-out), border-color var(--t-micro) var(--ease-out),
+    background var(--t-micro) var(--ease-out);
+}
+.wd-fleet-fold:hover { color: var(--ink); border-color: var(--hair-bright); background: var(--surface-2); }
+.wd-fleet-fold:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--hair-bright); }
+.wd-fleet-fold-glyph {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
 }
 
 .wd-fleet-head {
@@ -1582,6 +1648,9 @@ html, body {
   color: var(--ink-faint);
   white-space: nowrap;
 }
+/* The head is space-between, so without this the census would float in the middle
+   once the fold control joined it. Auto margin keeps count and control paired. */
+.wd-fleet-head .wd-fleet-count { margin-left: auto; }
 .wd-fleet-empty {
   margin: 0;
   padding: 16px 12px;
@@ -1772,12 +1841,16 @@ html, body {
 }
 @media (max-width: 980px) {
   /* Not enough room for two rails plus a readable scope. The fleet hides and
-     the scope re-centres, which is what `no-fleet` is for. */
+     the scope re-centres, which is what `no-fleet` is for. `.fleet-folded` is
+     named alongside the base selector because it is one class heavier and would
+     otherwise keep claiming the tab's width against a rail that is not rendered. */
   .wd-fleet { display: none; }
-  .wd-radar-root { --rail-left-occupied: 0px; }
+  .wd-radar-root,
+  .wd-radar-root.fleet-folded { --rail-left-occupied: 0px; }
 }
 @media (max-width: 760px) {
-  .wd-radar-root { --rail-left-occupied: 0px; --rail-right-occupied: 0px; }
+  .wd-radar-root,
+  .wd-radar-root.fleet-folded { --rail-left-occupied: 0px; --rail-right-occupied: 0px; }
   .wd-breadcrumb { top: 18px; }
 }
 

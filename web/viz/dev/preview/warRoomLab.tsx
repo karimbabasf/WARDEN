@@ -160,26 +160,48 @@ const FOREST = {
 const noopListen = (async () => () => {}) as unknown as typeof import('@tauri-apps/api/event').listen;
 const bridge = createBridge(noopListen);
 const el = document.getElementById('war-room-root');
+const params = new URLSearchParams(window.location.search);
+
+// `?solo=1` drops every non-Claude agent. A one-harness machine is the common case
+// and it is a DIFFERENT chrome (the filter dock does not render at all when there is
+// nothing to choose between), so it needs its own reachable state.
+const board = params.get('solo') === '1'
+  ? { ...FOREST, agents: FOREST.agents.filter((a) => a.harness === 'claude_code') }
+  : FOREST;
+
 if (el) {
   createRoot(el).render(<WarRoom bridge={bridge} />);
   // Push after mount so the harness exercises the real subscribe path rather than
   // rendering from a pre-seeded state the app would never actually start from.
-  bridge.ingest('radar_scene_ready', FOREST);
+  bridge.ingest('radar_scene_ready', board);
   // The app pulls `get_radar_state` on an interval and swallows the rejection when
   // there is no Tauri backend, so re-push on the same cadence to keep the mock in
   // place instead of letting the first failed pull look like an empty machine.
-  window.setInterval(() => bridge.ingest('radar_scene_ready', FOREST), 750);
+  window.setInterval(() => bridge.ingest('radar_scene_ready', board), 750);
 
   // `?select=<n>` clicks the nth fleet strip once the rail has rendered. The
   // both-rails-open state is the one that actually has to be checked for overlap
   // (left rack, scope, right readout, filter dock, breadcrumb all on screen at
   // once), and it is unreachable in a static screenshot without a click.
-  const want = new URLSearchParams(window.location.search).get('select');
+  const want = params.get('select');
   if (want !== null) {
     const n = Number(want) || 0;
     window.setTimeout(() => {
       const strips = document.querySelectorAll<HTMLButtonElement>('.wd-strip');
       strips[n]?.click();
     }, 400);
+  }
+
+  // `?fold=1` folds the rack down to its tab, `?fold=0` opens it. Driven through the
+  // real control rather than the storage key, so the harness cannot drift from the
+  // app. Stated EXPLICITLY on both sides because the fold persists: without naming
+  // the state you want, a screenshot run inherits whatever the last one left behind.
+  const fold = params.get('fold');
+  if (fold !== null) {
+    window.setTimeout(() => {
+      const folded = document.querySelector('.wd-fleet.is-folded') !== null;
+      if (folded === (fold === '1')) return;
+      document.querySelector<HTMLButtonElement>(fold === '1' ? '.wd-fleet-fold' : '.wd-fleet-tab')?.click();
+    }, 450);
   }
 }
