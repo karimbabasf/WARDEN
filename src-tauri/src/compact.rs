@@ -419,7 +419,10 @@ mod tests {
         .expect("arm");
 
         assert_eq!(row.mode, "notify_only");
-        assert!(!row.acts, "the frontend must be able to see it will not act");
+        assert!(
+            !row.acts,
+            "the frontend must be able to see it will not act"
+        );
         assert!(
             row.mode_reason.starts_with("notify only:"),
             "reason: {}",
@@ -457,8 +460,7 @@ mod tests {
         let store = Store::memory().expect("store");
         let dir = fixture_dir();
         let codex = tempfile::tempdir().expect("tempdir");
-        let err = arm(&store, dir.path(), codex.path(), "not-a-real-agent")
-            .expect_err("must fail");
+        let err = arm(&store, dir.path(), codex.path(), "not-a-real-agent").expect_err("must fail");
         assert!(format!("{err:#}").contains("no agent with id"));
     }
 

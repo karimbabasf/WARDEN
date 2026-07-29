@@ -12,11 +12,11 @@
 //! curated public surface (`crate::scheduler::*`) the rest of the crate depends
 //! on. Cross-submodule internals stay `pub(crate)`; nothing else is forwarded.
 
-mod watch;
 mod radar;
+mod watch;
 
-pub use watch::{ingest_file_once, spawn_watchers, WatcherGuard};
 pub use radar::{
     cache_radar_state, latest_cached_radar_state, new_radar_state_cache, spawn_radar_watcher,
     RadarDirtySignal, RadarStateCache,
 };
+pub use watch::{ingest_file_once, spawn_watchers, WatcherGuard};

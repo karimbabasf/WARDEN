@@ -23,6 +23,10 @@ chrono = { version = "0.4", features = ["serde"] }
 data-encoding = "2.11"
 dirs = "6.0"
 dotenvy = "0.15"
+# License verification (src/license/). Already in the tree as an iroh transitive
+# dependency at this exact version, so making it direct costs no extra
+# compilation and adds no new supply-chain surface.
+ed25519-dalek = "3.0"
 futures-util = "0.3"
 hex = "0.4"
 iroh = "1.0.3"

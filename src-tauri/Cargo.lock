@@ -6410,6 +6410,7 @@ dependencies = [
  "data-encoding",
  "dirs",
  "dotenvy",
+ "ed25519-dalek",
  "futures-util",
  "hex",
  "iroh",
