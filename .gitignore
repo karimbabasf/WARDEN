@@ -40,3 +40,4 @@ status.sh
 # landing verification artifacts (look.mjs)
 landing/.design/
 /.design/
+.env.local
