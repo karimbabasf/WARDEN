@@ -453,8 +453,13 @@ async function poll() {
       return;
     }
 
-    $('bad-msg').textContent = 'The licence lookup failed'
-      + (e && e.status ? ' (error ' + e.status + ').' : '.');
+    /* 400 is the one final status with a knowable cause: invalid_session_id, so
+       the reference in the link is malformed rather than the lookup being sick.
+       Saying so beats a status code, because it tells the reader the link itself
+       is the problem and the form below is the way round it. */
+    $('bad-msg').textContent = (e && e.status === 400)
+      ? 'The checkout reference in this link is not valid.'
+      : 'The licence lookup failed' + (e && e.status ? ' (error ' + e.status + ').' : '.');
     show('bad');
   }
 }
@@ -523,7 +528,18 @@ $('retry2').addEventListener('click', restart);
         body: JSON.stringify({ email: field.value.trim() }),
       });
       if (res.status === 429) {
-        say('Too many requests from here. Wait a few minutes and try again.', true);
+        /* Retry-After counts down inside the window, so the wait can be stated
+           instead of guessed at. Same-origin, so the header is readable without
+           being CORS-exposed. Falls back to the vague version if it is absent or
+           unparseable, since a wrong number is worse than no number. */
+        const secs = Number(res.headers.get('Retry-After'));
+        let when = 'in a few minutes';
+        if (Number.isFinite(secs) && secs > 0) {
+          when = secs < 90
+            ? 'in about ' + Math.max(10, Math.ceil(secs / 10) * 10) + ' seconds'
+            : 'in about ' + Math.ceil(secs / 60) + ' minutes';
+        }
+        say('Too many requests from this connection. Try again ' + when + '.', true);
       } else if (!res.ok) {
         say('That did not go through. Try again in a moment.', true);
       } else {
@@ -576,6 +592,15 @@ if (sessionId) {
     'This page needs the checkout reference that Stripe adds to the link.';
   $('retry2').hidden = true;   /* nothing to retry: there is no reference to look up */
   show('bad');                 /* which also reveals the recovery form */
+  /* The shared #bad copy opens "The payment went through", which is true when a
+     lookup failed on a real session and is an invention here: reaching this page
+     with no reference is no evidence that anyone paid at all. Own wording, and
+     it points at the one control on screen that can still help. */
+  $('title').textContent = 'This link is missing its reference.';
+  $('sub').textContent =
+    'If you have just paid, the link Stripe sent you carries a checkout reference that this '
+    + 'page needs. Open that link again from your browser history, or have the key sent to '
+    + 'your email below.';
 }
 })();
 </script>
