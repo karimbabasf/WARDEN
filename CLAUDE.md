@@ -62,7 +62,7 @@ Layered `ingest -> store -> radar -> commands/lib/scheduler`.
 - `ingest/` the `Adapter` trait + `AdapterRegistry` + `claude_code.rs` / `codex.rs`. Adding a harness is one adapter, zero downstream changes.
 - `radar.rs` + `radar/` the live agent forest: a façade over `model/assemble/agent/context/identity/live/status` + `composition/hierarchy/liveness` + `teams` (Claude agent-team rosters from `~/.claude/teams/*/config.json`, the source of real subagent names).
 - `observe.rs` + `observe/` remote read-only observation: `projection` (the redaction boundary; the ONLY producer of wire data), `grants` (token codec + single-use/expiry), `transport` (iroh QUIC, host side), `peers` (observer side). Holds no `AppHandle` and cannot name a radar type, both asserted by tests.
-- `scheduler.rs` + `scheduler/` the task drivers: `watch` (live-ingest) and `radar` (recompute + `RadarStateCache`).
+- `scheduler.rs` + `scheduler/` the task drivers: `watch` (live-ingest) and `radar` (recompute + `RadarStateCache`). The recompute worker has TWO CPU guards and they do different jobs: serialization caps CONCURRENCY at one recompute, and `radar_min_interval()` (default 1s, `WARDEN_RADAR_MIN_INTERVAL_MS`) caps the RATE. Only the second one bounds a sustained stream: with the default zero debounce, an event landing while a recompute runs starts the next the instant it returns, so a live transcript tail used to pin a full core. The floor is leading-edge, so an isolated event still emits immediately.
 - `util.rs` env + path helpers; `platform/` the OS seam (port + `macos.rs` + `fallback.rs`).
 - `lib.rs` the Tauri builder / `setup()` (visible window on launch, tray, hotkey, startup backfill, watchers); `commands.rs` the `#[tauri::command]`s.
 
@@ -90,6 +90,15 @@ middle, the selected target's readout on the right.
   never a bare CSS keyword and never one global duration. Animate transform and
   opacity. `prefers-reduced-motion` is honoured globally in CSS and per-component in
   the R3F scene.
+- **Render rate has THREE states, not two** (`frameloopFor`): minimized is `never`,
+  focused is `always`, and visible-but-blurred is `demand` paced by
+  `BackgroundFrameTick` at `BACKGROUND_FPS`. Blurred is WARDEN's NORMAL state (it sits
+  open behind the work it watches), and rendering it at display rate cost about half a
+  core across the WebKit GPU process and WindowServer. Focus comes from Tauri's
+  `onFocusChanged` through the bridge, never from `window.onblur` alone: as with
+  `warden_hotkey`, the packaged app moves its window with native calls the webview does
+  not see. Focus is a RATE input only and must never gate whether the radar updates. A
+  Canvas on `demand` MUST mount `BackgroundFrameTick` or the scene freezes.
 - **Two-rail layout**: "centre" means the FREE CHANNEL between the rails, not the
   viewport. Anything centred keys off `--rail-left-occupied` / `--rail-right-occupied`
   (`left: calc(50% + (L - R) / 2)`), and the camera gets the same insets in CSS

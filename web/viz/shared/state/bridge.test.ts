@@ -54,6 +54,36 @@ describe('reduce: window lifecycle', () => {
   it('warden_dismiss drops the summon flag', () => {
     expect(reduce({ summoned: true }, 'warden_dismiss', {}).summoned).toBe(false);
   });
+
+  it('native focus and blur set the render-rate flag', () => {
+    const blurred = reduce(empty(), 'warden_blurred', {});
+    expect(blurred.focused).toBe(false);
+    expect(reduce(blurred, 'warden_focused', {}).focused).toBe(true);
+  });
+
+  it('a repeated focus event is a no-op (no needless re-render)', () => {
+    const s: SceneState = { minimized: false, focused: true };
+    expect(reduce(s, 'warden_focused', {})).toBe(s);
+    const b: SceneState = { minimized: false, focused: false };
+    expect(reduce(b, 'warden_blurred', {})).toBe(b);
+  });
+
+  it('focus is undefined until a native event arrives, so the view can fall back', () => {
+    expect(empty().focused).toBeUndefined();
+  });
+
+  it('blur never stops the radar, it only lowers the render rate', () => {
+    // The regression this guards: treating blur like minimize would freeze the forest
+    // for a window the user is still watching on a second display.
+    const blurred = reduce(empty(), 'warden_blurred', {});
+    expect(blurred.minimized).toBe(false);
+    const withForest = reduce(blurred, 'radar_scene_ready', {
+      generatedAt: '2026-07-29T00:00:00Z',
+      agents: [{ id: 'a1', harness: 'codex', label: 'Codex' }],
+    });
+    expect(withForest.radarScene?.agents.length).toBe(1);
+    expect(withForest.focused).toBe(false);
+  });
 });
 
 describe('reduce: non scene-driving events are inert', () => {

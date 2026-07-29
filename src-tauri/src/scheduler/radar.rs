@@ -52,6 +52,23 @@ fn radar_recompute_debounce() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// Minimum spacing between two radar recomputes under a SUSTAINED event stream, in ms.
+/// `WARDEN_RADAR_MIN_INTERVAL_MS` overrides (default 1000); `0` removes the floor.
+///
+/// This is a floor, not a delay: an isolated event still recomputes immediately (see the
+/// leading edge in [`spawn_radar_recompute_worker`]), so it costs no emit latency in the
+/// common case. It only bites when events arrive faster than the worker can serve them,
+/// which is exactly the case that used to pin a core. One recompute is roughly 325ms of
+/// CPU on a real corpus (a ~165ms live-context refresh plus a ~160ms forest recompute),
+/// so a 1s floor caps the radar's steady-state cost near a third of one core.
+fn radar_min_interval() -> Duration {
+    let ms = std::env::var("WARDEN_RADAR_MIN_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(1000);
+    Duration::from_millis(ms)
+}
+
 fn kick_radar_after_watch_event(signal: &RadarDirtySignal) {
     signal.mark_dirty_with_live_refresh();
 }
@@ -158,10 +175,13 @@ impl Default for RadarDirtySignal {
 /// 1. wait until the forest is dirty (sleep on the `Notify` otherwise);
 /// 2. claim the work (clear the dirty flag) and coalesce a `debounce` window so a
 ///    rapid burst becomes ONE recompute;
-/// 3. run `recompute` EXACTLY ONCE, on a blocking thread so it cannot starve the
+/// 3. hold a `min_interval` floor since the PREVIOUS recompute started, so a sustained
+///    stream cannot drive them back-to-back. Leading edge: an isolated event skips this
+///    entirely and runs at once;
+/// 4. run `recompute` EXACTLY ONCE, on a blocking thread so it cannot starve the
 ///    async runtime, and `await` it so the next iteration cannot start until this
 ///    recompute has finished — **never two concurrent**;
-/// 4. loop. A signal raised during the run left the flag set, so the latest state is
+/// 5. loop. A signal raised during the run left the flag set, so the latest state is
 ///    always eventually recomputed (at most one in-flight + one queued).
 ///
 /// `recompute` is the (blocking) work — in production it recomputes the forest and
@@ -175,6 +195,7 @@ impl Default for RadarDirtySignal {
 pub(crate) fn spawn_radar_recompute_worker<F>(
     signal: RadarDirtySignal,
     debounce: Duration,
+    min_interval: Duration,
     recompute: F,
 ) -> tauri::async_runtime::JoinHandle<()>
 where
@@ -183,9 +204,11 @@ where
     use std::sync::atomic::Ordering;
     let recompute = Arc::new(recompute);
     tauri::async_runtime::spawn(async move {
+        // Start of the previous recompute, for the leading-edge floor below.
+        let mut last_start: Option<std::time::Instant> = None;
         loop {
             // The dirty flag is the SINGLE source of truth; `Notify` is only a wakeup
-            // hint. Claim work by clearing the flag — if it was not set, sleep until a
+            // hint. Claim work by clearing the flag: if it was not set, sleep until a
             // signal and loop back to re-check (a stale/leftover `Notify` permit then
             // just causes a harmless re-check, never an extra recompute).
             if !signal.inner.dirty.swap(false, Ordering::SeqCst) {
@@ -194,13 +217,32 @@ where
             }
 
             // Coalesce the burst: further signals during this window just re-set the
-            // flag (claimed by the next iteration) — they do not stack recomputes.
+            // flag (claimed by the next iteration), they do not stack recomputes.
             if !debounce.is_zero() {
                 tokio::time::sleep(debounce).await;
                 // Re-claim anything that arrived during the debounce window so it is
                 // folded into THIS recompute rather than triggering another.
                 signal.inner.dirty.store(false, Ordering::SeqCst);
             }
+
+            // Fix #2, the SUSTAINED-STREAM floor. Serialization caps concurrency at one
+            // recompute, but not the RATE: with the default zero debounce, an event that
+            // lands while a recompute is running starts the next one the instant it
+            // returns, so a live transcript tail keeps a full core busy indefinitely.
+            //
+            // A leading edge keeps that from costing latency. The first event after a
+            // quiet period runs at once (`last_start` is None, no wait), and only a
+            // stream that is already saturating the worker waits out the remainder of
+            // the window. Anything that arrives during the wait folds into this same
+            // recompute rather than queueing another.
+            if let Some(prev) = last_start {
+                let since = prev.elapsed();
+                if since < min_interval {
+                    tokio::time::sleep(min_interval - since).await;
+                    signal.inner.dirty.store(false, Ordering::SeqCst);
+                }
+            }
+            last_start = Some(std::time::Instant::now());
 
             let refresh_live_context = signal
                 .inner
@@ -311,10 +353,15 @@ pub fn spawn_radar_watcher(
         let cache = cache.clone();
         let signal = signal.clone();
         let agent_count = agent_count.clone();
-        spawn_radar_recompute_worker(signal, radar_recompute_debounce(), move |refresh| {
-            let n = recompute_and_emit_radar(&store, &sessions_dir, &app, &cache, refresh);
-            agent_count.store(n, std::sync::atomic::Ordering::SeqCst);
-        })
+        spawn_radar_recompute_worker(
+            signal,
+            radar_recompute_debounce(),
+            radar_min_interval(),
+            move |refresh| {
+                let n = recompute_and_emit_radar(&store, &sessions_dir, &app, &cache, refresh);
+                agent_count.store(n, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
     };
     // Liveness heartbeat: re-derive liveness every tick WHILE agents are open (settles a
     // stuck "working" globe / drops a termination FSEvents may have coalesced away);
@@ -399,14 +446,21 @@ mod tests {
             let runs = runs.clone();
             let in_flight = in_flight.clone();
             let max_in_flight = max_in_flight.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(40), move |_| {
-                let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                max_in_flight.fetch_max(cur, Ordering::SeqCst);
-                // Simulate a non-trivial recompute body.
-                std::thread::sleep(Duration::from_millis(30));
-                runs.fetch_add(1, Ordering::SeqCst);
-                in_flight.fetch_sub(1, Ordering::SeqCst);
-            })
+            // No rate-limit floor here: this case is about COALESCING a burst, which
+            // must hold on its own. The floor is covered by the sustained-stream test.
+            spawn_radar_recompute_worker(
+                signal.clone(),
+                Duration::from_millis(40),
+                Duration::ZERO,
+                move |_| {
+                    let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_in_flight.fetch_max(cur, Ordering::SeqCst);
+                    // Simulate a non-trivial recompute body.
+                    std::thread::sleep(Duration::from_millis(30));
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                },
+            )
         };
 
         // Burst 1: 50 rapid signals (mimics an FSEvents storm across roots).
@@ -456,9 +510,14 @@ mod tests {
         let signal = RadarDirtySignal::new();
         let worker = {
             let runs = runs.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move |_| {
-                runs.fetch_add(1, Ordering::SeqCst);
-            })
+            spawn_radar_recompute_worker(
+                signal.clone(),
+                Duration::from_millis(1),
+                Duration::ZERO,
+                move |_| {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                },
+            )
         };
         // The startup kick — no watcher has fired, this is the only signal.
         signal.mark_dirty();
@@ -477,9 +536,14 @@ mod tests {
         let signal = RadarDirtySignal::new();
         let worker = {
             let refresh_flags = refresh_flags.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move |refresh| {
-                refresh_flags.lock().unwrap().push(refresh);
-            })
+            spawn_radar_recompute_worker(
+                signal.clone(),
+                Duration::from_millis(1),
+                Duration::ZERO,
+                move |refresh| {
+                    refresh_flags.lock().unwrap().push(refresh);
+                },
+            )
         };
 
         signal.mark_dirty_with_live_refresh();
@@ -501,9 +565,14 @@ mod tests {
         let signal = RadarDirtySignal::new();
         let worker = {
             let refresh_flags = refresh_flags.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move |refresh| {
-                refresh_flags.lock().unwrap().push(refresh);
-            })
+            spawn_radar_recompute_worker(
+                signal.clone(),
+                Duration::from_millis(1),
+                Duration::ZERO,
+                move |refresh| {
+                    refresh_flags.lock().unwrap().push(refresh);
+                },
+            )
         };
 
         kick_radar_after_watch_event(&signal);
@@ -529,11 +598,16 @@ mod tests {
         let worker = {
             let runs = runs.clone();
             let started = started.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(10), move |_| {
-                started.notify_one();
-                std::thread::sleep(Duration::from_millis(60));
-                runs.fetch_add(1, Ordering::SeqCst);
-            })
+            spawn_radar_recompute_worker(
+                signal.clone(),
+                Duration::from_millis(10),
+                Duration::ZERO,
+                move |_| {
+                    started.notify_one();
+                    std::thread::sleep(Duration::from_millis(60));
+                    runs.fetch_add(1, Ordering::SeqCst);
+                },
+            )
         };
 
         // Kick the first recompute and wait until it has actually started running.
@@ -562,9 +636,14 @@ mod tests {
         let signal = RadarDirtySignal::new();
         let worker = {
             let runs = runs.clone();
-            spawn_radar_recompute_worker(signal.clone(), Duration::from_millis(1), move |_| {
-                runs.fetch_add(1, Ordering::SeqCst);
-            })
+            spawn_radar_recompute_worker(
+                signal.clone(),
+                Duration::from_millis(1),
+                Duration::ZERO,
+                move |_| {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                },
+            )
         };
         let tick = spawn_radar_tick(
             signal.clone(),
@@ -621,4 +700,92 @@ mod tests {
         std::env::remove_var("WARDEN_RADAR_DEBOUNCE_MS");
     }
 
+    #[test]
+    fn radar_min_interval_defaults_to_one_second_and_is_overridable() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("WARDEN_RADAR_MIN_INTERVAL_MS");
+        assert_eq!(
+            radar_min_interval(),
+            Duration::from_millis(1000),
+            "the sustained-stream floor must be on by default, or the bug is back"
+        );
+
+        std::env::set_var("WARDEN_RADAR_MIN_INTERVAL_MS", "250");
+        assert_eq!(radar_min_interval(), Duration::from_millis(250));
+
+        // 0 removes the floor (the pre-fix behaviour, kept for debugging).
+        std::env::set_var("WARDEN_RADAR_MIN_INTERVAL_MS", "0");
+        assert_eq!(radar_min_interval(), Duration::ZERO);
+
+        std::env::remove_var("WARDEN_RADAR_MIN_INTERVAL_MS");
+    }
+
+    /// Fix #2 (RATE LIMIT): a SUSTAINED event stream (not a burst) must not drive
+    /// back-to-back recomputes. Coalescing alone does not bound this: with the default
+    /// zero debounce, every event that lands after a recompute returns starts the next
+    /// one immediately, so a live transcript stream pins a full core forever.
+    ///
+    /// The floor is a LEADING-edge throttle, so the two properties are tested together:
+    /// the first event after a quiet period still runs immediately (emit latency is a
+    /// product requirement), and the sustained rate stays under one per `min_interval`.
+    #[tokio::test]
+    async fn radar_recompute_worker_rate_limits_a_sustained_stream() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let first_run_at = Arc::new(Mutex::new(None::<Duration>));
+        let t0 = std::time::Instant::now();
+
+        let signal = RadarDirtySignal::new();
+        let worker = {
+            let runs = runs.clone();
+            let first_run_at = first_run_at.clone();
+            // Zero debounce == production default; a 200ms floor keeps the test quick.
+            spawn_radar_recompute_worker(
+                signal.clone(),
+                Duration::ZERO,
+                Duration::from_millis(200),
+                move |_| {
+                    let mut slot = first_run_at.lock().unwrap_or_else(|e| e.into_inner());
+                    if slot.is_none() {
+                        *slot = Some(t0.elapsed());
+                    }
+                    drop(slot);
+                    // A recompute that costs real time, like the real one (~325ms).
+                    std::thread::sleep(Duration::from_millis(50));
+                    runs.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        };
+
+        // A SUSTAINED stream: one event every 20ms for 1s (a live transcript tail).
+        for _ in 0..50 {
+            signal.mark_dirty();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let total = runs.load(Ordering::SeqCst);
+        // ~1.25s of stream at a 200ms floor gives at most ~7 recomputes. Without the
+        // floor this is ~20 (bounded only by the 50ms body), which is the bug.
+        assert!(
+            total <= 8,
+            "a sustained stream must be rate-limited to ~one per floor, got {total} recomputes"
+        );
+        // ...and the stream must still be served, not starved.
+        assert!(
+            total >= 3,
+            "the worker must keep serving the stream, got {total}"
+        );
+
+        // Leading edge: the FIRST recompute must not have waited out a floor.
+        let first = first_run_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expect("worker ran at least once");
+        assert!(
+            first < Duration::from_millis(150),
+            "the first event after a quiet period must recompute immediately, waited {first:?}"
+        );
+
+        worker.abort();
+    }
 }

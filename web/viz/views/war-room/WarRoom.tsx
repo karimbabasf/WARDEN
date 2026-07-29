@@ -32,6 +32,7 @@ import type { EmphasisFilter } from '@/viz/shared/lib/emphasis';
 import type { LayoutNode } from '@/viz/shared/types/orbTypes';
 import { subtreeBounds, enclosingBounds, type Bounds } from '@/viz/shared/scene/cameraFraming';
 import { frameloopFor } from '@/viz/shared/scene/frameloop';
+import { BackgroundFrameTick } from '@/viz/shared/scene/BackgroundFrameTick';
 
 const BG = '#020403';
 
@@ -264,6 +265,7 @@ function SceneShell({
 export function WarRoom({ bridge }: { bridge: Bridge }) {
   const [scene, setScene] = useState<SceneState>(() => ({ minimized: false }));
   const [visHidden, setVisHidden] = useState(() => document.hidden);
+  const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   // Harness legend filter. null = no filter, so every globe's colour-only dim is 0
@@ -275,6 +277,10 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
   const [homeSignal, setHomeSignal] = useState(0);
   const [focusBounds, setFocusBounds] = useState<Bounds | null>(null);
   const active = activeFor(scene.summoned, visHidden, scene.minimized);
+  // The native signal (Tauri `onFocusChanged`, routed through the bridge) is
+  // authoritative in the packaged app; the DOM listener below covers the browser
+  // harness, where no native event ever arrives.
+  const frameloop = frameloopFor(!active, scene.focused ?? windowFocused);
   // The board never folds (no tab swap), so the forest scale is a constant 1.
   const foldScale = useRef(1);
   // The fleet rack folds away to a tab. It is the widest piece of chrome over the
@@ -315,6 +321,21 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
     document.addEventListener('visibilitychange', onVis);
     return () => {
       document.removeEventListener('visibilitychange', onVis);
+    };
+  }, []);
+
+  // Focus is tracked SEPARATELY from visibility because the two are not the same thing
+  // here: a window sitting behind the editor is still `visible` by the page-visibility
+  // spec, and that is the state WARDEN spends most of its life in. It decides render
+  // rate only (see `frameloopFor`), never whether the radar keeps updating.
+  useEffect(() => {
+    const onFocus = () => setWindowFocused(true);
+    const onBlur = () => setWindowFocused(false);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
     };
   }, []);
 
@@ -533,12 +554,13 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
     >
       <Canvas
         dpr={[1, 2]}
-        frameloop={frameloopFor(!active)}
+        frameloop={frameloop}
         gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
         // Opens far enough back that the constellation frames with room to breathe;
         // |pos| is close to CameraRig's OVERVIEW_DIST so the first frame sits at rest.
         camera={{ position: [4.8, 3.2, 11.7], fov: 46, near: 0.1, far: 140 }}
       >
+        <BackgroundFrameTick paced={frameloop === 'demand'} />
         <SceneShell
           radarModel={radarModel}
           selected={selectedNode}

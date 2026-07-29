@@ -19,7 +19,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mountWarRoom, unmountWarRoom } from './mount';
 import { RADAR_VISIBLE_PULL_MS, activeFor } from '@/viz/views/war-room/WarRoom';
-import { frameloopFor } from '@/viz/shared/scene/frameloop';
+import { BACKGROUND_FPS, frameloopFor } from '@/viz/shared/scene/frameloop';
 
 afterEach(() => {
   // Reset module-level mount singletons so each case starts clean.
@@ -95,5 +95,42 @@ describe('activeFor — animate unless minimized (blur is irrelevant)', () => {
 describe('RADAR visible-tab refresh', () => {
   it('keeps the fallback pull under one second', () => {
     expect(RADAR_VISIBLE_PULL_MS).toBeLessThanOrEqual(1000);
+  });
+});
+
+// The CPU fix. WARDEN sits open behind the editor all day, so "visible but blurred" is
+// its normal state, and rendering a rotating constellation at display rate there cost
+// about half a core for frames nobody looked at. `document.hidden` cannot catch it: on
+// macOS it only goes true on minimize/hide, never when the window is merely behind
+// another. Focus is therefore a SEPARATE axis, and it changes render rate only.
+describe('frameloopFor: an unfocused window renders paced, not at display rate', () => {
+  it('renders at full rate only while focused', () => {
+    expect(frameloopFor(false, true)).toBe('always');
+  });
+
+  it('drops a visible but blurred window to demand', () => {
+    expect(frameloopFor(false, false)).toBe('demand');
+  });
+
+  it('still stops entirely when hidden, focused or not', () => {
+    expect(frameloopFor(true, true)).toBe('never');
+    expect(frameloopFor(true, false)).toBe('never');
+  });
+
+  it('defaults to focused so existing call sites keep full rate', () => {
+    expect(frameloopFor(false)).toBe('always');
+    expect(frameloopFor(true)).toBe('never');
+  });
+
+  it('never returns always for a blurred window (the regression that burned a core)', () => {
+    for (const summoned of [true, false, undefined]) {
+      const active = activeFor(summoned, false, false);
+      expect(frameloopFor(!active, false)).not.toBe('always');
+    }
+  });
+
+  it('keeps the background rate low enough to matter but high enough to read', () => {
+    expect(BACKGROUND_FPS).toBeLessThanOrEqual(12);
+    expect(BACKGROUND_FPS).toBeGreaterThanOrEqual(4);
   });
 });

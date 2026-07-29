@@ -56,9 +56,9 @@ listen('warden_hotkey', () => {
   diag(`hotkey received hidden=${document.hidden} vis=${document.visibilityState}`);
 });
 
-// The window STAYS ON SCREEN and KEEPS ANIMATING when it loses focus or you move to
-// another display. The ONLY pause is minimize. Tauri has no dedicated minimize event,
-// so we sample isMinimized() on every resize.
+// The window STAYS ON SCREEN and KEEPS RENDERING when it loses focus or you move to
+// another display. The ONLY full stop is minimize. Tauri has no dedicated minimize
+// event, so we sample isMinimized() on every resize.
 appWindow
   .onResized(async () => {
     try {
@@ -66,6 +66,19 @@ appWindow
     } catch {
       /* non-Tauri / dev surface: no-op */
     }
+  })
+  .catch(() => {});
+
+// Focus drives RENDER RATE, never whether the radar updates. WARDEN is meant to sit
+// open behind the work it watches, so unfocused is its normal state, and running the
+// constellation at display rate there burned about half a core on frames nobody was
+// looking at. Taken from the NATIVE event for the same reason `warden_hotkey` exists:
+// the packaged app moves its window with native calls the webview does not see, so
+// `window.onblur` alone cannot be trusted here (the view keeps a DOM listener as the
+// browser-harness fallback).
+appWindow
+  .onFocusChanged(({ payload: focused }) => {
+    bridge.ingest(focused ? 'warden_focused' : 'warden_blurred', {});
   })
   .catch(() => {});
 

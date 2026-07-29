@@ -17,10 +17,19 @@ export type SceneState = {
    *  `warden_hotkey` Tauri event by main.ts) is the authoritative wake signal for the
    *  R3F render loop. */
   summoned?: boolean;
-  /** True while the window is MINIMIZED, the one and only animation gate. Blur and
-   *  moving to another display do NOT set this: the render keeps running off-focus
-   *  and only halts (CPU saver) when the window is actually minimized. */
+  /** True while the window is MINIMIZED, the one and only full STOP for the render
+   *  loop. Blur does not set this: an unfocused window keeps rendering, just at a
+   *  paced rate rather than display rate (see `focused`). */
   minimized?: boolean;
+  /** True while the window has native focus, routed from Tauri's `onFocusChanged`.
+   *  It is a RENDER RATE input only (see `frameloopFor`): the radar keeps ingesting
+   *  and updating whether or not anyone is looking at it.
+   *
+   *  Native, not `window.blur`, for the same reason `summoned` exists: the packaged
+   *  app drives its window with native calls that do not reliably reach the webview.
+   *  `undefined` means no native signal has arrived yet (the browser dev harness),
+   *  and the view falls back to the DOM focus listener. */
+  focused?: boolean;
 };
 
 function emptyState(): SceneState {
@@ -56,6 +65,12 @@ export function reduce(state: SceneState, name: string, payload: any): SceneStat
 
     case 'warden_restored':
       return state.minimized ? { ...state, minimized: false } : state;
+
+    case 'warden_focused':
+      return state.focused === true ? state : { ...state, focused: true };
+
+    case 'warden_blurred':
+      return state.focused === false ? state : { ...state, focused: false };
 
     default:
       // Ingest progress, schema drift, and anything else non scene-driving: ignore
