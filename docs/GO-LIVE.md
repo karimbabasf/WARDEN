@@ -3,7 +3,7 @@
 Everything that could be built and verified is done and deployed. What is left
 needs a credential or a purchase that no API can do on your behalf.
 
-Site: https://warden-beryl.vercel.app
+Site: https://warden.karimbabasf.com
 Stripe account: `acct_1TxtpfEnDphWh4zv` (live)
 Vercel project: `warden` under `kbkotes-projects`
 
@@ -25,7 +25,7 @@ vercel deploy --prod --yes
 Verify it took, in one command. Before the key this returns 500; after, 400:
 
 ```
-curl -s -X POST https://warden-beryl.vercel.app/api/checkout \
+curl -s -X POST https://warden.karimbabasf.com/api/checkout \
   -H 'Content-Type: application/json' -d '{"sku":"warden-99"}'
 ```
 
@@ -96,6 +96,14 @@ Also worth knowing: the build is **arm64 only**. Intel Macs cannot run it.
 - **MIT cannot be taken back.** LICENSE is now a paid EULA, but anything
   published up to `0d55bf8` stays MIT for whoever already has it. The file says
   so rather than pretending otherwise.
-- **No domain was bought.** `warden-beryl.vercel.app` is the live origin and it
-  is baked into emailed download links via `PUBLIC_SITE_URL`. If you buy a
-  domain, change that variable at the same time or old links break.
+- **The live origin is `warden.karimbabasf.com`**, attached 2026-07-29. No domain
+  was bought: `karimbabasf.com` was already on Vercel DNS with a wildcard ALIAS,
+  so the subdomain verified instantly and Let's Encrypt issued straight away.
+  `warden-beryl.vercel.app` still resolves and is harmless.
+
+  Three things move together whenever that origin changes, and two of them are
+  invisible if you forget: `PUBLIC_SITE_URL` (it is baked into emailed download
+  links, so a stale value only surfaces when a customer clicks one weeks later),
+  the Stripe webhook endpoint URL (`we_1TycoiEnDphWh4zvPmtRApjP`; changing its
+  URL does NOT rotate the signing secret, so `STRIPE_WEBHOOK_SECRET` survives),
+  and a redeploy to pick the env var up. All three are done for this domain.
