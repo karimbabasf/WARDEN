@@ -129,6 +129,22 @@ describe('the session it creates', () => {
     expect((await paramsFor()).success_url).toBe('https://warden.test/success?session_id={CHECKOUT_SESSION_ID}')
   })
 
+  it.each(['warden-1', 'warden-2', 'warden-3'])(
+    'gives %s a success_url success.html can actually read',
+    async (sku) => {
+      // The contract with success.html: path is /success with NO .html, and the
+      // literal {CHECKOUT_SESSION_ID} that Stripe substitutes. The page reads
+      // session_id off the query string, and this is post-payment, so a wrong
+      // url here is discovered by a paying customer.
+      const successUrl = (await paramsFor(sku)).success_url as string
+
+      expect(successUrl).toMatch(/\/success\?session_id=\{CHECKOUT_SESSION_ID\}$/)
+      expect(successUrl).not.toContain('.html')
+      expect(new URL(successUrl).pathname).toBe('/success')
+      expect(new URL(successUrl).searchParams.get('session_id')).toBe('{CHECKOUT_SESSION_ID}')
+    },
+  )
+
   it('cancels back to the pricing section', async () => {
     expect((await paramsFor()).cancel_url).toBe('https://warden.test/#pricing')
   })

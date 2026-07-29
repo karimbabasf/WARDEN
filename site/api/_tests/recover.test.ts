@@ -156,6 +156,47 @@ describe('rate limiting', () => {
     expect(statuses).toEqual([200, 200, 200, 200, 200, 429, 429])
   })
 
+  it('tells a rate-limited caller when to come back', async () => {
+    const fake = withBuyer()
+    const start = Date.now()
+    let limited: Response | undefined
+    for (let i = 0; i < 6; i += 1) {
+      limited = await handleRecover(request(`u${i}@example.com`, '198.51.100.30'), asStripe(fake), start)
+    }
+
+    expect(limited?.status).toBe(429)
+    expect(await limited?.json()).toEqual({ error: 'rate_limited' })
+    // The window is 15 minutes and no time has passed in this loop.
+    expect(Number(limited?.headers.get('retry-after'))).toBe(15 * 60)
+  })
+
+  it('counts down Retry-After as the window elapses', async () => {
+    const fake = withBuyer()
+    const start = Date.now()
+    for (let i = 0; i < 5; i += 1) {
+      await handleRecover(request(`u${i}@example.com`, '198.51.100.31'), asStripe(fake), start)
+    }
+
+    const later = await handleRecover(
+      request('u9@example.com', '198.51.100.31'),
+      asStripe(fake),
+      start + 10 * 60 * 1000,
+    )
+    expect(later.status).toBe(429)
+    expect(Number(later.headers.get('retry-after'))).toBe(5 * 60)
+  })
+
+  it('never sets Retry-After on the silent per-address cap', async () => {
+    const fake = withBuyer()
+    let last: Response | undefined
+    for (let i = 0; i < 4; i += 1) {
+      last = await handleRecover(request('buyer@example.com', `192.0.2.${100 + i}`), asStripe(fake))
+    }
+
+    expect(last?.status).toBe(200)
+    expect(last?.headers.get('retry-after')).toBeNull()
+  })
+
   it('lets a different IP through', async () => {
     const fake = withBuyer()
     for (let i = 0; i < 6; i += 1) await handleRecover(request('a@example.com', '198.51.100.8'), asStripe(fake))

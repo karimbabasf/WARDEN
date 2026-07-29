@@ -34,7 +34,7 @@ interface Hit {
 // an endpoint that sends mail. Stripe's own rate limits are the backstop.
 const hits = new Map<string, Hit>()
 
-const rateLimit = (key: string, max: number, now: number): boolean => {
+const rateLimit = (key: string, max: number, now: number): { allowed: boolean; retryAfter: number } => {
   if (hits.size > MAX_TRACKED) {
     for (const [k, hit] of hits) if (hit.resetAt <= now) hits.delete(k)
     if (hits.size > MAX_TRACKED) hits.clear()
@@ -43,10 +43,10 @@ const rateLimit = (key: string, max: number, now: number): boolean => {
   const hit = hits.get(key)
   if (!hit || hit.resetAt <= now) {
     hits.set(key, { count: 1, resetAt: now + WINDOW_MS })
-    return true
+    return { allowed: true, retryAfter: 0 }
   }
   hit.count += 1
-  return hit.count <= max
+  return { allowed: hit.count <= max, retryAfter: Math.max(1, Math.ceil((hit.resetAt - now) / 1000)) }
 }
 
 /** Hashed so the limiter never holds a customer's address in memory longer than
@@ -89,10 +89,15 @@ export const handleRecover = async (
   // shape as success would take, so this is not a probe for valid formats.
   if (!raw || raw.length > MAX_EMAIL_LENGTH || !EMAIL_SHAPE.test(raw)) return json({ ok: true })
 
-  if (!rateLimit(clientIp(request), MAX_PER_IP, now)) return fail(429, 'rate_limited')
+  // Retry-After so a form can say "try again in N minutes" rather than guess.
+  // It describes the caller's own budget, so it reveals nothing about anyone.
+  const perIp = rateLimit(clientIp(request), MAX_PER_IP, now)
+  if (!perIp.allowed) {
+    return json({ error: 'rate_limited' }, 429, { 'retry-after': String(perIp.retryAfter) })
+  }
   // The per-address limit is silent: a 429 here would say "someone asked for
   // this address recently", which is exactly the fact being protected.
-  if (!rateLimit(emailKey(email), MAX_PER_EMAIL, now)) return json({ ok: true })
+  if (!rateLimit(emailKey(email), MAX_PER_EMAIL, now).allowed) return json({ ok: true })
 
   try {
     const seed = seedFromEnv(process.env.LICENSE_SIGNING_KEY)

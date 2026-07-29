@@ -23,10 +23,23 @@ export const methodNotAllowed = (allow: string): Response =>
  * someone else paid for and could then read their license key from /api/license.
  * Every source below is set by the platform, not by the caller.
  */
+let warnedAboutOrigin = false
+
 export const siteOrigin = (): string => {
   const configured = process.env.PUBLIC_SITE_URL?.trim()
   if (configured) return configured.replace(/\/+$/, '')
 
+  // The fallbacks are correct but not necessarily the domain we want to live
+  // on: this origin is baked into emailed download links, which outlive the
+  // deployment that sent them. Say so once per cold start, at deploy time,
+  // rather than letting a customer find it in a dead link weeks later.
+  if (!warnedAboutOrigin) {
+    warnedAboutOrigin = true
+    console.warn('[http] PUBLIC_SITE_URL is not set, falling back to the Vercel-provided domain')
+  }
+
+  // Stable across deployments (it is the project's production domain), which is
+  // why it is preferred over VERCEL_URL, the per-deployment hostname.
   const production = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim()
   if (production) return `https://${production}`
 

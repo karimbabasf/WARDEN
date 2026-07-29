@@ -41,3 +41,5 @@ status.sh
 landing/.design/
 /.design/
 .env.local
+.vercel
+.env*

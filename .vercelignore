@@ -1,0 +1,42 @@
+# The Vercel project's root directory is site/, but it builds with
+# "include source files outside the root directory" on, because site/build.mjs
+# copies the page out of landing/. That means the CLI uploads from the REPO root,
+# so everything the site does not need has to be excluded by hand or the upload
+# is several gigabytes of Rust build output.
+
+src-tauri/target
+target
+node_modules
+dist
+.git
+
+# The desktop app and its sources. The site ships the landing page only.
+web
+src-tauri
+scripts
+docs
+.design
+.scratch
+.superpowers
+.warden-run
+.playwright-mcp
+.claude
+
+# Big local artifacts that are not the site.
+*.dmg
+*.app
+*.mp4
+*.srt
+
+# Root-only files. The leading slash is load-bearing: these patterns match at ANY
+# depth without it, so a bare `index.html` also excludes landing/index.html (which
+# is the entire site) and a bare `tsconfig.json` also excludes site/tsconfig.json
+# (which is what compiles the functions). Both were real failures, not theory.
+/radar-lab.html
+/war-room-lab.html
+/activation-lab.html
+/index.html
+/vite.config.ts
+/tsconfig.json
+/pnpm-lock.yaml
+/pnpm-workspace.yaml

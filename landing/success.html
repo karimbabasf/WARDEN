@@ -161,6 +161,28 @@ h1{
 
 .hint{color:var(--ink-3);font-size:15px;margin:10px 0 4px;max-width:56ch}
 
+/* recovery form. Same control language as the buttons: a tone step, an edge, an
+   inset highlight. The field is the lightest surface in the card so it reads as
+   the thing to act on. */
+.recover{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+.recover input{
+  flex:1 1 260px;min-width:0;
+  font-family:var(--sans);font-size:15px;color:var(--ink);
+  background:var(--surface-2);border:1px solid var(--rule);border-radius:var(--r-ctl);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+  padding:12px 14px;
+  transition:border-color var(--t-micro) var(--ease);
+}
+.recover input::placeholder{color:var(--ink-4)}
+.recover input:hover{border-color:#23312c}
+.recover input:focus-visible{border-color:#31423b}
+.recover input:disabled{opacity:.6;cursor:progress}
+/* the field is invalid only AFTER a submit attempt, never while still typing */
+.recover.tried input:invalid{border-color:var(--alert)}
+.recover-msg{margin-top:14px;font-size:15px;line-height:1.5;max-width:56ch;color:var(--ink-2)}
+.recover-msg.bad{color:var(--alert)}
+.recover-msg[hidden]{display:none}
+
 footer{border-top:1px solid var(--rule);padding:20px 0 30px}
 .foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--ink-4)}
 [hidden]{display:none!important}
@@ -259,17 +281,26 @@ footer{border-top:1px solid var(--rule);padding:20px 0 30px}
         </div>
       </div>
     </div></div>
+  </section>
 
-    <!-- The way out of the dead end. Without this, anyone who loses the tab,
-         bookmarks /success without the query, or gets a mangled redirect is
-         stranded on a page that can only tell them what is missing, having
-         already paid.
-         A real <form>, so Enter submits and the browser does the email check. -->
+  <!-- The way out of the dead end, and it sits OUTSIDE the three state sections
+       on purpose. Being stranded is not the same as having failed: a persistent
+       500 from /api/license is retried rather than declared broken, so that path
+       ends on the waiting screen, not on #bad. Parking this inside #bad made it
+       unreachable in exactly the case that needs it most. It is now shown by
+       either route, a hard failure or a wait that ran out of attempts.
+
+       Without it, anyone who loses the tab, bookmarks /success without the query,
+       or gets a mangled redirect is stranded on a page that can only tell them
+       what is missing, having already paid.
+
+       A real <form>, so Enter submits and the browser does the email check. -->
+  <section id="rescue" hidden>
     <div class="card">
       <h2>Send the key again</h2>
       <div class="body">
-        <p class="hint" id="recover-intro">Enter the email you paid with and the licence key
-        and download link go back out to it.</p>
+        <p class="hint">Enter the email you paid with and the licence key and download link
+        go back out to it.</p>
         <form class="recover" id="recover" novalidate>
           <input id="recover-email" type="email" name="email" required
                  autocomplete="email" spellcheck="false"
@@ -313,6 +344,9 @@ const TITLES = {
 
 const show = (id) => {
   for (const s of ['wait', 'done', 'bad']) $(s).hidden = (s !== id);
+  /* a hard failure always offers the way out; a normal wait never does, and the
+     exhausted-wait path turns it on for itself */
+  $('rescue').hidden = (id !== 'bad');
   $('title').textContent = TITLES[id][0];
   $('sub').innerHTML = TITLES[id][1];
 };
@@ -321,14 +355,13 @@ const sessionId = new URLSearchParams(location.search).get('session_id');
 
 /* No session id at all means this page was opened directly rather than reached
    through checkout. That is a different failure from a lookup that broke, and it
-   should not sit there pretending to retry. */
-if (!sessionId) {
-  $('bad-msg').textContent =
-    'This page needs the checkout reference that Stripe adds to the link.';
-  $('retry2').hidden = true;
-  show('bad');
-  return;
-}
+   should not sit there pretending to retry.
+
+   Handled at the BOTTOM of this script, not here. An early return at this point
+   is inside the top-level IIFE, so it skipped every addEventListener below it,
+   including the recovery form's: the one state where a buyer has no other route
+   was the one state where the form did nothing. Wire everything first, decide
+   what to display last. */
 
 /* The webhook mints the licence, and Stripe's redirect can beat it by a second
    or two, so a miss is EXPECTED at first and is not an error. Back off across
@@ -414,6 +447,9 @@ async function poll() {
       $('wait-msg').textContent = 'The licence has not come through yet.';
       $('wait-slow').hidden = false;
       $('wait-pip').classList.add('bad');
+      /* stranded, though not provably broken. Offer the email route without
+         claiming a failure we have not actually observed. */
+      $('rescue').hidden = false;
       return;
     }
 
@@ -435,6 +471,72 @@ function restart() {
 
 $('retry').addEventListener('click', restart);
 $('retry2').addEventListener('click', restart);
+
+/* == resend the key ======================================================
+   POST /api/recover {email}. The endpoint answers 200 {ok:true} for EVERY
+   outcome: sent, unrecognised address, no purchase on file, per-email rate
+   limit. That is deliberate on its side, so that it never reveals whether an
+   address has ever bought anything, and it constrains the copy here: the
+   confirmation must be identical whether or not the address exists. Anything
+   like "sent" or "we found your purchase" would leak exactly what the always-200
+   is there to hide, so the message is conditional and stays conditional.
+
+   Only 429 and the genuine failures get a different message, because those are
+   facts about THIS request rather than about the address. */
+(() => {
+  const form = $('recover');
+  const field = $('recover-email');
+  const go = $('recover-go');
+  const msg = $('recover-msg');
+  const label = go.querySelector('.buy-label');
+  const idle = label.textContent;
+
+  const say = (text, bad) => {
+    msg.textContent = text;
+    msg.classList.toggle('bad', !!bad);
+    msg.hidden = false;
+  };
+
+  const busy = (on) => {
+    go.disabled = on;
+    field.disabled = on;
+    go.setAttribute('aria-busy', on ? 'true' : 'false');
+    label.textContent = on ? 'Sending' : idle;
+  };
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    /* novalidate on the form so the invalid style is ours and only appears after
+       an attempt, but the browser's own email check is still what decides */
+    form.classList.add('tried');
+    if (!field.checkValidity()) {
+      say('That does not look like an email address.', true);
+      field.focus();
+      return;
+    }
+    msg.hidden = true;
+    busy(true);
+    try {
+      const res = await fetch('/api/recover', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: field.value.trim() }),
+      });
+      if (res.status === 429) {
+        say('Too many requests from here. Wait a few minutes and try again.', true);
+      } else if (!res.ok) {
+        say('That did not go through. Try again in a moment.', true);
+      } else {
+        say('If that address has a WARDEN licence, the key and download link are on their '
+          + 'way to it. Give it a minute, and check spam.');
+      }
+    } catch {
+      say('That did not go through. Check your connection and try again.', true);
+    } finally {
+      busy(false);
+    }
+  });
+})();
 
 /* Copy: the Clipboard API needs a secure context, and this page has to survive
    being opened over file:// or plain http while it is being tested, so the
@@ -466,7 +568,15 @@ $('copy').addEventListener('click', async () => {
   setTimeout(() => said.classList.remove('on'), 2400);
 });
 
-poll();
+/* Every listener is attached by here, so both branches are safe. */
+if (sessionId) {
+  poll();
+} else {
+  $('bad-msg').textContent =
+    'This page needs the checkout reference that Stripe adds to the link.';
+  $('retry2').hidden = true;   /* nothing to retry: there is no reference to look up */
+  show('bad');                 /* which also reveals the recovery form */
+}
 })();
 </script>
 </body>

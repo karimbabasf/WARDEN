@@ -8,3 +8,5 @@ node_modules/
 # Vercel CLI link state and any pulled env. Never commit either.
 .vercel/
 .env*.local
+.vercel
+.env*

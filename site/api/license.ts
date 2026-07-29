@@ -47,7 +47,12 @@ export const handleLicense = async (request: Request, stripe: Stripe): Promise<R
       expiresAt: new Date((now + TOKEN_TTL_SECONDS) * 1000).toISOString(),
     })
   } catch (err) {
-    if (err instanceof NotPaidError) return fail(409, 'payment_not_complete')
+    // 202, not 4xx: the payment is real but has not settled (a delayed payment
+    // method, or a moment's lag), so this is "ask again shortly" rather than an
+    // answer. The success page polls on 202 and 404 and stops on any other 4xx,
+    // so a 409 here would end the poll and show a paying customer a failure.
+    // No licenseKey in the body, which is the same signal by a second route.
+    if (err instanceof NotPaidError) return json({ status: 'pending', reason: 'payment_not_complete' }, 202)
     // A session for another product on the shared account is simply not a
     // WARDEN license, and it is not this endpoint's job to explain that.
     if (err instanceof NotWardenSessionError) return fail(404, 'not_found')

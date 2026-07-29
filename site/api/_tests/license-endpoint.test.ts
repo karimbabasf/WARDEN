@@ -22,9 +22,33 @@ describe('only a paid session gets a key', () => {
     const fake = createFakeStripe([{ id: 'cs_pending', payment_status: status }])
     const response = await handleLicense(get(`${URL_}?session_id=cs_pending`), asStripe(fake))
 
-    expect(response.status).toBe(409)
-    expect(await body(response)).toEqual({ error: 'payment_not_complete' })
+    // 202 is the success page's "keep polling" signal. It stops on any 4xx
+    // other than 404, so this must not be a 409.
+    expect(response.status).toBe(202)
+    expect(await body(response)).toEqual({ status: 'pending', reason: 'payment_not_complete' })
     expect(fake.calls.sessionUpdate).toHaveLength(0)
+  })
+
+  it('carries no licenseKey while pending, the poller\'s second signal', async () => {
+    const fake = createFakeStripe([{ id: 'cs_pending', payment_status: 'unpaid' }])
+    const payload = await body(await handleLicense(get(`${URL_}?session_id=cs_pending`), asStripe(fake)))
+    expect(payload.licenseKey).toBeUndefined()
+  })
+
+  it('only ever answers 200, 202, 404 or 400, matching the poll contract', async () => {
+    const fake = createFakeStripe([
+      { id: 'cs_paid' },
+      { id: 'cs_pending', payment_status: 'unpaid' },
+      { id: 'cs_other', metadata: { sku: 'not-warden' } },
+    ])
+
+    const statuses = await Promise.all(
+      ['cs_paid', 'cs_pending', 'cs_other', 'cs_missing', 'bad-id'].map(async (id) =>
+        (await handleLicense(get(`${URL_}?session_id=${id}`), asStripe(fake))).status,
+      ),
+    )
+    // paid -> 200, pending -> 202 (poll), unknown/foreign -> 404 (poll), malformed -> 400 (stop)
+    expect(statuses).toEqual([200, 202, 404, 404, 400])
   })
 
   it('never puts a key in the body of a refusal', async () => {
