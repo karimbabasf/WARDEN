@@ -94,6 +94,16 @@
   --claude:#ff8636;        /* harnessColors.ts, verbatim */
   --codex:#4fc9ff;
   --slate:#8fa0b8;
+  /* The app carries exactly one alert hue and spends it in exactly one place (a
+     context gauge past 85%). Same discipline here: this is the ONLY red on the
+     page and it is only ever a failed checkout. Desaturated off the app's own
+     --danger so it reads as an instrument warning, not a marketing colour. */
+  --alert:#e8705f;
+  /* One ambient light, reused. Not a hue: a cool white at a few percent, which
+     is what lets a band read as a lit room without introducing an accent the
+     colour law does not allow. Tangerine still means harness identity and
+     nothing else. */
+  --lit:212,232,240;
 
   --mark:Technor,MarkFallback,sans-serif;
   --sans:Switzer,"Helvetica Neue",sans-serif;
@@ -167,10 +177,31 @@ img{max-width:100%;height:auto;display:block}
    columns to each other rather than to their contents, so the middle column is
    centred on the PAGE and stays there. The outer items then key to the edges
    themselves. */
+/* STICKY, and that is a selling fix rather than a style one. The page is 5.6k
+   pixels tall and the only buy control used to scroll away with the hero, so for
+   roughly 4600px of it there was no way to act on the page you were reading. The
+   rail now rides along.
+
+   It stays invisible until it has something to sit on: no backdrop, no rule, no
+   fill while the hero is still in view, so the top of the page is unchanged and
+   the wordmark still opens the composition on its own. Past the hero it fades in
+   a blurred translucent plate. Translucent on purpose, like every other
+   non-surface here: an opaque bar would drag a black strip across the star
+   field as you scroll. */
 .rail{
-  position:relative;z-index:4;
+  position:sticky;top:0;z-index:4;
   display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:24px;
-  padding:13px 32px 0;
+  padding:13px 32px;
+  border-bottom:1px solid transparent;
+  transition:background-color var(--t-base) var(--ease),
+             border-color var(--t-base) var(--ease),
+             backdrop-filter var(--t-base) var(--ease);
+}
+.rail.stuck{
+  background:rgba(2,4,3,.74);
+  -webkit-backdrop-filter:blur(18px) saturate(1.15);
+  backdrop-filter:blur(18px) saturate(1.15);
+  border-bottom-color:var(--rule-2);
 }
 .rail b{font-family:var(--mark);font-weight:800;font-size:12px;letter-spacing:.15em}
 .rail .set{display:flex;gap:16px;color:var(--ink-4);font-size:10px;justify-content:center}
@@ -292,17 +323,24 @@ img{max-width:100%;height:auto;display:block}
   background:var(--ink);color:#050a08;border:1px solid #ffffff;
   box-shadow:0 2px 0 #6d7d77, inset 0 1px 0 rgba(255,255,255,.85);
 }
-.btn-key:hover{background:#fff}
+/* The hard offset GROWS on hover and collapses on press, so the control reads as
+   one physical object being lifted and then pushed. It used to only change
+   colour on hover, which left the press with nothing to travel from. */
+.btn-key:hover{background:#fff;transform:translateY(-1px);box-shadow:0 3px 0 #6d7d77,inset 0 1px 0 rgba(255,255,255,.85)}
 .btn-key:active{transform:translateY(2px);box-shadow:0 0 0 #6d7d77,inset 0 1px 0 rgba(255,255,255,.85)}
 .btn-ghost{
   background:var(--surface);color:var(--ink);border:1px solid #23312c;
   box-shadow:0 2px 0 #0b120f, inset 0 1px 0 rgba(255,255,255,.06);
 }
-.btn-ghost:hover{background:#0c1512;border-color:#31423b}
+.btn-ghost:hover{background:#0c1512;border-color:#31423b;transform:translateY(-1px);box-shadow:0 3px 0 #0b120f,inset 0 1px 0 rgba(255,255,255,.06)}
 .btn-ghost:active{transform:translateY(2px);box-shadow:0 0 0 #0b120f,inset 0 1px 0 rgba(255,255,255,.06)}
 .btn .tag{font-family:var(--mono);font-size:12px;letter-spacing:.06em;opacity:.62}
 .btn-sm{padding:7px 13px;font-size:13px}
 .btn-sm .tag{font-size:11px}
+/* in flight: the control stops being a control and says so. No spinner: the
+   label carries the state, which is one less moving part on a page whose whole
+   argument is restraint. */
+.btn[aria-busy="true"]{cursor:progress;pointer-events:none;opacity:.66;transform:none;box-shadow:none}
 .note{margin-top:18px;text-align:center;color:var(--ink-3)}
 
 /* ── the three tells: what you get, before any prose ──────────────────────
@@ -374,6 +412,12 @@ h2{
   box-shadow:0 0 0 4px rgba(2,4,3,.75);
   transform:translate(-50%,-50%);
 }
+/* The pins drop in one after the other once the screenshot itself has arrived,
+   so the eye reads the product first and the annotations second. Own transform
+   rule because .rise.in resets transform to none, which would undo the centring
+   translate the pin is positioned by. */
+.pin.rise{transform:translate(-50%,-50%) scale(.6)}
+.pin.rise.in{transform:translate(-50%,-50%) scale(1)}
 .keys{display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin-top:26px}
 .keys li{list-style:none;display:grid;grid-template-columns:24px 1fr;gap:12px;align-items:start}
 .keys .n{
@@ -452,22 +496,80 @@ h2{
 
    Same information, instrument grade. The label moves INSIDE the card as a
    ruled mono line, the dots hold still, and tangerine is spent only where it
-   carries meaning everywhere else on this page: harness identity. */
+   carries meaning everywhere else on this page: harness identity.
+
+   What the third pass then left behind: at a 5/255 tone step over the page, the
+   three cards were the DIMMEST surface on the site, which is the wrong place to
+   be dimmest. Fixed with light rather than colour, using the app's own depth
+   rule (a tone step, an edge, an inset highlight, one key shadow) instead of
+   reaching for a hue the page does not allow. */
+
+/* One lit room. The page is a 5.6k-pixel corridor of the same black, so nothing
+   marks the section you are meant to stop at. A single very wide, very faint
+   cool-white pool does, and it costs no new colour.
+   isolation:isolate is what makes z-index:-1 safe: it clamps the pseudo to the
+   BOTTOM OF THIS SECTION rather than the bottom of the page, so the wash paints
+   under the cards and still over the star field.
+   Masked to nothing at its own top and bottom edges, which is the standing rule
+   here: any lifted-black rectangle on a dark page shows its boundary as a hard
+   horizontal seam, and a seam across the page was exactly what the second design
+   pass had to go and fix. */
+#pricing{position:relative;isolation:isolate}
+#pricing::before{
+  content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;
+  background:radial-gradient(118% 74% at 50% 40%,rgba(var(--lit),.055),transparent 66%);
+  -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 20%,#000 80%,transparent 100%);
+  mask-image:linear-gradient(180deg,transparent 0,#000 20%,#000 80%,transparent 100%);
+}
+
 .tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:8px}
 .tier{
   position:relative;
   background:var(--surface);border:1px solid var(--rule);border-radius:var(--r-srf);
   padding:24px 26px 26px;
   display:flex;flex-direction:column;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.05);
-  transition:transform var(--t-base) var(--ease),border-color var(--t-base) var(--ease),background-color var(--t-base) var(--ease);
+  /* the full depth rule now, not just the inset: the key shadow is what lifts a
+     card off a black page at all */
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05), 0 22px 46px -30px rgba(0,0,0,.95);
+  transition:transform var(--t-base) var(--ease),border-color var(--t-base) var(--ease),
+             background-color var(--t-base) var(--ease),box-shadow var(--t-base) var(--ease);
 }
-.tier:hover{transform:translateY(-2px);border-color:#2b3a34;background:var(--surface-2)}
-.tier.pick{border-color:#37473f;background:var(--surface-2)}
+/* ONE light source across the whole row, tracked from the pointer, rather than
+   each card glowing on its own when you touch it. That is the difference between
+   a reflection and a highlight effect, and it is the same call the globes make:
+   gloss is a specular from a real probe, never a glow. Off entirely until the
+   pointer is over the row, so nothing moves while you read. */
+.tier::before{
+  content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:radial-gradient(260px circle at var(--mx,50%) var(--my,-40%),
+             rgba(var(--lit),.085),transparent 68%);
+  opacity:0;transition:opacity var(--t-base) var(--ease);
+}
+.tiers:hover .tier::before{opacity:1}
+.tier:hover{transform:translateY(-2px);border-color:#2b3a34;background:var(--surface-2);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.07), 0 30px 56px -30px rgba(0,0,0,1)}
+/* The picked tier is marked by LIGHT, which is the one thing on this page that
+   is allowed to raise a surface. No sticker, no badge, no colour: a brighter
+   inset highlight, a hairline that catches along the top edge, and a deeper key.
+   The sticker that straddled the border is what read as a toy, not the act of
+   recommending a tier. */
+.tier.pick{
+  border-color:#3d4f47;background:var(--surface-2);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.10), 0 30px 60px -32px rgba(0,0,0,1);
+}
+.tier.pick::after{
+  content:"";position:absolute;left:22px;right:22px;top:-1px;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(var(--lit),.55),transparent);
+}
 /* every card carries the slot so the three headers sit on one line; only the
-   picked one fills it in. */
+   picked one fills it in.
+   A FIXED height, not min-height: the filled slot's line box comes out ~4px
+   taller than the empty one, and that 4px then pushed every row below it out of
+   line with its neighbours (the dots, the name, the price, the unit price were
+   all a few pixels low on the middle card). Three columns that nearly line up
+   read as broken in a way that three that plainly do not never would. */
 .slot{
-  display:block;min-height:15px;margin-bottom:16px;
+  display:block;height:15px;line-height:15px;margin-bottom:16px;
   color:var(--ink-4);font-family:var(--mono);font-size:10px;
   letter-spacing:.16em;font-weight:600;
 }
@@ -475,34 +577,58 @@ h2{
 
 /* the machine count, drawn rather than stated: one dot per Mac, in the harness
    colours the board itself uses. Static. The orbit ring that used to spin
-   around each one was the single most juvenile thing on the page. */
-.orbs{display:flex;gap:9px;height:20px;align-items:center;margin-bottom:18px}
+   around each one was the single most juvenile thing on the page.
+
+   They now read as lit bodies rather than flat swatches: a specular from the
+   same top-left source everything else on the page is lit by, which is the
+   depth rule applied at 20px. Not a glow. This is also where the pricing band
+   gets its only real colour, and it is earned colour: these are the harness
+   identities, the same ones the ring and the legend spend. */
+.orbs{display:flex;gap:9px;height:22px;align-items:center;margin-bottom:18px}
 .orb{
-  width:18px;height:18px;border-radius:50%;position:relative;
-  border:1px solid rgba(255,255,255,.22);
+  width:20px;height:20px;border-radius:50%;position:relative;
+  border:1px solid rgba(255,255,255,.20);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.13);
+  --hue:var(--claude);
 }
 .orb::after{
   content:"";position:absolute;inset:5px;border-radius:50%;
-  background:var(--claude);opacity:.9;
+  background:radial-gradient(circle at 34% 28%,rgba(255,255,255,.75),var(--hue) 58%);
 }
-.tier:nth-child(2) .orb:nth-child(2)::after{background:var(--codex)}
-.tier:nth-child(3) .orb:nth-child(2)::after{background:var(--codex)}
-.tier:nth-child(3) .orb:nth-child(3)::after{background:var(--slate)}
+.tier:nth-child(2) .orb:nth-child(2){--hue:var(--codex)}
+.tier:nth-child(3) .orb:nth-child(2){--hue:var(--codex)}
+.tier:nth-child(3) .orb:nth-child(3){--hue:var(--slate)}
 
 .tier h3{font-size:15px;font-weight:600;color:var(--ink-2);letter-spacing:-.005em}
 .price{display:flex;align-items:baseline;gap:10px;margin:12px 0 3px}
 .price .now{font-family:var(--mono);font-size:40px;font-weight:500;letter-spacing:-.03em;color:var(--ink);line-height:1}
 .price .was{font-family:var(--mono);font-size:16px;color:var(--ink-4);text-decoration:line-through;text-decoration-thickness:1px}
-.save{
-  font-family:var(--mono);font-size:10px;letter-spacing:.12em;font-weight:600;
-  color:var(--ink-3);
-  opacity:0;transition:opacity var(--t-travel) var(--ease) .28s;
-}
-.in .save{opacity:1}
-.tier .per{color:var(--ink-4);font-family:var(--mono);font-size:11px;letter-spacing:.08em;margin-bottom:18px}
-.tier p.what{color:var(--ink-2);font-size:15px;line-height:1.55;margin-bottom:24px;flex:1}
+/* The per-machine figure, which REPLACED a `SAVE $5` line. Same fact, and this
+   is the version that actually sells: the head above promises the per-machine
+   price drops, and $15 / $12.50 / $10 is that promise landing as an arithmetic
+   the reader can check, rather than a discount being shouted at them. A savings
+   barker was one of the three things called childish here; a unit price is a
+   readout, which is what the rest of this page is made of. */
+.tier .per{color:var(--ink-3);font-family:var(--mono);font-size:11px;letter-spacing:.08em;margin-bottom:18px}
+.tier.pick .per{color:var(--ink-2)}
+.tier p.what{color:var(--ink-2);font-size:15px;line-height:1.55;margin-bottom:24px;flex:1;
+  text-wrap:pretty}
 .tier .btn{width:100%;justify-content:center}
-.terms{margin-top:24px;color:var(--ink-4);text-align:center}
+/* A failed checkout has to say so where the click happened. Reserved with a
+   hidden attribute rather than display:none-on-empty so the card does not
+   reflow the moment it appears. */
+.buy-err{
+  margin-top:12px;color:var(--alert);font-family:var(--mono);
+  font-size:11px;line-height:1.45;letter-spacing:.02em;text-align:left;
+}
+.buy-err[hidden]{display:none}
+.terms{margin-top:26px;text-align:center}
+/* capped to a measure. Unconstrained it set as one 110-character line across the
+   full 1240px container, which is roughly twice a readable one. */
+.terms b{display:block;max-width:62ch;margin:0 auto 9px;
+  color:var(--ink-2);font-weight:400;font-size:15px;
+  font-family:var(--sans);letter-spacing:0;text-wrap:balance}
+.terms span{color:var(--ink-4)}
 
 /* ── close ────────────────────────────────────────────────────────────── */
 /* margin-top is 0 now that every band pads its own bottom: the two used to
@@ -510,6 +636,10 @@ h2{
 .close{padding:118px 0 104px;text-align:center;border-top:1px solid var(--rule)}
 .close h2{max-width:17ch;margin:0 auto 20px}
 .close p{color:var(--ink-2);max-width:48ch;margin:0 auto 30px}
+/* the closing fact line is a .note, not body copy: the blanket .close p rule was
+   capping it at a 48ch measure (so it wrapped mid-phrase) and zeroing the
+   margin-top that separates it from the button it sits under. */
+.close p.note{max-width:none;margin:20px auto 0}
 
 footer{border-top:1px solid var(--rule);padding:24px 0 40px}
 .foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--ink-4)}
@@ -561,12 +691,19 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
 /* Anything that captures the page without scrolling it (print, a screenshot
    tool, a scraper) never fires the observer, so the reveal would hand it a page
    of empty boxes. */
-@media print{ .rise{opacity:1!important;transform:none!important} }
+@media print{
+  .rise{opacity:1!important;transform:none!important}
+  .pin.rise{transform:translate(-50%,-50%)!important}
+}
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   *{transition-duration:.01ms!important;animation-duration:.01ms!important;animation-iteration-count:1!important}
   .rise{opacity:1;transform:none}
-  .save{opacity:1}
+  .pin.rise{transform:translate(-50%,-50%)}
+  /* the pointer light is the one addition that would still move under reduced
+     motion, since it tracks rather than transitions. Off entirely. */
+  .tiers:hover .tier::before{opacity:0}
+  .rail{transition:none}
 }
 </style>
 </head>
@@ -626,9 +763,9 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
     <div class="shot rise">
       <div class="bar"><i></i><i></i><i></i><span>WARDEN</span></div>
       <img src="app.jpg" width="1600" height="900" alt="The WARDEN window: a list of live agent sessions on the left, a lattice globe on the radar in the centre, and a readout on the right showing context window, activity and cost.">
-      <span class="pin" style="left:7.6%;top:31%">1</span>
-      <span class="pin" style="left:50%;top:36.5%">2</span>
-      <span class="pin" style="left:74.5%;top:61%">3</span>
+      <span class="pin rise" style="left:7.6%;top:31%;--d:.34s">1</span>
+      <span class="pin rise" style="left:50%;top:36.5%;--d:.44s">2</span>
+      <span class="pin rise" style="left:74.5%;top:61%;--d:.54s">3</span>
     </div>
 
     <ul class="keys">
@@ -655,17 +792,17 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
 
     <ul class="channels">
       <canvas id="orb-strip"></canvas>
-      <li><dl>
+      <li class="rise"><dl>
         <dt class="mono">Size &middot; context occupancy</dt>
         <dd>A globe grows with the context its session is holding. A nearly full agent is a
         <b>large body</b> before you open anything.</dd>
       </dl></li>
-      <li><dl>
+      <li class="rise" style="--d:.08s"><dl>
         <dt class="mono">Brightness &middot; liveness</dt>
         <dd>Working agents blaze toward <b>white hot</b>. Idle ones dim and hold their hue.
         Colour never encodes load.</dd>
       </dl></li>
-      <li><dl>
+      <li class="rise" style="--d:.16s"><dl>
         <dt class="mono">Hue &middot; harness</dt>
         <dd><span class="g-claude"><span class="gly">&#9670;</span> Claude Code</span>,
         <span class="g-codex"><span class="gly">&#9635;</span> Codex</span>,
@@ -710,10 +847,10 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
     </div>
 
     <dl class="spec">
-      <div><dt class="mono">Platform</dt><dd>macOS, Apple Silicon</dd></div>
-      <div><dt class="mono">Reads today</dt><dd>Claude Code, Codex</dd></div>
-      <div><dt class="mono">Storage</dt><dd>SQLite with FTS5, local</dd></div>
-      <div><dt class="mono">Sharing</dt><dd>QUIC, on demand only</dd></div>
+      <div class="rise"><dt class="mono">Platform</dt><dd>macOS, Apple Silicon</dd></div>
+      <div class="rise" style="--d:.06s"><dt class="mono">Reads today</dt><dd>Claude Code, Codex</dd></div>
+      <div class="rise" style="--d:.12s"><dt class="mono">Storage</dt><dd>SQLite with FTS5, local</dd></div>
+      <div class="rise" style="--d:.18s"><dt class="mono">Sharing</dt><dd>QUIC, on demand only</dd></div>
     </dl>
   </div>
 </section>
@@ -726,15 +863,22 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
       create. Add machines and the per-machine price drops.</p>
     </div>
 
+    <!-- Real buy controls, one per SKU. <button>, not <a href="#">: this performs
+         an action rather than going to a place, and a dead anchor is also the
+         thing that lets a click look like it worked when nothing happened. The
+         SKU is the ONLY thing the client sends; the price it names above is
+         looked up server side, so nothing here is authoritative about money. -->
     <div class="tiers">
       <div class="tier rise">
         <span class="slot"></span>
         <div class="orbs"><span class="orb"></span></div>
         <h3>One Mac</h3>
         <div class="price"><span class="now">$15</span></div>
-        <p class="per">SINGLE LICENCE</p>
+        <p class="per">$15 PER MAC</p>
         <p class="what">The whole app on the machine you actually work on.</p>
-        <a class="btn btn-ghost" href="#">Get WARDEN</a>
+        <button class="btn btn-ghost" type="button" data-sku="warden-1">
+          <span class="buy-label">Get WARDEN</span></button>
+        <p class="buy-err" role="alert" hidden></p>
       </div>
 
       <div class="tier pick rise" style="--d:.08s">
@@ -742,9 +886,11 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
         <div class="orbs"><span class="orb"></span><span class="orb"></span></div>
         <h3>Two Macs</h3>
         <div class="price"><span class="now">$25</span><span class="was">$30</span></div>
-        <p class="per"><span class="save">SAVE $5</span></p>
+        <p class="per">$12.50 PER MAC</p>
         <p class="what">Desktop and laptop on one licence, for the way most people actually work.</p>
-        <a class="btn btn-key" href="#">Get WARDEN</a>
+        <button class="btn btn-key" type="button" data-sku="warden-2">
+          <span class="buy-label">Get WARDEN</span></button>
+        <p class="buy-err" role="alert" hidden></p>
       </div>
 
       <div class="tier rise" style="--d:.16s">
@@ -752,24 +898,32 @@ footer{border-top:1px solid var(--rule);padding:24px 0 40px}
         <div class="orbs"><span class="orb"></span><span class="orb"></span><span class="orb"></span></div>
         <h3>Three Macs</h3>
         <div class="price"><span class="now">$30</span><span class="was">$45</span></div>
-        <p class="per"><span class="save">SAVE $15</span></p>
+        <p class="per">$10 PER MAC</p>
         <p class="what">The whole desk, including the machine that only ever runs agents.</p>
-        <a class="btn btn-ghost" href="#">Get WARDEN</a>
+        <button class="btn btn-ghost" type="button" data-sku="warden-3">
+          <span class="buy-label">Get WARDEN</span></button>
+        <p class="buy-err" role="alert" hidden></p>
       </div>
     </div>
 
-    <p class="terms mono">macOS on Apple Silicon &middot; no account &middot; no API keys</p>
+    <!-- What actually happens after the click, stated before it. The unknown a
+         buyer is sitting on at this point is not the price, it is whether a $15
+         direct download from an unfamiliar site will leave them with anything. -->
+    <p class="terms"><b>Pay, and the licence key is on the next screen with the download.
+      No account to create, and it keeps working with the network off.</b>
+      <span class="mono">macOS on Apple Silicon &middot; one payment &middot; no subscription</span></p>
   </div>
 </section>
 
 <section class="close">
   <div class="wrap">
-    <h2>Run five agents. Watch one screen.</h2>
-    <p>It launches to the board, sits in the tray, and answers the only question worth asking
+    <h2 class="rise">Run five agents. Watch one screen.</h2>
+    <p class="rise" style="--d:.07s">It launches to the board, sits in the tray, and answers the only question worth asking
     mid session: which of these is actually still moving?</p>
-    <div class="actions" style="margin-top:0">
+    <div class="actions rise" style="margin-top:0;--d:.14s">
       <a class="btn btn-key" href="#pricing">Get WARDEN for macOS <span class="tag">$15</span></a>
     </div>
+    <p class="note mono rise" style="--d:.2s">One payment &middot; three machines for $30 &middot; no subscription</p>
   </div>
 </section>
 </main>
@@ -855,6 +1009,112 @@ const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     }
   }, { rootMargin: '0px 0px -12% 0px', threshold: 0.12 });
   rise.forEach((el) => io.observe(el));
+})();
+
+/* == the rail's backdrop =================================================
+   The rail is sticky in CSS; this only decides WHEN it stops being invisible.
+   Driven by an observer on a zero-height sentinel rather than a scroll handler,
+   so it costs nothing per frame and cannot fight the sky's own rAF loop.
+
+   The sentinel sits at the bottom of the hero: while it is on screen the hero is
+   still the header and the rail stays bare; once it leaves, the rail is the only
+   navigation left and earns its plate. */
+(() => {
+  const rail = document.querySelector('.rail');
+  const hero = document.querySelector('.hero');
+  if (!rail || !hero || !('IntersectionObserver' in window)) return;
+  const mark = document.createElement('div');
+  mark.style.cssText = 'position:absolute;top:82vh;height:1px;width:1px;pointer-events:none';
+  hero.style.position = 'relative';
+  hero.appendChild(mark);
+  new IntersectionObserver(([e]) => {
+    rail.classList.toggle('stuck', !e.isIntersecting && e.boundingClientRect.top < 0);
+  }, { threshold: 0 }).observe(mark);
+})();
+
+/* == one light over the pricing row ======================================
+   Writes two custom properties on the ROW, which every card's ::before reads,
+   so all three are lit from the same place instead of each one glowing under
+   its own cursor. Coalesced onto a rAF: pointermove fires far faster than the
+   compositor can use, and this is a decoration that must never cost a frame the
+   ring needs. Off under reduced motion, where the CSS also hides it. */
+(() => {
+  const row = document.querySelector('.tiers');
+  if (!row || REDUCED) return;
+  let x = 0, y = 0, queued = false;
+  row.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    const b = row.getBoundingClientRect();
+    x = e.clientX - b.left; y = e.clientY - b.top;
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      /* per CARD coordinates: the gradient is painted in each card's own box, so
+         a row-relative x would put the pool in the wrong place on cards 2 and 3 */
+      for (const card of row.children) {
+        card.style.setProperty('--mx', (x - card.offsetLeft) + 'px');
+        card.style.setProperty('--my', (y - card.offsetTop) + 'px');
+      }
+    });
+  }, { passive: true });
+})();
+
+/* == buy =================================================================
+   Three states and no fourth: idle, in flight, failed. The SKU is the entire
+   request body; price lives on the server and a client that tried to name one
+   would be refused, so there is nothing here worth tampering with.
+
+   Opened over file:// (which is how this page is meant to be readable straight
+   off the disk) the relative fetch resolves to file:///api/checkout and rejects.
+   That lands in the same catch as a dead network and shows the same honest
+   message, which is the point: it degrades, it does not throw and it never
+   silently does nothing. */
+(() => {
+  const buttons = document.querySelectorAll('button[data-sku]');
+  if (!buttons.length) return;
+
+  const SKUS = new Set(['warden-1', 'warden-2', 'warden-3']);
+
+  const fail = (btn, msg) => {
+    const box = btn.parentElement.querySelector('.buy-err');
+    if (!box) return;
+    box.textContent = msg;
+    box.hidden = !msg;
+  };
+
+  const busy = (btn, on) => {
+    btn.disabled = on;
+    btn.setAttribute('aria-busy', on ? 'true' : 'false');
+    btn.querySelector('.buy-label').textContent = on ? 'Opening checkout' : btn.dataset.idle;
+  };
+
+  buttons.forEach((btn) => {
+    btn.dataset.idle = btn.querySelector('.buy-label').textContent;
+    if (!SKUS.has(btn.dataset.sku)) return;
+
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      fail(btn, '');
+      busy(btn, true);
+      try {
+        const res = await fetch('/api/checkout', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sku: btn.dataset.sku }),
+        });
+        if (!res.ok) throw new Error('http ' + res.status);
+        const data = await res.json();
+        if (!data || typeof data.url !== 'string' || !data.url) throw new Error('no url');
+        /* left in flight on purpose. Flipping back to idle for the one frame
+           before the browser leaves reads as the click having failed. */
+        window.location.assign(data.url);
+      } catch {
+        busy(btn, false);
+        fail(btn, 'Checkout did not open. Check your connection and try again.');
+      }
+    });
+  });
 })();
 
 /* No WebGL (or the vendor bundle failed to load): drop the canvases and let the
@@ -1714,8 +1974,17 @@ function starGeometry(spec) {
 
     const tint = rng();
     const bright = 0.40 + rng() * rng() * 0.95;   /* skewed low: dust, with a few real stars */
-    if (tint > 0.93)      c.copy(SKY_WHITE).lerp(SKY_CORAL, 0.45);
-    else if (tint > 0.86) c.copy(SKY_WHITE).lerp(SKY_TEAL, 0.45);
+    /* SECOND departure from the app's constants, same reasoning as the alpha
+       lift above and equally deliberate. The app runs 0.93/0.86 at lerp .45,
+       tuned to sit behind a dense board where a coloured star competes with the
+       instrument it is behind. Here the field IS the page's colour for four of
+       six sections: this page is otherwise a black corridor, and the honest way
+       to give it colour is to let WARDEN's own sky carry it rather than to
+       introduce an accent the palette does not allow. Widened to roughly twice
+       the coloured population at lerp .55. Still a scatter, not a scheme: 86% of
+       the field is unchanged cold white. */
+    if (tint > 0.90)      c.copy(SKY_WHITE).lerp(SKY_CORAL, 0.55);
+    else if (tint > 0.82) c.copy(SKY_WHITE).lerp(SKY_TEAL, 0.55);
     else                  c.copy(SKY_WHITE);
     col[i * 3] = c.r * bright; col[i * 3 + 1] = c.g * bright; col[i * 3 + 2] = c.b * bright;
 

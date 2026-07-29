@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WARDEN &middot; your licence</title>
+<meta name="description" content="Your WARDEN licence key and download.">
+<meta name="robots" content="noindex">
+
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23070910'/%3E%3Ccircle cx='16' cy='16' r='10.5' fill='none' stroke='%23ffffff' stroke-opacity='.28'/%3E%3Cg fill='%23ffffff'%3E%3Ccircle cx='16' cy='5.5' r='1.7'/%3E%3Ccircle cx='23.4' cy='8.6' r='1.5'/%3E%3Ccircle cx='26.5' cy='16' r='1.5'/%3E%3Ccircle cx='23.4' cy='23.4' r='1.5'/%3E%3Ccircle cx='16' cy='26.5' r='1.5'/%3E%3Ccircle cx='8.6' cy='23.4' r='1.5'/%3E%3Ccircle cx='5.5' cy='16' r='1.5'/%3E%3Ccircle cx='8.6' cy='8.6' r='1.5'/%3E%3C/g%3E%3Ccircle cx='16' cy='16' r='3.2' fill='%23ff8636'/%3E%3C/svg%3E">
+
+<style>
+/* Same tokens, same face, same depth rule as index.html. Deliberately NOT the
+   same page: no vendor bundle, no WebGL, no star field. This is the screen
+   between paying and having the app, so it loads instantly and every pixel on it
+   is either the key, the download, or the one instruction that stops a buyer
+   thinking they were scammed. */
+@font-face{
+  font-family:Switzer;
+  src:url("fonts/switzer.woff2") format("woff2-variations");
+  font-weight:100 900; font-style:normal; font-display:swap;
+}
+:root{
+  --void:#020403;
+  --surface:#070d0b;
+  --surface-2:#0b1310;
+  --ink:#e9f1ed;
+  --ink-2:#a3b3ad;
+  --ink-3:#7d908a;
+  --ink-4:#7c8a84;
+  --rule:#16211d;
+  --rule-2:#101a17;
+  --claude:#ff8636;
+  --alert:#e8705f;
+  --lit:212,232,240;
+  --sans:Switzer,"Helvetica Neue",sans-serif;
+  --mono:"SF Mono",Menlo,ui-monospace,monospace;
+  --r-ctl:4px; --r-srf:2px;
+  --ease:cubic-bezier(.23,1,.32,1);
+  --t-micro:.12s; --t-base:.3s; --t-travel:.6s;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  background:var(--void);color:var(--ink);
+  font-family:var(--sans);font-weight:400;
+  font-size:17px;line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+  min-height:100dvh;display:flex;flex-direction:column;
+}
+a{color:inherit}
+:focus-visible{outline:2px solid #4fc9ff;outline-offset:3px;border-radius:2px}
+.mono{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;font-weight:500}
+
+/* The same single lit room as the pricing band, for the same reason and with the
+   same soft falloff: this page is one card on a black field, and without it the
+   card floats in a void. */
+body::before{
+  content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(105% 62% at 50% 12%,rgba(var(--lit),.06),transparent 64%);
+}
+.rail,main,footer{position:relative;z-index:1}
+
+.rail{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:13px 32px}
+.rail b{font-weight:700;font-size:12px;letter-spacing:.15em}
+.rail .set{color:var(--ink-4)}
+
+main{flex:1;display:flex;align-items:center;padding:56px 0 72px}
+.wrap{max-width:720px;margin:0 auto;padding:0 32px;width:100%}
+
+h1{
+  font-weight:600;font-size:clamp(2rem,4.4vw,2.9rem);line-height:1.06;
+  letter-spacing:-.028em;text-wrap:balance;margin-bottom:14px;
+}
+.lede{color:var(--ink-2);font-size:17px;max-width:52ch;text-wrap:pretty}
+.lede b{color:var(--ink);font-weight:600}
+
+.card{
+  margin-top:34px;background:var(--surface);
+  border:1px solid var(--rule);border-radius:var(--r-srf);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 26px 54px -32px rgba(0,0,0,1);
+}
+.card + .card{margin-top:14px}
+.card h2{
+  font-size:11px;font-family:var(--mono);font-weight:500;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--ink-4);
+  padding:16px 22px;border-bottom:1px solid var(--rule-2);
+}
+.card .body{padding:22px}
+
+/* THE KEY. It is the thing that was bought, so it is the loudest object on the
+   page: full width, monospace, real size, on the lightest surface here, with the
+   copy control attached to it rather than parked somewhere below. Wrapped with
+   overflow-wrap:anywhere because the string carries no spaces and a long token
+   would otherwise blow the card open on a phone. */
+.key{
+  display:block;width:100%;
+  font-family:var(--mono);font-size:14px;line-height:1.65;letter-spacing:0;
+  color:var(--ink);background:var(--surface-2);
+  border:1px solid var(--rule);border-radius:var(--r-srf);
+  padding:16px 18px;
+  /* break-all only. overflow-wrap:anywhere takes the hyphen after WRDN as its
+     break opportunity and strands the prefix alone on line one; break-all fills
+     each line to the edge, which is how a key should sit. */
+  word-break:break-all;
+  user-select:all;
+}
+.keyrow{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap}
+.keyrow .said{font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink-3);opacity:0;
+  transition:opacity var(--t-base) var(--ease)}
+.keyrow .said.on{opacity:1}
+
+.btn{
+  font-family:var(--sans);font-size:15px;font-weight:600;letter-spacing:-.005em;
+  padding:13px 22px;border-radius:var(--r-ctl);
+  cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;
+  justify-content:center;gap:10px;
+  transition:transform var(--t-micro) var(--ease),box-shadow var(--t-micro) var(--ease),
+             background-color var(--t-micro) var(--ease);
+}
+.btn-key{background:var(--ink);color:#050a08;border:1px solid #ffffff;
+  box-shadow:0 2px 0 #6d7d77, inset 0 1px 0 rgba(255,255,255,.85)}
+.btn-key:hover{background:#fff;transform:translateY(-1px);
+  box-shadow:0 3px 0 #6d7d77,inset 0 1px 0 rgba(255,255,255,.85)}
+.btn-key:active{transform:translateY(2px);
+  box-shadow:0 0 0 #6d7d77,inset 0 1px 0 rgba(255,255,255,.85)}
+.btn-ghost{background:var(--surface);color:var(--ink);border:1px solid #23312c;
+  box-shadow:0 2px 0 #0b120f, inset 0 1px 0 rgba(255,255,255,.06)}
+.btn-ghost:hover{background:#0c1512;border-color:#31423b;transform:translateY(-1px);
+  box-shadow:0 3px 0 #0b120f,inset 0 1px 0 rgba(255,255,255,.06)}
+.btn-ghost:active{transform:translateY(2px);
+  box-shadow:0 0 0 #0b120f,inset 0 1px 0 rgba(255,255,255,.06)}
+.btn-sm{padding:8px 14px;font-size:13px}
+.btn[aria-busy="true"]{cursor:progress;pointer-events:none;opacity:.66;transform:none;box-shadow:none}
+
+.dl{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.dl .btn{flex:0 0 auto}
+/* The one instruction that decides whether this purchase reads as a product or
+   as a scam. macOS quarantines an unsigned download and reports it as damaged,
+   so a buyer who double-clicks first is told the thing they just paid for is
+   broken. Stated calmly and inline, as a fact about the build: a warning box
+   here would make a routine two-second step look like a problem. */
+.first{color:var(--ink-2);font-size:15px;line-height:1.55;margin-top:16px;max-width:56ch}
+.first b{color:var(--ink);font-weight:600}
+
+.facts{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--rule-2)}
+.facts div{padding:16px 22px}
+.facts div + div{border-left:1px solid var(--rule-2)}
+.facts dt{color:var(--ink-4);margin-bottom:6px}
+.facts dd{font-size:15px;color:var(--ink);font-weight:500;overflow-wrap:anywhere;min-height:1.55em}
+
+.state{display:flex;gap:12px;align-items:flex-start;color:var(--ink-2);font-size:15px}
+/* a slow steady pulse rather than a spinner: this is a wait of a second or two,
+   and a spinner implies something is stuck */
+.pip{width:9px;height:9px;border-radius:50%;background:var(--claude);flex:0 0 auto;margin-top:7px;
+  animation:breathe 2s var(--ease) infinite}
+.pip.bad{background:var(--alert);animation:none}
+@keyframes breathe{0%,100%{opacity:.32}50%{opacity:1}}
+.state .btn{margin-top:14px}
+
+.hint{color:var(--ink-3);font-size:15px;margin:10px 0 4px;max-width:56ch}
+
+footer{border-top:1px solid var(--rule);padding:20px 0 30px}
+.foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--ink-4)}
+[hidden]{display:none!important}
+
+@media (max-width:640px){
+  .wrap{padding:0 20px}
+  .rail{padding:13px 20px}
+  .facts{grid-template-columns:1fr}
+  .facts div + div{border-left:0;border-top:1px solid var(--rule-2)}
+  .dl .btn{width:100%}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition-duration:.01ms!important;animation-duration:.01ms!important;
+    animation-iteration-count:1!important}
+  .pip{opacity:1}
+}
+</style>
+</head>
+<body>
+
+<div class="rail">
+  <b>WARDEN</b>
+  <span class="set mono">Receipt</span>
+</div>
+
+<main>
+<div class="wrap">
+
+  <!-- ONE h1 for the document, retitled per state, rather than one per state
+       section. Three h1 elements in the DOM is three h1 elements even when two
+       are hidden, and the page always has exactly one heading either way. -->
+  <h1 id="title">Payment received.</h1>
+  <p class="lede" id="sub">Cutting your licence key now. This takes a second or two.</p>
+
+  <!-- WAITING. Stripe redirects the moment the payment succeeds, and the webhook
+       that mints the licence can land a second or two behind it, so the honest
+       first state is "working on it", never an error. -->
+  <section id="wait">
+    <div class="card"><div class="body">
+      <div class="state"><span class="pip" id="wait-pip"></span>
+        <div>
+          <span id="wait-msg">Waiting for the licence to be issued.</span>
+          <div id="wait-slow" hidden>
+            <button class="btn btn-ghost btn-sm" type="button" id="retry">Check again</button>
+          </div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- DONE -->
+  <section id="done" hidden>
+    <div class="card">
+      <h2>Licence key</h2>
+      <div class="body">
+        <code class="key" id="key">&nbsp;</code>
+        <div class="keyrow">
+          <button class="btn btn-ghost btn-sm" type="button" id="copy">Copy key</button>
+          <span class="said mono" id="said" role="status">Copied</span>
+        </div>
+      </div>
+      <dl class="facts">
+        <div><dt class="mono">Licensed to</dt><dd id="email"></dd></div>
+        <div><dt class="mono">Machines</dt><dd id="seats"></dd></div>
+        <div><dt class="mono">Verification</dt><dd>Offline, forever</dd></div>
+      </dl>
+    </div>
+
+    <div class="card">
+      <h2>Download</h2>
+      <div class="body">
+        <div class="dl">
+          <!-- no placeholder href. An <a> without one is not a link and is not
+               focusable, which is the correct state before the API has handed us
+               a URL; render() sets the real one. A stub "#" would be a dead link
+               sitting in the tab order. -->
+          <a class="btn btn-key" id="dl" download>Download WARDEN for macOS</a>
+          <span class="mono" style="color:var(--ink-4)" id="expiry"></span>
+        </div>
+        <p class="first">Apple Silicon only, and this build is not signed by Apple yet, so the
+        first launch needs <b>right-click the app, then Open</b> rather than a double-click.
+        macOS asks once, you click Open, and it never asks again.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAILED -->
+  <section id="bad" hidden>
+    <div class="card"><div class="body">
+      <div class="state"><span class="pip bad"></span>
+        <div>
+          <span id="bad-msg">Something went wrong fetching the licence.</span>
+          <p class="hint">Reloading this page is worth a try first. If it keeps failing, ask
+          for the key by email below.</p>
+          <button class="btn btn-ghost btn-sm" type="button" id="retry2">Try again</button>
+        </div>
+      </div>
+    </div></div>
+
+    <!-- The way out of the dead end. Without this, anyone who loses the tab,
+         bookmarks /success without the query, or gets a mangled redirect is
+         stranded on a page that can only tell them what is missing, having
+         already paid.
+         A real <form>, so Enter submits and the browser does the email check. -->
+    <div class="card">
+      <h2>Send the key again</h2>
+      <div class="body">
+        <p class="hint" id="recover-intro">Enter the email you paid with and the licence key
+        and download link go back out to it.</p>
+        <form class="recover" id="recover" novalidate>
+          <input id="recover-email" type="email" name="email" required
+                 autocomplete="email" spellcheck="false"
+                 placeholder="you@example.com" aria-label="Email you paid with">
+          <button class="btn btn-ghost" type="submit" id="recover-go">
+            <span class="buy-label">Send it</span></button>
+        </form>
+        <p class="recover-msg" id="recover-msg" role="status" hidden></p>
+      </div>
+    </div>
+  </section>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap foot mono">
+    <span>WARDEN &middot; the agent that watches your agents</span>
+    <span>Local first &middot; no account &middot; no keys</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+
+/* The heading and the lede belong to the PAGE, not to a state section, so a
+   state change retitles the page rather than swapping in a second h1. */
+const TITLES = {
+  wait: ['Payment received.',
+         'Cutting your licence key now. This takes a second or two.'],
+  done: ['WARDEN is yours.',
+         'Your licence key is below. <b>Copy it somewhere you keep things</b>, then download '
+         + 'the app and paste it in on first launch. A copy is on its way to your email.'],
+  bad:  ['We could not load your licence.',
+         'The payment went through. This screen is what failed, and your key is recorded on '
+         + 'Stripe either way.'],
+};
+
+const show = (id) => {
+  for (const s of ['wait', 'done', 'bad']) $(s).hidden = (s !== id);
+  $('title').textContent = TITLES[id][0];
+  $('sub').innerHTML = TITLES[id][1];
+};
+
+const sessionId = new URLSearchParams(location.search).get('session_id');
+
+/* No session id at all means this page was opened directly rather than reached
+   through checkout. That is a different failure from a lookup that broke, and it
+   should not sit there pretending to retry. */
+if (!sessionId) {
+  $('bad-msg').textContent =
+    'This page needs the checkout reference that Stripe adds to the link.';
+  $('retry2').hidden = true;
+  show('bad');
+  return;
+}
+
+/* The webhook mints the licence, and Stripe's redirect can beat it by a second
+   or two, so a miss is EXPECTED at first and is not an error. Back off across
+   roughly 22s before admitting anything is wrong, then hand the reader a button
+   rather than looping forever. A fixed schedule, not exponential-to-infinity: a
+   buyer staring at a screen deserves a bounded wait. */
+const SCHEDULE = [0, 900, 1400, 2000, 2600, 3200, 4000, 4000, 4000];
+let attempt = 0;
+let timer = null;
+
+const asDate = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  /* the field may arrive as unix seconds, unix ms, or an ISO string */
+  let d;
+  if (typeof v === 'number') d = new Date(v < 1e12 ? v * 1000 : v);
+  else if (/^\d+$/.test(String(v))) {
+    const n = Number(v);
+    d = new Date(n < 1e12 ? n * 1000 : n);
+  } else d = new Date(v);
+  return isNaN(d.getTime()) ? null : d;
+};
+
+function render(data) {
+  $('key').textContent = data.licenseKey;
+  $('email').textContent = data.email || '';
+
+  const seats = Number(data.seats);
+  $('seats').textContent = Number.isFinite(seats) && seats > 0
+    ? seats + (seats === 1 ? ' Mac' : ' Macs')
+    : '';
+
+  const dl = $('dl');
+  if (data.downloadUrl) {
+    dl.href = data.downloadUrl;
+    dl.hidden = false;
+  } else {
+    dl.hidden = true;
+  }
+
+  const exp = asDate(data.expiresAt);
+  $('expiry').textContent = exp
+    ? 'Link valid until ' +
+      exp.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' +
+      exp.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    : '';
+
+  show('done');
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/api/license?session_id=' + encodeURIComponent(sessionId), {
+      headers: { accept: 'application/json' },
+    });
+
+    /* 202 and 404 mean the webhook has not landed yet. Any other 4xx is a real
+       answer that retrying will not change. */
+    if (res.status === 202 || res.status === 404) throw { retry: true };
+    if (!res.ok) throw { retry: res.status >= 500, status: res.status };
+
+    const data = await res.json();
+    if (!data || !data.licenseKey) throw { retry: true };
+    render(data);
+    return;
+  } catch (e) {
+    const retry = !e || e.retry !== false;
+
+    if (retry && attempt < SCHEDULE.length - 1) {
+      attempt += 1;
+      timer = setTimeout(poll, SCHEDULE[attempt]);
+      if (attempt >= 4) {
+        $('wait-msg').textContent =
+          'Still waiting on the licence. This is taking longer than usual.';
+        $('wait-slow').hidden = false;
+      }
+      return;
+    }
+
+    if (retry) {
+      /* Out of attempts, but nothing has actually said it is broken. Stay on the
+         waiting screen with a manual check rather than declaring a failure we
+         have not observed. */
+      $('wait-msg').textContent = 'The licence has not come through yet.';
+      $('wait-slow').hidden = false;
+      $('wait-pip').classList.add('bad');
+      return;
+    }
+
+    $('bad-msg').textContent = 'The licence lookup failed'
+      + (e && e.status ? ' (error ' + e.status + ').' : '.');
+    show('bad');
+  }
+}
+
+function restart() {
+  clearTimeout(timer);
+  attempt = 0;
+  $('wait-slow').hidden = true;
+  $('wait-pip').classList.remove('bad');
+  $('wait-msg').textContent = 'Waiting for the licence to be issued.';
+  show('wait');
+  poll();
+}
+
+$('retry').addEventListener('click', restart);
+$('retry2').addEventListener('click', restart);
+
+/* Copy: the Clipboard API needs a secure context, and this page has to survive
+   being opened over file:// or plain http while it is being tested, so the
+   selection fallback is not optional. */
+$('copy').addEventListener('click', async () => {
+  const text = $('key').textContent.trim();
+  if (!text) return;
+
+  let ok = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch { ok = false; }
+
+  if (!ok) {
+    const r = document.createRange();
+    r.selectNodeContents($('key'));
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+  }
+
+  const said = $('said');
+  said.textContent = ok ? 'Copied' : 'Press Cmd C to copy';
+  said.classList.add('on');
+  setTimeout(() => said.classList.remove('on'), 2400);
+});
+
+poll();
+})();
+</script>
+</body>
+</html>
