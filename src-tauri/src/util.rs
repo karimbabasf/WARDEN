@@ -176,16 +176,92 @@ pub fn ensure_parent(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+/// The repo a cwd belongs to, walking up until it finds `.git`.
+///
+/// A LINKED WORKTREE roots at a `.git` file rather than a directory, so the plain
+/// "`.git` exists" walk used to stop there and report the worktree as its own repo.
+/// The harnesses now put each session in its own worktree, which made N sessions on
+/// one repo look like N unrelated projects to every consumer of this. A worktree is
+/// resolved back to the repo it belongs to; everything else is unchanged.
 pub fn repo_root(cwd: &Path) -> Option<PathBuf> {
     let mut p = cwd.to_path_buf();
     loop {
-        if p.join(".git").exists() {
-            return Some(p);
+        let dot_git = p.join(".git");
+        if dot_git.is_dir() {
+            return Some(canonical(p));
+        }
+        if dot_git.is_file() {
+            let linked = worktree_main_repo(&p, &dot_git);
+            return Some(canonical(linked.unwrap_or(p)));
         }
         if !p.pop() {
             return None;
         }
     }
+}
+
+/// Resolve symlinks, keeping the original on failure.
+///
+/// BOTH branches above go through this or they disagree on macOS: git writes a
+/// RESOLVED path into a worktree's `.git` file (`/private/var/x`), while walking up a
+/// harness-reported cwd keeps whatever form the harness used (`/var/x`). One repo
+/// would then have two spellings, and the worktree grouping this exists for would
+/// miss exactly the case it is meant to catch.
+fn canonical(p: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&p).unwrap_or(p)
+}
+
+/// The main repo behind a linked worktree, whose `.git` file holds
+/// `gitdir: <main>/.git/worktrees/<name>` (absolute, or relative to the worktree).
+///
+/// `None` for any other `.git` file, which is what keeps SUBMODULES pointing at
+/// themselves: their gitdir lands in `.git/modules/<name>`, and folding every
+/// submodule into its superproject is a different decision from this one.
+fn worktree_main_repo(worktree: &Path, dot_git_file: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(dot_git_file).ok()?;
+    let target = raw
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+        .trim();
+    let target = if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        lexical_normalize(&worktree.join(target))
+    };
+
+    // `<main>/.git/worktrees/<name>` → `<main>`: the `.git` ancestor below a
+    // `worktrees` segment. Matching `worktrees` first is what excludes `modules`.
+    let mut node = target.as_path();
+    let mut under_worktrees = false;
+    while let Some(parent) = node.parent() {
+        match node.file_name().and_then(|n| n.to_str()) {
+            Some("worktrees") => under_worktrees = true,
+            Some(".git") if under_worktrees => return Some(parent.to_path_buf()),
+            _ => {}
+        }
+        node = parent;
+    }
+    None
+}
+
+/// Resolve `.` and `..` textually, without touching the filesystem or following
+/// symlinks. A relative `gitdir` leaves `..` segments behind, and two worktrees of one
+/// repo have to produce the SAME path for grouping to work.
+fn lexical_normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(Component::ParentDir);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 pub fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -229,5 +305,140 @@ mod tests {
             result.ends_with(".claude/CLAUDE.md"),
             "expected default under ~/.claude/CLAUDE.md, got {result:?}"
         );
+    }
+
+    // ── repo_root ─────────────────────────────────────────────────────────────
+    // A linked worktree (`git worktree add`, and what the harnesses now create per
+    // session) roots at a `.git` FILE, not a directory, holding
+    // `gitdir: <main>/.git/worktrees/<name>`. A plain ".git exists" walk stops there
+    // and calls the worktree its own repo, so N worktrees of one repo become N
+    // unrelated projects to everything downstream.
+
+    /// `repo_root` resolves symlinks, and a macOS tempdir lives under one
+    /// (`/var` to `/private/var`), so expectations are built the same way.
+    fn canon(p: &Path) -> Option<PathBuf> {
+        Some(std::fs::canonicalize(p).expect("fixture path exists"))
+    }
+
+    /// `<root>/main` with a real `.git` dir, plus `<root>/<name>` as a linked
+    /// worktree pointing back into it. Returns `(main, worktree)`.
+    fn worktree_fixture(root: &Path, name: &str) -> (PathBuf, PathBuf) {
+        let main = root.join("main");
+        let git_dir = main.join(".git");
+        std::fs::create_dir_all(git_dir.join("worktrees").join(name)).expect("main .git");
+        let wt = root.join(name);
+        std::fs::create_dir_all(&wt).expect("worktree dir");
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", git_dir.join("worktrees").join(name).display()),
+        )
+        .expect("worktree .git file");
+        (main, wt)
+    }
+
+    #[test]
+    fn repo_root_finds_the_repo_from_a_nested_subdirectory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(main.join(".git")).expect("git dir");
+        let deep = main.join("src").join("radar");
+        std::fs::create_dir_all(&deep).expect("subdir");
+        assert_eq!(repo_root(&deep), canon(&main));
+    }
+
+    #[test]
+    fn repo_root_resolves_a_linked_worktree_to_its_main_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (main, wt) = worktree_fixture(tmp.path(), "feature");
+        assert_eq!(
+            repo_root(&wt),
+            canon(&main),
+            "a worktree must report the repo it belongs to, not itself"
+        );
+    }
+
+    #[test]
+    fn repo_root_resolves_a_subdirectory_of_a_worktree_to_its_main_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (main, wt) = worktree_fixture(tmp.path(), "feature");
+        let deep = wt.join("src").join("radar");
+        std::fs::create_dir_all(&deep).expect("subdir");
+        assert_eq!(repo_root(&deep), canon(&main));
+    }
+
+    #[test]
+    fn two_worktrees_of_one_repo_share_a_repo_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (main, a) = worktree_fixture(tmp.path(), "feature-a");
+        let (_, b) = worktree_fixture(tmp.path(), "feature-b");
+        assert_eq!(repo_root(&a), repo_root(&b));
+        assert_eq!(repo_root(&a), canon(&main));
+    }
+
+    #[test]
+    fn repo_root_resolves_a_worktree_whose_gitdir_is_relative() {
+        // `worktree.useRelativePaths` (and `git worktree add --relative-paths`) writes
+        // `gitdir: ../main/.git/worktrees/<name>`. Joining that onto the worktree leaves
+        // `..` segments in the path, so two worktrees would produce two different
+        // strings for one repo unless the result is normalized.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(main.join(".git").join("worktrees").join("rel")).expect("main");
+        let wt = tmp.path().join("rel");
+        std::fs::create_dir_all(&wt).expect("worktree dir");
+        std::fs::write(wt.join(".git"), "gitdir: ../main/.git/worktrees/rel\n").expect("git file");
+        assert_eq!(repo_root(&wt), canon(&main));
+    }
+
+    /// The fixtures above hand-write the `.git` file, which only proves the parser
+    /// matches what THIS test believes git writes. This one drives real `git worktree
+    /// add` so the belief itself is under test and cannot drift silently.
+    #[test]
+    fn repo_root_resolves_a_worktree_that_real_git_created() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(&main).expect("main dir");
+        let git = |args: &[&str], cwd: &Path| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+        };
+        let Ok(init) = git(&["init", "-q"], &main) else {
+            eprintln!("git unavailable; skipping");
+            return;
+        };
+        assert!(init.status.success(), "git init failed");
+        for args in [
+            &["commit", "-q", "--allow-empty", "-m", "init"][..],
+            &["worktree", "add", "-q", "../feature", "-b", "feature"][..],
+        ] {
+            let out = git(args, &main).expect("git runs");
+            assert!(out.status.success(), "git {args:?} failed: {out:?}");
+        }
+
+        let wt = tmp.path().join("feature");
+        assert!(wt.join(".git").is_file(), "a worktree roots at a .git FILE");
+        assert_eq!(
+            repo_root(&wt),
+            canon(&main),
+            "must resolve to the repo git itself reports as the common dir's parent"
+        );
+    }
+
+    #[test]
+    fn repo_root_leaves_a_submodule_pointing_at_itself() {
+        // A submodule also roots at a `.git` FILE, but its gitdir goes to
+        // `.git/modules/<name>`, not `.git/worktrees/<name>`. Redirecting it would
+        // silently fold every submodule into its superproject, which is a different
+        // decision from this fix. Only `worktrees` is rerouted.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sup = tmp.path().join("super");
+        std::fs::create_dir_all(sup.join(".git").join("modules").join("vendor"))
+            .expect("super .git");
+        let sub = sup.join("vendor");
+        std::fs::create_dir_all(&sub).expect("submodule dir");
+        std::fs::write(sub.join(".git"), "gitdir: ../.git/modules/vendor\n").expect("sub .git");
+        assert_eq!(repo_root(&sub), canon(&sub));
     }
 }

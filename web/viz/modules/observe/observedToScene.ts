@@ -87,6 +87,9 @@ function toAgent(agent: ObservedAgent, frameIso: string): RadarAgent {
     nickname: null,
     // "project A" is the host's own per-frame pseudonym, never a real folder.
     cwd: agent.project,
+    // The pseudonym already IS the grouped identity: the host keys it on the repo,
+    // so worktrees arrive pre-merged and an observer never learns a repo name.
+    repo: null,
     role: agent.role,
     model: agent.model,
     title: null,

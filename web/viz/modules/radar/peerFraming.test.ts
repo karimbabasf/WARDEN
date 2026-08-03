@@ -17,6 +17,7 @@ function agent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id'>): RadarAgen
     depth: 0,
     label: partial.id,
     nickname: null,
+    repo: null,
     cwd: '~/work',
     role: null,
     model: null,

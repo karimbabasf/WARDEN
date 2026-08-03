@@ -141,15 +141,18 @@ export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
   const BEAD_GAP = 2.0; // horizontal room after a root bead / before the rail title
   const SIB_GAP = 1.1; // min horizontal space between sibling subagents
 
+  // The rail's identity is the REPO, falling back to the folder. A harness that puts
+  // every session in its own worktree hands us one repo as several sibling folders,
+  // and keying on the folder would scatter one repo's agents across N rails.
   const folderKey = (r: RadarAgent): string => {
-    const dir = r.cwd?.trim();
+    const dir = r.repo?.trim() || r.cwd?.trim();
     if (dir) return `dir:${dir}`;
     const label = r.label?.trim();
     if (label) return `task:${label}`;
     return `harness:${r.harness || 'none'}`;
   };
   const folderLabelOf = (r: RadarAgent): string =>
-    r.cwd?.trim() || r.label?.trim() || radarHarness(r.harness).label;
+    r.repo?.trim() || r.cwd?.trim() || r.label?.trim() || radarHarness(r.harness).label;
 
   // Group roots into rails. `roots` is already id-sorted (deterministic); a rail
   // appears in the order its first root appears, and holds its members in that

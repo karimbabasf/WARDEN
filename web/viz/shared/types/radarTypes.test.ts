@@ -77,6 +77,29 @@ describe('normalizeRadarState', () => {
     expect(without.agents[0].cwd).toBeNull();
   });
 
+  it('carries the repo (worktree grouping) through and defaults it to null when missing', () => {
+    const withRepo = normalizeRadarState({
+      agents: [{ ...fullAgent(), cwd: 'WARDEN-feature', repo: 'WARDEN' }],
+    });
+    expect(withRepo.agents[0].repo).toBe('WARDEN');
+    const without = normalizeRadarState({ agents: [{ id: 'a', harness: 'codex', status: 'idle' }] });
+    expect(without.agents[0].repo).toBeNull();
+  });
+
+  it('names the repo in the subtitle when the folder is one of its worktrees', () => {
+    // A session per worktree is now normal, so the folder alone reads as an
+    // unrelated project. The repo is what says these belong together.
+    expect(
+      radarSubtitle({ label: 'Fix the ingest race', cwd: 'feature-a', repo: 'WARDEN', model: 'claude-opus-5' }),
+    ).toBe('WARDEN/feature-a · opus');
+    // `git worktree add` folders usually repeat the repo name; don't say it twice.
+    expect(
+      radarSubtitle({ label: 'Fix the ingest race', cwd: 'WARDEN-hotfix', repo: 'WARDEN', model: null }),
+    ).toBe('WARDEN/hotfix');
+    // No repo (working in the repo root) → unchanged.
+    expect(radarSubtitle({ label: 'do a thing', cwd: 'MOBIUS', repo: null, model: null })).toBe('MOBIUS');
+  });
+
   it('defaults missing optionals (nickname/role/origin → null, estimated → null, estCostUsd → null)', () => {
     const model = normalizeRadarState({
       agents: [

@@ -109,6 +109,7 @@ export type RadarAgent = {
   label: string;
   nickname: string | null;
   cwd: string | null; // project-folder basename (root only), for the "folder · model" subtitle
+  repo: string | null; // repo basename when `cwd` is a worktree/subdir of it, else null
   role: string | null;
   model: string | null;
   /**
@@ -175,11 +176,26 @@ export function formatTokens(n: number): string {
  * the agent's task (Claude roots), not the folder itself (Codex). Returns null when
  * there's nothing useful to add, so the UI renders no empty subtitle.
  */
-export function radarSubtitle(agent: Pick<RadarAgent, 'label' | 'cwd' | 'model'>): string | null {
+export function radarSubtitle(
+  agent: Pick<RadarAgent, 'label' | 'cwd' | 'model'> & { repo?: string | null },
+): string | null {
   const folder = agent.cwd && agent.cwd !== (agent.label || '') ? agent.cwd : null;
   if (!folder) return null;
+  // A worktree folder alone reads as an unrelated project, so lead with the repo it
+  // belongs to. `repo` is only set when it differs from the folder.
+  const place = agent.repo ? `${agent.repo}/${stripRepoPrefix(folder, agent.repo)}` : folder;
   const m = shortModel(agent.model);
-  return m ? `${folder} · ${m}` : folder;
+  return m ? `${place} · ${m}` : place;
+}
+
+/// `git worktree add` folders are conventionally named after the repo
+/// (`WARDEN-hotfix`), which would render as `WARDEN/WARDEN-hotfix`. Drop the repeat.
+function stripRepoPrefix(folder: string, repo: string): string {
+  for (const sep of ['-', '_', '.']) {
+    const prefix = `${repo}${sep}`;
+    if (folder.startsWith(prefix) && folder.length > prefix.length) return folder.slice(prefix.length);
+  }
+  return folder;
 }
 
 // ── coercion helpers (shared shape with bridge.ts; kept local so radarTypes has
@@ -312,6 +328,7 @@ function normalizeAgent(a: any): RadarAgent {
     label: str(a?.label),
     nickname: strOrNull(a?.nickname),
     cwd: strOrNull(a?.cwd),
+    repo: strOrNull(a?.repo),
     role: strOrNull(a?.role),
     model: strOrNull(a?.model),
     title: strOrNull(a?.title),

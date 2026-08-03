@@ -10,6 +10,7 @@ function agent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id'>): RadarAgen
     depth: 0,
     label: partial.id,
     nickname: null,
+    repo: null,
     cwd: null,
     role: null,
     model: null,
@@ -179,6 +180,27 @@ describe('layoutRadarScene — folder constellations (roots grouped by cwd)', ()
     expect(w1.position.y).toBe(w2.position.y);
     // the Payments root is on its own rail (a different y).
     expect(j1.position.y).not.toBe(w1.position.y);
+  });
+
+  it('puts worktrees of one repo on a single rail labelled with the repo', () => {
+    // Harnesses now put each session in its own worktree, so one repo arrives as
+    // several sibling folders. Keyed on the folder they would be N unrelated rails,
+    // which is the opposite of what a repo's agents are.
+    const { layout, byId } = roots({
+      generatedAt: 'T',
+      agents: [
+        agent({ id: 'wt-a', cwd: 'WARDEN-feature', repo: 'WARDEN', contextTokens: 40000 }),
+        agent({ id: 'wt-b', cwd: 'WARDEN-hotfix', repo: 'WARDEN', contextTokens: 40000 }),
+        agent({ id: 'main', cwd: 'WARDEN', repo: null, contextTokens: 40000 }),
+        agent({ id: 'other', cwd: 'Payments', repo: null, contextTokens: 40000 }),
+      ],
+    });
+    const y = (id: string) => byId.get(id)!.position.y;
+    expect(y('wt-a')).toBe(y('wt-b'));
+    expect(y('wt-a')).toBe(y('main'));
+    expect(y('other')).not.toBe(y('wt-a'));
+    // And the rail is named for the repo, not for whichever worktree landed first.
+    expect(layout.clusters.map((c) => c.label).sort()).toEqual(['Payments', 'WARDEN']);
   });
 
   it('exposes one labelled cluster per folder (for the on-screen constellation label)', () => {

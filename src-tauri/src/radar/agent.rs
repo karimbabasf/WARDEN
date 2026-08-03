@@ -11,6 +11,26 @@ use super::model::{RadarAction, RadarActivity, RadarAgent, RadarComposition, Rad
 use crate::ir::{Event, Harness, Session};
 use crate::store::Store;
 
+/// The radar's `(folder, repo)` pair for a session: the cwd basename, plus the repo
+/// basename when the two DIFFER (a worktree, or a subdirectory of the repo). Working
+/// in the repo root itself leaves `repo` `None` rather than repeating the folder.
+///
+/// Basenames only. `RadarAgent` is the object the observer projection reads from, so
+/// absolute paths are deliberately kept out of it.
+fn folder_and_repo(project: Option<&crate::ir::ProjectRef>) -> (Option<String>, Option<String>) {
+    let base = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().to_string());
+    let Some(project) = project else {
+        return (None, None);
+    };
+    let cwd = base(&project.cwd);
+    let repo = project
+        .repo_root
+        .as_deref()
+        .and_then(base)
+        .filter(|r| Some(r) != cwd.as_ref());
+    (cwd, repo)
+}
+
 /// Build one [`RadarAgent`] from a stored session, joining size/composition
 /// (Tasks 7/8), labels/identity (per harness), recent activity, and est cost.
 pub(crate) fn build_agent(
@@ -90,11 +110,7 @@ pub(crate) fn build_agent(
     let est_cost_usd = est_cost_usd(&model, &exact);
     let task = first_task(&events);
     let (label, nickname, role, origin) = identity(s, task);
-    let cwd = s
-        .project
-        .as_ref()
-        .and_then(|p| p.cwd.file_name())
-        .map(|n| n.to_string_lossy().to_string());
+    let (cwd, repo) = folder_and_repo(s.project.as_ref());
 
     RadarAgent {
         id: s.id.clone(),
@@ -105,6 +121,7 @@ pub(crate) fn build_agent(
         label,
         nickname,
         cwd,
+        repo,
         role,
         model,
         title,
@@ -639,7 +656,7 @@ fn path_basename(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{EventRecord, FileEdit, RawRef, Role, ToolKind, Turn};
+    use crate::ir::{EventRecord, FileEdit, ProjectRef, RawRef, Role, ToolKind, Turn};
     use chrono::Utc;
     use std::path::PathBuf;
 
@@ -970,5 +987,56 @@ mod tests {
         assert_eq!(kinds, vec!["run", "write", "read", "thinking"]);
         assert!(feed.iter().any(|a| a.kind == "write" && a.label == "Edit notes.md"));
         assert!(feed.iter().any(|a| a.kind == "read" && a.label.contains("sed -n")));
+    }
+
+    // ── folder_and_repo ───────────────────────────────────────────────────────
+
+    fn project_at(cwd: &str, repo_root: Option<&str>) -> ProjectRef {
+        ProjectRef {
+            cwd: PathBuf::from(cwd),
+            repo_root: repo_root.map(PathBuf::from),
+            git_branch: None,
+        }
+    }
+
+    #[test]
+    fn a_session_in_the_repo_root_reports_no_separate_repo() {
+        let p = project_at("/Users/k/Developer/Apps/WARDEN", Some("/Users/k/Developer/Apps/WARDEN"));
+        assert_eq!(
+            folder_and_repo(Some(&p)),
+            (Some("WARDEN".into()), None),
+            "the ordinary case must not grow a redundant second name"
+        );
+    }
+
+    #[test]
+    fn a_session_in_a_worktree_reports_the_repo_it_belongs_to() {
+        let p = project_at(
+            "/Users/k/Developer/Apps/WARDEN-feature",
+            Some("/Users/k/Developer/Apps/WARDEN"),
+        );
+        assert_eq!(
+            folder_and_repo(Some(&p)),
+            (Some("WARDEN-feature".into()), Some("WARDEN".into()))
+        );
+    }
+
+    #[test]
+    fn a_session_in_a_subdirectory_reports_the_repo_it_belongs_to() {
+        let p = project_at(
+            "/Users/k/Developer/Apps/WARDEN/src-tauri",
+            Some("/Users/k/Developer/Apps/WARDEN"),
+        );
+        assert_eq!(
+            folder_and_repo(Some(&p)),
+            (Some("src-tauri".into()), Some("WARDEN".into()))
+        );
+    }
+
+    #[test]
+    fn an_unknown_repo_leaves_the_folder_alone() {
+        let p = project_at("/tmp/scratch", None);
+        assert_eq!(folder_and_repo(Some(&p)), (Some("scratch".into()), None));
+        assert_eq!(folder_and_repo(None), (None, None));
     }
 }

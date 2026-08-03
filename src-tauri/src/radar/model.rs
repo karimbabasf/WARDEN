@@ -22,6 +22,15 @@ pub struct RadarAgent {
     /// separately from `label` so the FACE can render a "folder · model" subtitle
     /// even when `label` is the agent's task. `None` when there is no project cwd.
     pub cwd: Option<String>,
+    /// The basename of the REPO that `cwd` belongs to, e.g. `WARDEN` for a session
+    /// running in the `WARDEN-feature` worktree. Present only when it DIFFERS from
+    /// `cwd`, so it reads as "this folder is a worktree of that repo" and is `None`
+    /// for the ordinary case of working in the repo root itself.
+    ///
+    /// This is what groups sessions the harnesses now scatter across one worktree
+    /// each. A basename, never a path: `RadarAgent` is what the observer projection
+    /// reads from, and absolute paths are deliberately kept out of it.
+    pub repo: Option<String>,
     pub role: Option<String>,
     pub model: Option<String>,
     /// The harness's OWN human-readable session title, when it has one: Claude's

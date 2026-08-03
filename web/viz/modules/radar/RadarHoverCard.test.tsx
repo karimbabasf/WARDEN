@@ -24,6 +24,7 @@ function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
     depth: 1,
     label: 'Curie',
     nickname: 'Curie',
+    repo: null,
     cwd: null,
     role: 'explorer',
     model: 'gpt-5-codex',

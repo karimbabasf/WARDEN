@@ -230,10 +230,14 @@ pub fn project(
 ) -> ObservedAgent {
     let Profile::Shapes = profile;
 
-    let project = agent.cwd.as_ref().map(|cwd| {
+    // Keyed on the REPO, falling back to the folder. Sessions now land one per
+    // worktree, so keying on the folder alone would split one repo into a fresh
+    // pseudonym per worktree and tell an observer they are unrelated projects.
+    // Neither key crosses the wire: both only ever select a pseudonym.
+    let project = agent.repo.as_ref().or(agent.cwd.as_ref()).map(|key| {
         let next = project_names.len();
         project_names
-            .entry(cwd.clone())
+            .entry(key.clone())
             .or_insert_with(|| format!("project {}", pseudonym(next)))
             .clone()
     });
@@ -342,6 +346,7 @@ mod tests {
             label: "CANARY_PROMPT_TEXT".into(),
             nickname: Some("CANARY_NICK".into()),
             cwd: Some("CANARY_PROJECT".into()),
+            repo: Some("CANARY_REPO".into()),
             role: Some("CANARY_ROLE".into()),
             model: Some("claude-opus-5".into()),
             title: Some("CANARY_TITLE".into()),
@@ -416,6 +421,7 @@ mod tests {
         "CANARY_PROMPT_TEXT",
         "CANARY_NICK",
         "CANARY_PROJECT",
+        "CANARY_REPO",
         "CANARY_ROLE",
         "CANARY_TITLE",
         "CANARY_TOOL",
@@ -553,6 +559,10 @@ mod tests {
         let mut c = canary_agent();
         c.id = "c".into();
         c.cwd = Some("OTHER_PROJECT".into());
+        // A different project means a different REPO, which is the identity the
+        // pseudonym keys on. Leaving the fixture's shared repo here would make `c` a
+        // worktree of the same repo as `a`/`b`, which is a different test.
+        c.repo = Some("OTHER_REPO".into());
         let state = RadarState {
             generated_at: FRAME.into(),
             agents: vec![a, b, c],
@@ -562,6 +572,48 @@ mod tests {
         assert_ne!(o.agents[0].project, o.agents[2].project);
         assert_eq!(o.agents[0].project.as_deref(), Some("project A"));
         assert_eq!(o.agents[2].project.as_deref(), Some("project B"));
+    }
+
+    #[test]
+    fn worktrees_of_one_repo_share_a_pseudonym() {
+        // Each session gets its own worktree now, so one repo shows up as several
+        // sibling folders. Keyed on the folder they would be three unrelated
+        // projects to an observer; keyed on the repo they are one.
+        let mut a = canary_agent();
+        a.id = "a".into();
+        a.cwd = Some("WARDEN-feature".into());
+        a.repo = Some("WARDEN".into());
+        let mut b = canary_agent();
+        b.id = "b".into();
+        b.cwd = Some("WARDEN-hotfix".into());
+        b.repo = Some("WARDEN".into());
+        // Working in the repo root itself: no worktree, so no separate repo name.
+        let mut c = canary_agent();
+        c.id = "c".into();
+        c.cwd = Some("WARDEN".into());
+        c.repo = None;
+        let mut d = canary_agent();
+        d.id = "d".into();
+        d.cwd = Some("Pakkr".into());
+        d.repo = None;
+
+        let state = RadarState {
+            generated_at: FRAME.into(),
+            agents: vec![a, b, c, d],
+        };
+        let o = project_state(&state, Profile::Shapes, &SALT);
+        assert_eq!(
+            o.agents[0].project, o.agents[1].project,
+            "two worktrees of one repo are one project"
+        );
+        assert_eq!(
+            o.agents[0].project, o.agents[2].project,
+            "a worktree and the repo root it belongs to are one project"
+        );
+        assert_ne!(
+            o.agents[0].project, o.agents[3].project,
+            "a genuinely different repo stays a different project"
+        );
     }
 
     #[test]

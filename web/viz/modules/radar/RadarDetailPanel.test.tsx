@@ -59,6 +59,7 @@ function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
     depth: 0,
     label: 'warden',
     nickname: null,
+    repo: null,
     cwd: 'WARDEN',
     role: null,
     model: 'claude-opus-4-8',
