@@ -101,6 +101,34 @@ impl TeamIndex {
             .find(|t| !t.lead_session_id.is_empty() && t.lead_session_id == external_id)
     }
 
+    /// The team a member's own SIDECAR names, plus the member name it recorded.
+    ///
+    /// This is the join that works on current transcripts. `team_for_member_stem`
+    /// reads membership out of the filename, which Claude used to shape as
+    /// `agent-<name>@session-<hex>` and now shapes as `agent-a<name>-<hex>`: the team
+    /// id is not in the name at all any more, so every member of every live team fell
+    /// through that join and rendered as an anonymous subagent. The sidecar states
+    /// both facts outright (`teamName`, `name`), so ask it first and keep the stem
+    /// parse for transcripts written in the old shape.
+    ///
+    /// The roster still has the final say on membership: a sidecar naming a member the
+    /// roster does not list yields no team, so a stale or half-written file can never
+    /// invent one.
+    pub fn team_for_member(&self, team_name: &str, member_name: &str) -> Option<(&Team, String)> {
+        if team_name.is_empty() || member_name.is_empty() {
+            return None;
+        }
+        // `teamName` is the roster's directory id in practice; match its display name
+        // too, so a roster that carries a human name still joins.
+        let team = self
+            .teams
+            .iter()
+            .find(|t| t.id == team_name || t.name == team_name)?;
+        team.members
+            .contains_key(member_name)
+            .then(|| (team, member_name.to_string()))
+    }
+
     /// The team owning a member transcript, resolved from that transcript's file stem
     /// (`agent-<name>@session-<hex>`), plus the member name parsed out of it.
     pub fn team_for_member_stem(&self, stem: &str) -> Option<(&Team, String)> {
@@ -297,6 +325,60 @@ mod tests {
         assert!(idx
             .team_for_member_stem("agent-ClaudeFormat@session-zzzzzz")
             .is_none());
+    }
+
+    /// The join that has to work on current transcripts. A live member's file is
+    /// `agent-amev-l1-253c6f984dd4c18e.jsonl`: the team id is nowhere in it, so the
+    /// stem parse cannot find the team and the sidecar's own fields must.
+    #[test]
+    fn joins_a_member_from_its_sidecar_when_the_stem_carries_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let team_dir = dir.path().join("session-9854a095");
+        std::fs::create_dir_all(&team_dir).expect("mkdir");
+        std::fs::write(
+            team_dir.join("config.json"),
+            r#"{
+                "name": "session-9854a095",
+                "leadAgentId": "team-lead@session-9854a095",
+                "leadSessionId": "9854a095-b19d-4957-8fbb-116c213d0289",
+                "members": [
+                    {"agentId": "mev-l1@session-9854a095", "name": "mev-l1", "agentType": "mev-l1"}
+                ]
+            }"#,
+        )
+        .expect("write");
+        let idx = TeamIndex::load_from(dir.path());
+
+        // What the filename can tell us: nothing.
+        assert!(idx
+            .team_for_member_stem("agent-amev-l1-253c6f984dd4c18e")
+            .is_none());
+
+        let (team, name) = idx
+            .team_for_member("session-9854a095", "mev-l1")
+            .expect("the sidecar names both halves");
+        assert_eq!(name, "mev-l1");
+        assert_eq!(team.id, "session-9854a095");
+        assert_eq!(
+            radar_team(team, Some(&name), false).member_type.as_deref(),
+            Some("mev-l1")
+        );
+    }
+
+    #[test]
+    fn a_sidecar_naming_a_stranger_or_an_unknown_team_invents_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let team_dir = dir.path().join("session-f3e4ef77");
+        std::fs::create_dir_all(&team_dir).expect("mkdir");
+        std::fs::write(team_dir.join("config.json"), ROSTER).expect("write");
+        let idx = TeamIndex::load_from(dir.path());
+
+        assert!(idx.team_for_member("session-f3e4ef77", "Ghost").is_none());
+        assert!(idx.team_for_member("session-nope", "ClaudeFormat").is_none());
+        assert!(idx.team_for_member("", "ClaudeFormat").is_none());
+        assert!(idx.team_for_member("session-f3e4ef77", "").is_none());
+        // A roster with a human name joins on that name too.
+        assert!(idx.team_for_member("warden build", "ClaudeFormat").is_some());
     }
 
     #[test]

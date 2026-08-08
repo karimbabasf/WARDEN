@@ -14,19 +14,25 @@ use std::collections::{HashMap, HashSet};
 
 /// Link Claude subagents to their parents (Task 3).
 ///
-/// The link is deterministic: a subagent's sidecar `meta.toolUseId` equals the
-/// `id` of the parent assistant `tool_use` block (Claude dispatches subagents via
-/// the `Agent`/`Task` tool). We:
-/// 1. index every parent `ToolCall` `call_id` → that batch's session id;
-/// 2. index every subagent batch's `agent_id` (derived from its
-///    `subagents/agent-<id>.jsonl` path) → its session id;
-/// 3. for each meta, map `meta.tool_use_id → parent_sid` and
-///    `meta.agent_id → child_sid`, emitting the `(child_sid, parent_sid)` pair.
+/// Three resolvers, strongest first. The order is what makes the forest as deep as
+/// the real agent tree instead of two levels flat.
 ///
-/// Returns one pair per meta that resolves to BOTH a known parent tool-call and a
-/// known child transcript; unmatched metas are silently skipped (a child whose
-/// parent is not currently ingested simply renders as a root). Order follows the
-/// input `metas`.
+/// 1. **`meta.parentAgentId`** names the spawning SUBAGENT outright. This is the only
+///    signal that can express nesting, because the transcript path cannot: Claude
+///    writes every subagent of a session into one flat `<root>/subagents/` directory
+///    whether it was spawned by the root or by another subagent five levels down.
+/// 2. **`meta.toolUseId`** equals the `id` of the `tool_use` block that dispatched it
+///    (Claude spawns via the `Agent`/`Task` tool). Parent tool-calls are indexed from
+///    EVERY batch, subagent batches included, so a subagent that dispatches its own
+///    subagent is a parent here like any other.
+/// 3. **The root of its transcript directory**, the last-resort fallback, and only for
+///    an agent that does not claim to be nested. A sidecar reporting `spawnDepth >= 2`
+///    was demonstrably spawned by a subagent, so hanging it off the root would not be
+///    a degraded answer but a WRONG tree; it renders as an unparented agent instead,
+///    which is the same thing we already do for a child whose parent is not ingested.
+///
+/// Returns one pair per meta that resolves to both a known parent and a known child
+/// transcript; unmatched metas are silently skipped. Order follows the input `metas`.
 pub fn link_claude_subagents(
     batches: &[SessionBatch],
     metas: &[SubagentMeta],
@@ -60,10 +66,15 @@ pub fn link_claude_subagents(
         let Some(child) = agent_to_child.get(&m.agent_id) else {
             continue;
         };
-        let parent = call_to_parent
-            .get(m.tool_use_id.as_str())
+        let parent = agent_to_child
+            .get(m.parent_agent_id.as_str())
             .copied()
+            .filter(|p| p != child)
+            .or_else(|| call_to_parent.get(m.tool_use_id.as_str()).copied())
             .or_else(|| {
+                if claims_nested(m) {
+                    return None;
+                }
                 batches
                     .iter()
                     .find(|b| b.session.id == **child)
@@ -75,6 +86,14 @@ pub fn link_claude_subagents(
         }
     }
     pairs
+}
+
+/// Does this sidecar claim to have been spawned by another SUBAGENT rather than by a
+/// root session? Either it names the spawner, or it reports a depth that only a
+/// nested spawn reaches. Such an agent must never fall back onto the root: the root
+/// is its ancestor, not its parent, and a fabricated edge is worse than no edge.
+pub(crate) fn claims_nested(m: &SubagentMeta) -> bool {
+    !m.parent_agent_id.is_empty() || m.spawn_depth.is_some_and(|d| d >= 2)
 }
 
 /// Link Codex Desktop subagents to their parents (Task 5).
@@ -184,12 +203,7 @@ mod tests {
             PathBuf::from("/proj/session-1/subagents/agent-abc.jsonl"),
             None,
         );
-        let meta = SubagentMeta {
-            agent_type: "Explore".into(),
-            description: "map frontend".into(),
-            tool_use_id: "toolu_01".into(),
-            agent_id: "abc".into(),
-        };
+        let meta = meta("abc", "toolu_01");
 
         let pairs = link_claude_subagents(&[parent, child], &[meta]);
         assert_eq!(
@@ -207,13 +221,130 @@ mod tests {
             PathBuf::from("/proj/session-1/subagents/agent-abc.jsonl"),
             None,
         );
-        let meta = SubagentMeta {
-            agent_type: "Explore".into(),
-            description: "x".into(),
-            tool_use_id: "toolu_missing".into(),
-            agent_id: "abc".into(),
-        };
+        let meta = meta("abc", "toolu_missing");
         assert!(link_claude_subagents(&[child], &[meta]).is_empty());
+    }
+
+    /// A sub-subagent: its sidecar names the SUBAGENT that spawned it, and that is
+    /// the only place the nesting is recorded, because both transcripts sit side by
+    /// side in the same flat `<root>/subagents/` directory.
+    #[test]
+    fn parent_agent_id_links_a_subagent_under_another_subagent() {
+        let root = batch(
+            "root-sid",
+            PathBuf::from("/proj/session-1/session-1.jsonl"),
+            Some("toolu_01"),
+        );
+        let mid = batch(
+            "mid-sid",
+            PathBuf::from("/proj/session-1/subagents/agent-mid.jsonl"),
+            None,
+        );
+        let deep = batch(
+            "deep-sid",
+            PathBuf::from("/proj/session-1/subagents/agent-deep.jsonl"),
+            None,
+        );
+        let mut deep_meta = meta("deep", "toolu_99");
+        deep_meta.parent_agent_id = "mid".into();
+        deep_meta.spawn_depth = Some(2);
+
+        let pairs = link_claude_subagents(&[root, mid, deep], &[meta("mid", "toolu_01"), deep_meta]);
+        assert_eq!(
+            pairs,
+            vec![
+                ("mid-sid".to_string(), "root-sid".to_string()),
+                ("deep-sid".to_string(), "mid-sid".to_string()),
+            ],
+            "the deep agent must hang off the subagent that spawned it, not off the root"
+        );
+    }
+
+    /// The same nesting, expressed the other way: the spawning SUBAGENT logged the
+    /// `Task` call itself, so the tool-use id resolves to it rather than to a root.
+    #[test]
+    fn tool_use_id_issued_by_a_subagent_links_under_that_subagent() {
+        let root = batch(
+            "root-sid",
+            PathBuf::from("/proj/session-1/session-1.jsonl"),
+            None,
+        );
+        let mid = batch(
+            "mid-sid",
+            PathBuf::from("/proj/session-1/subagents/agent-mid.jsonl"),
+            Some("toolu_deep"),
+        );
+        let deep = batch(
+            "deep-sid",
+            PathBuf::from("/proj/session-1/subagents/agent-deep.jsonl"),
+            None,
+        );
+        let pairs = link_claude_subagents(&[root, mid, deep], &[meta("deep", "toolu_deep")]);
+        assert_eq!(
+            pairs,
+            vec![("deep-sid".to_string(), "mid-sid".to_string())]
+        );
+    }
+
+    /// A sidecar that CLAIMS nesting but whose parent is not ingested renders
+    /// unparented. Falling back to the root would not be a coarser answer, it would
+    /// be a wrong one: the root is its ancestor, never its parent.
+    #[test]
+    fn a_nested_claim_never_falls_back_onto_the_root() {
+        // The root is named so the fallback WOULD resolve: only the nesting claim
+        // stops it, which is the whole point of the case.
+        let root = batch(
+            "session-1",
+            PathBuf::from("/proj/session-1/session-1.jsonl"),
+            None,
+        );
+        let deep = batch(
+            "deep-sid",
+            PathBuf::from("/proj/session-1/subagents/agent-deep.jsonl"),
+            None,
+        );
+        let mut deep_meta = meta("deep", "");
+        deep_meta.spawn_depth = Some(2);
+        assert!(link_claude_subagents(&[root, deep], &[deep_meta]).is_empty());
+    }
+
+    /// A first-level subagent with no tool-use id at all (the common shape: 411 of
+    /// the 555 sidecars on the dev machine carry none) still lands on its root.
+    #[test]
+    fn a_first_level_subagent_without_a_tool_use_id_still_lands_on_its_root() {
+        let root = batch(
+            "session-1",
+            PathBuf::from("/proj/session-1/session-1.jsonl"),
+            None,
+        );
+        let child = batch(
+            "child-sid",
+            PathBuf::from("/proj/session-1/subagents/agent-abc.jsonl"),
+            None,
+        );
+        let mut m = meta("abc", "");
+        m.spawn_depth = Some(1);
+        let pairs = link_claude_subagents(&[root, child], &[m]);
+        assert_eq!(
+            pairs,
+            vec![("child-sid".to_string(), "session-1".to_string())]
+        );
+    }
+
+    /// A sidecar carrying just the two ids the linkage reads; the caller sets
+    /// `parent_agent_id` / `spawn_depth` on top when the case is about nesting.
+    fn meta(agent_id: &str, tool_use_id: &str) -> SubagentMeta {
+        SubagentMeta {
+            agent_type: "Explore".into(),
+            description: "map frontend".into(),
+            tool_use_id: tool_use_id.into(),
+            agent_id: agent_id.into(),
+            parent_agent_id: String::new(),
+            spawn_depth: None,
+            team_name: String::new(),
+            member_name: String::new(),
+            task_kind: String::new(),
+        }
     }
 
     /// Build a minimal Codex `Session` with the given external id and `meta` JSON.

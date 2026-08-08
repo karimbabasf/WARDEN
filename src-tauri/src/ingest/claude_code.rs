@@ -111,19 +111,52 @@ impl Adapter for ClaudeCodeAdapter {
 /// transcript at `<session>/subagents/agent-<id>.meta.json`. `agent_id` is not in
 /// the file — it is derived from the `agent-<id>` filename stem so the hierarchy
 /// pass (Task 3) can key children by it.
+///
+/// Four of these fields are NESTING and MEMBERSHIP facts, and they are the only
+/// honest source for either. Measured over the 555 sidecars on this machine:
+/// * `spawnDepth` is on every single one. 1 = spawned by a root session, 2 = spawned
+///   by a SUBAGENT (a real sub-subagent), 0 = an in-process team member, which the
+///   lead spawns and which therefore also sits one level under a root.
+/// * `parentAgentId` names the spawning subagent directly, and appears exactly on the
+///   depth-2 rows. It is the whole hierarchy for a nested spawn: the transcript path
+///   cannot carry it, because every subagent of a session lands in the SAME flat
+///   `<root>/subagents/` directory however deep it really is.
+/// * `teamName` + `name` identify an agent-team member. They matter because the file
+///   stem no longer does: a member's transcript is `agent-a<name>-<hex>.jsonl`, not
+///   the `agent-<name>@session-<hex>` the roster join was written against.
+/// * `toolUseId` is present on only 144 of the 555. It used to be the only link we
+///   read, so the other 411 fell back to "attach to the root" and the whole forest
+///   rendered two levels deep no matter how deep it actually was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentMeta {
     pub agent_type: String,
     pub description: String,
     pub tool_use_id: String,
     pub agent_id: String,
+    /// The spawning SUBAGENT's `agent_id`, when this agent was spawned by one.
+    pub parent_agent_id: String,
+    /// Harness-reported nesting. See the struct note; `None` when the key is absent.
+    pub spawn_depth: Option<u32>,
+    /// Agent-team id (`session-<hex>`) for an in-process teammate.
+    pub team_name: String,
+    /// This agent's own name within its team, e.g. "mev-l1".
+    pub member_name: String,
+    /// How it was spawned; `in_process_teammate` for a team member.
+    pub task_kind: String,
 }
 
-/// Read and parse a Claude subagent sidecar `agent-<id>.meta.json`. The three
-/// payload fields (`agentType`, `description`, `toolUseId`) are read leniently
-/// (missing → empty string, never an error), while `agent_id` comes from the
-/// `agent-<id>` filename stem. Returns an error only when the file cannot be read
-/// or is not valid JSON.
+impl SubagentMeta {
+    /// An in-process team member: spawned by the team lead when the roster was built,
+    /// not by a `Task` call, so no tool-result will ever be logged for it.
+    pub fn is_teammate(&self) -> bool {
+        self.task_kind == "in_process_teammate" || !self.team_name.is_empty()
+    }
+}
+
+/// Read and parse a Claude subagent sidecar `agent-<id>.meta.json`. Every payload
+/// field is read leniently (missing → empty / `None`, never an error), while
+/// `agent_id` comes from the `agent-<id>` filename stem. Returns an error only when
+/// the file cannot be read or is not valid JSON.
 pub fn read_subagent_meta(path: &Path) -> Result<SubagentMeta> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let v: Value =
@@ -139,6 +172,14 @@ pub fn read_subagent_meta(path: &Path) -> Result<SubagentMeta> {
         description: s("description"),
         tool_use_id: s("toolUseId"),
         agent_id: subagent_agent_id(path),
+        parent_agent_id: s("parentAgentId"),
+        spawn_depth: v
+            .get("spawnDepth")
+            .and_then(Value::as_u64)
+            .map(|d| d.min(u32::MAX as u64) as u32),
+        team_name: s("teamName"),
+        member_name: s("name"),
+        task_kind: s("taskKind"),
     })
 }
 
@@ -253,6 +294,11 @@ pub fn ingest_all(
                 "description": meta.description,
                 "agentType": meta.agent_type,
                 "toolUseId": meta.tool_use_id,
+                "parentAgentId": meta.parent_agent_id,
+                "spawnDepth": meta.spawn_depth,
+                "teamName": meta.team_name,
+                "memberName": meta.member_name,
+                "taskKind": meta.task_kind,
             }),
         )?;
     }
@@ -265,9 +311,11 @@ pub fn ingest_all(
 }
 
 /// Re-derive Claude subagent→parent links from the WHOLE store (not a single ingest
-/// pass): match each subagent's persisted `toolUseId` to the parent session whose
-/// transcript contains the `Task`/`Agent` tool-call with that `call_id`. Idempotent
-/// — both facts are permanent, so it converges no matter how the writes interleaved.
+/// pass), using the same three resolvers as `hierarchy::link_claude_subagents`:
+/// `parentAgentId` names the spawning subagent, else `toolUseId` matches the session
+/// whose transcript issued that `Task`/`Agent` call, else (only for an agent that
+/// does not claim to be nested) the root of its transcript directory. Idempotent:
+/// every fact it reads is permanent, so it converges however the writes interleaved.
 pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
     let sessions = store.sessions()?;
 
@@ -292,13 +340,31 @@ pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
             let missing_tid = !row_has("toolUseId") && !m.tool_use_id.is_empty();
             let missing_type = !row_has("agentType") && !m.agent_type.is_empty();
             let missing_desc = !row_has("description") && !m.description.is_empty();
-            if missing_tid || missing_type || missing_desc {
+            // Membership + nesting are read off the row later (team join, termination
+            // rule), so they are repaired onto it here alongside the identity fields.
+            let missing_team = !row_has("teamName") && !m.team_name.is_empty();
+            let missing_kind = !row_has("taskKind") && !m.task_kind.is_empty();
+            let missing_parent = !row_has("parentAgentId") && !m.parent_agent_id.is_empty();
+            let missing_depth = s.meta.get("spawnDepth").is_none() && m.spawn_depth.is_some();
+            if missing_tid
+                || missing_type
+                || missing_desc
+                || missing_team
+                || missing_kind
+                || missing_parent
+                || missing_depth
+            {
                 store.merge_session_meta(
                     &s.id,
                     &json!({
                         "toolUseId": m.tool_use_id,
                         "agentType": m.agent_type,
                         "description": m.description,
+                        "parentAgentId": m.parent_agent_id,
+                        "spawnDepth": m.spawn_depth,
+                        "teamName": m.team_name,
+                        "memberName": m.member_name,
+                        "taskKind": m.task_kind,
                     }),
                 )?;
             }
@@ -320,7 +386,18 @@ pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
         }
     }
 
+    // agent_id (the `agent-<id>` transcript stem) → its session id, so a sidecar's
+    // `parentAgentId` resolves to the SUBAGENT that spawned it.
+    let mut agent_to_session: HashMap<String, String> = HashMap::new();
+    for s in &sessions {
+        if matches!(s.harness, Harness::ClaudeCode) && is_subagent_session_path(&s.source_path) {
+            agent_to_session.insert(subagent_agent_id(&s.source_path), s.id.clone());
+        }
+    }
+
     // call_id → parent session id, scanned across every Claude session's events.
+    // Subagent sessions are scanned too: one that dispatches its own `Task` is a
+    // parent here exactly like a root, which is what lets the tree go deeper than 2.
     let mut call_to_parent: HashMap<String, String> = HashMap::new();
     for s in &sessions {
         if !matches!(s.harness, Harness::ClaudeCode) {
@@ -342,9 +419,28 @@ pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
             .map(|m| m.tool_use_id.as_str())
             .filter(|t| !t.is_empty());
         let tid = sidecar_tid.or_else(|| s.meta.get("toolUseId").and_then(|v| v.as_str()));
-        let parent = tid
-            .and_then(|t| call_to_parent.get(t).cloned())
+        // The spawning subagent, named by the sidecar (or by an already-repaired row).
+        let parent_agent = sidecar
+            .as_ref()
+            .map(|m| m.parent_agent_id.as_str())
+            .filter(|p| !p.is_empty())
+            .or_else(|| s.meta.get("parentAgentId").and_then(|v| v.as_str()))
+            .filter(|p| !p.is_empty());
+        // Nested spawns never fall back to the root: see `hierarchy::claims_nested`.
+        let nested = parent_agent.is_some()
+            || sidecar.as_ref().and_then(|m| m.spawn_depth).unwrap_or(0) >= 2
+            || s.meta
+                .get("spawnDepth")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                >= 2;
+        let parent = parent_agent
+            .and_then(|p| agent_to_session.get(p).cloned())
+            .or_else(|| tid.and_then(|t| call_to_parent.get(t).cloned()))
             .or_else(|| {
+                if nested {
+                    return None;
+                }
                 subagent_root_external_id(&s.source_path)
                     .and_then(|root| root_external_to_parent.get(&root).cloned())
         });
@@ -1111,6 +1207,123 @@ mod tests {
         assert_eq!(
             tail.session.id, full.session.id,
             "full parse and incremental tail parse must update the same subagent row"
+        );
+    }
+
+    /// End to end, on the shape Claude writes today: a root spawns a subagent, that
+    /// subagent spawns two of its own, and all three transcripts land in the SAME flat
+    /// `<root>/subagents/` directory. The nesting exists only in the sidecars, so this
+    /// is the test that says the forest is as deep as the real agent tree.
+    #[test]
+    fn a_subagents_own_subagents_nest_under_it_not_under_the_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let subs = root.join("root-session/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+
+        let line = |sid: &str, agent: Option<&str>, text: &str| match agent {
+            Some(a) => format!(
+                "{{\"type\":\"user\",\"uuid\":\"u-{a}\",\"sessionId\":\"{sid}\",\"isSidechain\":true,\"agentId\":\"{a}\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"{text}\"}}}}\n"
+            ),
+            None => format!(
+                "{{\"type\":\"user\",\"uuid\":\"u-{sid}\",\"sessionId\":\"{sid}\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"{text}\"}}}}\n"
+            ),
+        };
+
+        let root_jsonl = root.join("root-session.jsonl");
+        std::fs::write(&root_jsonl, line("root-session", None, "go")).unwrap();
+
+        let mid_jsonl = subs.join("agent-amid.jsonl");
+        std::fs::write(&mid_jsonl, line("root-session", Some("amid"), "orchestrate")).unwrap();
+        std::fs::write(
+            subs.join("agent-amid.meta.json"),
+            r#"{"agentType":"general-purpose","description":"orchestrate","spawnDepth":1}"#,
+        )
+        .unwrap();
+
+        for kid in ["adeep1", "adeep2"] {
+            let p = subs.join(format!("agent-{kid}.jsonl"));
+            std::fs::write(&p, line("root-session", Some(kid), "research")).unwrap();
+            std::fs::write(
+                subs.join(format!("agent-{kid}.meta.json")),
+                format!(
+                    r#"{{"agentType":"general-purpose","description":"research","toolUseId":"toolu_{kid}","parentAgentId":"amid","spawnDepth":2}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let store = Store::memory().unwrap();
+        ingest_all(&store, Some(root), None).unwrap();
+
+        let sid = |ext: &str, path: &std::path::Path| {
+            stable_id(&["claude_code", ext, &path.to_string_lossy()])
+        };
+        let root_sid = sid("root-session", &root_jsonl);
+        let mid_sid = sid("agent-amid", &mid_jsonl);
+
+        assert_eq!(store.parent_of(&mid_sid).unwrap(), Some(root_sid.clone()));
+        for kid in ["adeep1", "adeep2"] {
+            let kid_sid = sid(
+                &format!("agent-{kid}"),
+                &subs.join(format!("agent-{kid}.jsonl")),
+            );
+            assert_eq!(
+                store.parent_of(&kid_sid).unwrap(),
+                Some(mid_sid.clone()),
+                "{kid} was spawned by the subagent, so it must hang off the subagent"
+            );
+        }
+    }
+
+    /// A team member's sidecar carries the facts the filename no longer does. They are
+    /// persisted onto its own row, because the team join and the termination rule both
+    /// read them back from there.
+    #[test]
+    fn a_teammates_membership_is_persisted_onto_its_session_row() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let subs = root.join("lead-session/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+
+        std::fs::write(
+            root.join("lead-session.jsonl"),
+            "{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"lead-session\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"build the team\"}}\n",
+        )
+        .unwrap();
+
+        let mate_jsonl = subs.join("agent-amev-l1-253c6f984dd4c18e.jsonl");
+        std::fs::write(
+            &mate_jsonl,
+            "{\"type\":\"user\",\"uuid\":\"u2\",\"sessionId\":\"lead-session\",\"isSidechain\":true,\"agentId\":\"amev-l1-253c6f984dd4c18e\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"research\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            subs.join("agent-amev-l1-253c6f984dd4c18e.meta.json"),
+            r#"{"agentType":"mev-l1","description":"Ethereum L1 MEV supply chain","name":"mev-l1","spawnDepth":0,"taskKind":"in_process_teammate","teamName":"session-9854a095"}"#,
+        )
+        .unwrap();
+
+        let store = Store::memory().unwrap();
+        ingest_all(&store, Some(root), None).unwrap();
+
+        let mate = store
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.source_path == mate_jsonl)
+            .expect("the teammate row exists");
+        assert_eq!(
+            mate.meta.get("teamName").and_then(|v| v.as_str()),
+            Some("session-9854a095")
+        );
+        assert_eq!(
+            mate.meta.get("memberName").and_then(|v| v.as_str()),
+            Some("mev-l1")
+        );
+        assert_eq!(
+            mate.meta.get("taskKind").and_then(|v| v.as_str()),
+            Some("in_process_teammate")
         );
     }
 

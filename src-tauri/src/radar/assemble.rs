@@ -179,8 +179,23 @@ pub fn assemble(
                 // nested under its live parent. Never the file-silence backstop.
                 codex_subagent_completed_at(&store.session_events(id).unwrap_or_default())
             }
+        } else if is_in_process_teammate(child) && !has_tool_use_id(child) {
+            // An in-process TEAMMATE is spawned when the roster is built, not by a Task
+            // call, so no tool-result will ever be logged for it and the only signal
+            // left would be the 90s file-silence backstop. That backstop is wrong here
+            // for exactly the reason it is wrong for a Codex subagent: a teammate sits
+            // quiet for minutes at a stretch while the lead works or while it waits its
+            // turn, so applying it implodes a live team into an empty board. Its real
+            // lifecycle is the LEAD's, and that is already enforced upstream: the open
+            // forest keeps a subagent only while the ROOT of its chain is open, so the
+            // whole team drops the moment the lead session closes.
+            None
         } else {
-            let tid = child.meta.get("toolUseId").and_then(|v| v.as_str());
+            let tid = child
+                .meta
+                .get("toolUseId")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty());
             let parent_events = store.session_events(parent).unwrap_or_default();
             subagent_terminated_at(tid, &parent_events, last, now, terminate_ms)
         };
@@ -287,7 +302,12 @@ pub fn assemble(
             .file_stem()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        let member = team_index.team_for_member_stem(&stem);
+        // The sidecar states the membership outright; the stem parse is the fallback
+        // for transcripts written in the older `agent-<name>@session-<hex>` shape.
+        let meta_str = |k: &str| s.meta.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+        let member = team_index
+            .team_for_member(meta_str("teamName"), meta_str("memberName"))
+            .or_else(|| team_index.team_for_member_stem(&stem));
         agent.team = match &member {
             Some((team, name)) => Some(super::teams::radar_team(team, Some(name), false)),
             None => team_index.team_for_lead(&s.external_id).map(|team| {
@@ -335,6 +355,25 @@ pub fn assemble(
 
 fn is_subagent_transcript_path(path: &Path) -> bool {
     crate::ingest::claude_code::is_subagent_session_path(path)
+}
+
+/// An in-process agent-team member, from the facts its own sidecar recorded. Either
+/// signal alone is sufficient: `taskKind` is explicit, and a non-empty `teamName` is
+/// only ever written for a roster member.
+fn is_in_process_teammate(s: &Session) -> bool {
+    s.meta.get("taskKind").and_then(|v| v.as_str()) == Some("in_process_teammate")
+        || s.meta
+            .get("teamName")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| !t.is_empty())
+}
+
+/// Was this subagent dispatched by a `Task`/`Agent` call we can match a result to?
+fn has_tool_use_id(s: &Session) -> bool {
+    s.meta
+        .get("toolUseId")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| !t.is_empty())
 }
 
 /// Walk a session's parent-chain to its root and report whether that root is
@@ -1110,6 +1149,84 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         assert!(ok, "touch -t must set the fixture's old mtime");
+    }
+
+    /// Regression, on the exact shape of a live agent team: an in-process TEAMMATE
+    /// carries no `toolUseId`, because the lead spawns it when the roster is built
+    /// rather than through a `Task` call, so no tool-result will ever be logged for
+    /// it. That left only the 90s file-silence backstop, and a teammate is quiet for
+    /// far longer than 90s whenever the lead is working or it is waiting its turn: a
+    /// live 17-member team imploded to nothing and the lead rendered childless. A
+    /// PLAIN subagent in the same silence is still terminated, so the exemption is
+    /// scoped to the one case that has no completion signal at all.
+    #[test]
+    fn an_idle_in_process_teammate_stays_nested_while_a_plain_subagent_still_retires() {
+        let dir = tempfile::tempdir().unwrap();
+        let subs = dir.path().join("lead-session/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        let mate_path = subs.join("agent-amev-l1-253c6f98.jsonl");
+        let plain_path = subs.join("agent-aplain-77.jsonl");
+        for p in [&mate_path, &plain_path] {
+            std::fs::write(p, "{}\n").unwrap();
+            set_old_mtime(p, 3600);
+        }
+
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let claude = |id: &str, ext: &str, path: PathBuf, meta: serde_json::Value| Session {
+            id: id.into(),
+            harness: Harness::ClaudeCode,
+            external_id: ext.into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now - chrono::Duration::seconds(7200),
+            ended_at: None,
+            source_path: path,
+            raw_hash: 0,
+            ingested_at: now,
+            meta,
+        };
+        let lead = claude(
+            "lead",
+            "lead-ext",
+            dir.path().join("lead-session.jsonl"),
+            serde_json::json!({}),
+        );
+        let mate = claude(
+            "mate",
+            "mate-ext",
+            mate_path,
+            serde_json::json!({
+                "agentType": "mev-l1",
+                "memberName": "mev-l1",
+                "teamName": "session-9854a095",
+                "taskKind": "in_process_teammate",
+                "spawnDepth": 0,
+            }),
+        );
+        let plain = claude("plain", "plain-ext", plain_path, serde_json::json!({}));
+        for s in [&lead, &mate, &plain] {
+            store.upsert_session_batch(s, &[], &[], 0).unwrap();
+        }
+        store.link_child_session("mate", "lead").unwrap();
+        store.link_child_session("plain", "lead").unwrap();
+
+        let reg = claude_registry(&[(4242, "lead-ext")]); // only the lead holds a PID
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+
+        let mate = state
+            .agents
+            .iter()
+            .find(|a| a.id == "mate")
+            .expect("an idle teammate must stay in the forest");
+        assert_eq!(mate.parent_id.as_deref(), Some("lead"));
+        assert_ne!(mate.status, "terminated", "a quiet teammate is not a finished one");
+        assert!(
+            state.agents.iter().all(|a| a.id != "plain"),
+            "a plain subagent silent past the backstop is still retired"
+        );
+        let lead = state.agents.iter().find(|a| a.id == "lead").unwrap();
+        assert_eq!(lead.child_count, 1, "the lead keeps the teammate as a child");
     }
 
     /// Regression: a Codex Desktop subagent silent far longer than the Claude 90s file

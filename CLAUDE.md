@@ -92,9 +92,14 @@ middle, the selected target's readout on the right.
   the R3F scene.
 - **Render rate has THREE states, not two** (`frameloopFor`): minimized is `never`,
   focused is `always`, and visible-but-blurred is `demand` paced by
-  `BackgroundFrameTick` at `BACKGROUND_FPS`. Blurred is WARDEN's NORMAL state (it sits
-  open behind the work it watches), and rendering it at display rate cost about half a
-  core across the WebKit GPU process and WindowServer. Focus comes from Tauri's
+  `BackgroundFrameTick` at `BACKGROUND_FPS` (30). Blurred is WARDEN's NORMAL state (it
+  sits open behind the work it watches), and rendering it at display rate cost about
+  half a core across the WebKit GPU process and WindowServer. Blurred is also the state
+  the user LOOKS at most, so the paced rate is a legibility number, not only a cost
+  one: 8fps read as broken. The pacer rides `requestAnimationFrame`, never
+  `setInterval`, for both halves of that trade. Every tick lands on a real display
+  refresh (an interval beats against the refresh and the drift reads as judder), and a
+  fully occluded window stops getting rAF, so it pays nothing at all. Focus comes from Tauri's
   `onFocusChanged` through the bridge, never from `window.onblur` alone: as with
   `warden_hotkey`, the packaged app moves its window with native calls the webview does
   not see. Focus is a RATE input only and must never gate whether the radar updates. A
@@ -122,7 +127,9 @@ rendering a palette the app has already moved off.
 - **Harness theme is one source of truth**: Claude is emerald, Codex is violet. Always pair colour with a glyph and label (color-blind a11y).
 - **Adapter contract**: adding a harness is one adapter, zero downstream changes. An unknown record degrades gracefully; schema drift never drops a session.
 - **Watermarks are byte-offset.** FSEvents coalesces rapid writes: on each event, seek to the saved offset and read to EOF; do not trust event counts.
-- **Honest viz**: every globe and flare maps to a REAL signal (session liveness, context-token weight, subagent hierarchy). Never fabricate a count or a link.
+- **Honest viz**: every globe and flare maps to a REAL signal (session liveness, context-token weight, subagent hierarchy). Never fabricate a count or a link. A sidecar that reports `spawnDepth >= 2` or names a `parentAgentId` was spawned by another SUBAGENT, so it must never fall back onto the root: the root is its ancestor, not its parent, and an unparented globe beats a wrong edge.
+- **The subagent sidecar is the source of nesting AND membership.** Every subagent of a session lands in one flat `<root>/subagents/` directory however deep it really is, so the path can never carry the tree. `parentAgentId` names the spawner, `spawnDepth` states the level, and `teamName` + `name` state team membership (the filename stopped carrying it: members are `agent-a<name>-<hex>`, not `agent-<name>@session-<hex>`). An in-process teammate has no `toolUseId` and its parent never logs a tool-result for it, so the 90s file-silence backstop must not apply to it: its lifecycle is the lead's, which `root_is_open` already enforces.
+- **Position never depends on activity, with one exception: leaving.** A terminal agent stops holding a slot on the board the frame it goes terminal (`boardAgents`), so its siblings close ranks as it implodes rather than 5s later when the backend finally drops it. The filter lives INSIDE `layoutRadarScene` so every consumer still computes one identical board.
 - **FSD layering (frontend)**: imports point DOWN only; no sibling-module imports; `dev/` is exempt. Use the `@/` alias; colocate tests; no app-wide barrels.
 - **Rust module form**: `name.rs` + `name/` with a slim façade re-exporting a narrow public API (not a glob `pub use *`); cross-submodule internals are `pub(crate)`.
 - **No production `unwrap()`**: clippy denies it (`unwrap_used = "deny"`); use `.expect("invariant")` for true invariants and `?` to propagate. Tests are exempt. `anyhow` everywhere.
