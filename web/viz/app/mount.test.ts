@@ -19,7 +19,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mountWarRoom, unmountWarRoom } from './mount';
 import { RADAR_VISIBLE_PULL_MS, activeFor } from '@/viz/views/war-room/WarRoom';
-import { BACKGROUND_FPS, frameloopFor } from '@/viz/shared/scene/frameloop';
+import { backgroundTickDue, BACKGROUND_FPS, frameloopFor } from '@/viz/shared/scene/frameloop';
 
 afterEach(() => {
   // Reset module-level mount singletons so each case starts clean.
@@ -129,8 +129,32 @@ describe('frameloopFor: an unfocused window renders paced, not at display rate',
     }
   });
 
-  it('keeps the background rate low enough to matter but high enough to read', () => {
-    expect(BACKGROUND_FPS).toBeLessThanOrEqual(12);
-    expect(BACKGROUND_FPS).toBeGreaterThanOrEqual(4);
+  // The bound that matters is the LOWER one. A blurred window is the one the user
+  // stares at while working in another app, and the first version of this fix paced it
+  // at 8fps, which reads as a stutter rather than as a saving. 30 is the floor for
+  // motion that still looks continuous; the upper bound keeps it a fraction of a
+  // 120Hz display rate, which is what made the unpaced version expensive.
+  it('paces the background low enough to matter but high enough to look continuous', () => {
+    expect(BACKGROUND_FPS).toBeGreaterThanOrEqual(30);
+    expect(BACKGROUND_FPS).toBeLessThanOrEqual(60);
+  });
+
+  it('fires the first paced tick immediately, then on the period', () => {
+    expect(backgroundTickDue(Number.NaN, 30)).toBe(true);
+    expect(backgroundTickDue(1000 / 30, 30)).toBe(true);
+    expect(backgroundTickDue(0, 30)).toBe(false);
+    expect(backgroundTickDue(5, 30)).toBe(false);
+  });
+
+  // The judder guard: at 30fps on a 60Hz panel the period is exactly two refreshes, so
+  // a strict `>=` loses to float jitter and the tick slips a whole refresh. A tick that
+  // is a hair early must still count, or the rate alternates 30/20/30/20.
+  it('accepts a tick that lands a hair before the nominal period', () => {
+    const period = 1000 / 30;
+    expect(backgroundTickDue(period - 0.001, 30)).toBe(true);
+    // Two refreshes on a 60Hz panel, which is the real cadence this has to catch.
+    expect(backgroundTickDue(2 * (1000 / 60), 30)).toBe(true);
+    // ...but one refresh short is genuinely early and must not fire.
+    expect(backgroundTickDue(1000 / 60, 30)).toBe(false);
   });
 });
