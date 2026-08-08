@@ -93,6 +93,70 @@ function makeNode(agent: RadarAgent, position: Vec3): LayoutNode {
   };
 }
 
+/** Terminal = the agent is leaving. A closed root or a finished subagent. */
+function isTerminalStatus(status: RadarAgent['status']): boolean {
+  return status === 'closed' || status === 'terminated';
+}
+
+/**
+ * The agents the board reserves SPACE for.
+ *
+ * A terminal agent is imploding, and the backend keeps emitting it for a grace window
+ * (`WARDEN_RADAR_TERMINATE_GRACE_MS`, 5s) so the face has time to play that implosion.
+ * Laying it out for the whole window meant its slot stayed reserved long after the
+ * globe had collapsed to nothing, so a finished subagent left a visible hole and its
+ * siblings only closed ranks 5 SECONDS later, in one late slide. Dropping it here
+ * starts the reflow on the same frame the implosion starts: the survivors glide into
+ * the gap as the globe shrinks out of it, which is the one moment the movement is
+ * motivated. (Nothing pops: the renderer keeps drawing an imploding node from its last
+ * cached layout position until the collapse finishes, see `RadarForest`.)
+ *
+ * A terminal agent with a LIVE descendant keeps its slot. Dropping it would orphan a
+ * running subagent onto a rail of its own and throw it across the board, which is a
+ * far bigger jump than the hole it was meant to close.
+ *
+ * Pure and exported so the reflow rule is unit-tested directly.
+ */
+export function boardAgents(agents: RadarAgent[]): RadarAgent[] {
+  const byId = new Map(agents.map((a) => [a.id, a]));
+  const childIds = new Map<string, string[]>();
+  for (const a of agents) {
+    const pid = a.parentId;
+    if (!pid || pid === a.id || !byId.has(pid)) continue;
+    const list = childIds.get(pid);
+    if (list) list.push(a.id);
+    else childIds.set(pid, [a.id]);
+  }
+
+  // keep(a) = a is not terminal, OR some descendant of a is not terminal.
+  const decided = new Map<string, boolean>();
+  const walking = new Set<string>();
+  const keep = (id: string): boolean => {
+    const cached = decided.get(id);
+    if (cached !== undefined) return cached;
+    const agent = byId.get(id);
+    if (!agent) return false;
+    // A malformed parent cycle must not hang the layout; an unresolved node in one
+    // reserves no space, exactly as if it had no live descendants.
+    if (walking.has(id)) return false;
+    walking.add(id);
+    let alive = !isTerminalStatus(agent.status);
+    if (!alive) {
+      for (const child of childIds.get(id) ?? []) {
+        if (keep(child)) {
+          alive = true;
+          break;
+        }
+      }
+    }
+    walking.delete(id);
+    decided.set(id, alive);
+    return alive;
+  };
+
+  return agents.filter((a) => keep(a.id));
+}
+
 /**
  * Lay out the live forest as an abacus board. Roots are deterministically ordered
  * (by id), grouped into per-folder rails stacked top to bottom, and placed as beads
@@ -101,7 +165,7 @@ function makeNode(agent: RadarAgent, position: Vec3): LayoutNode {
  * orphan renders solo, no dangling edge).
  */
 export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
-  const agents = model.agents;
+  const agents = boardAgents(model.agents);
   const byId = new Map(agents.map((a) => [a.id, a]));
 
   // A parentId only RESOLVES if the parent is present AND not flat. A flat parent
@@ -157,7 +221,9 @@ export function layoutRadarScene(model: RadarSceneModel): RadarLayout {
   // Group roots into rails. `roots` is already id-sorted (deterministic); a rail
   // appears in the order its first root appears, and holds its members in that
   // same order. Position never depends on activity, so a folder never jumps when
-  // an agent inside it changes state (spatial stability).
+  // an agent inside it changes state (spatial stability). The single exception is
+  // LEAVING: a terminal agent stops holding a slot (see `boardAgents`), because the
+  // alternative is a hole in the board that stays open for the whole grace window.
   const railOrder: string[] = [];
   const railMembers = new Map<string, RadarAgent[]>();
   for (const r of roots) {

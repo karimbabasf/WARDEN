@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { layoutRadarScene, radarRadius } from './radarLayout';
+import { boardAgents, layoutRadarScene, radarRadius } from './radarLayout';
 import type { RadarAgent, RadarSceneModel } from '@/viz/shared/types/radarTypes';
 
 function agent(partial: Partial<RadarAgent> & Pick<RadarAgent, 'id'>): RadarAgent {
@@ -416,13 +416,14 @@ describe('layout stability: dropping a node is NOT a local change', () => {
   const xOf = (m: RadarSceneModel, id: string) =>
     layoutRadarScene(m).nodes.find((n) => n.id === id)!.position.x;
 
-  it('MOVES the parent when a finished child is filtered out (a parent centres over its children)', () => {
-    const before = xOf(full, 'root');
-    const after = xOf(withoutTerminated, 'root');
-    expect(after).not.toBeCloseTo(before, 3);
-    // Not a rounding wobble: it is most of a globe's width, enough to slide the
-    // globe out from under the camera pose that was framing it.
-    expect(Math.abs(after - before)).toBeGreaterThan(0.5);
+  it('lays out the same board whether or not a caller pre-filters the finished child', () => {
+    // This is the part that could never work as a LOCAL filter: a parent centres over
+    // its children, so dropping one moves the parent by most of a globe's width, and
+    // a consumer that filtered while another did not framed a position the globe did
+    // not occupy. The filter therefore lives inside the layout (`boardAgents`), which
+    // makes the two inputs indistinguishable instead of merely consistent.
+    expect(xOf(full, 'root')).toBeCloseTo(xOf(withoutTerminated, 'root'), 10);
+    expect(xOf(full, 'kid-a')).toBeCloseTo(xOf(withoutTerminated, 'kid-a'), 10);
   });
 
   it('keeps every position identical when the SAME model is laid out twice', () => {
@@ -433,14 +434,109 @@ describe('layout stability: dropping a node is NOT a local change', () => {
     expect(a).toEqual(b);
   });
 
-  it('does not move a live sibling when another agent merely CHANGES STATUS', () => {
-    // Position never depends on activity: the same agents in the same folders lay
-    // out identically whatever they are doing.
+  it('does not move a live sibling when another agent changes status WITHOUT leaving', () => {
+    // Position never depends on activity: working, idle, back to working, the same
+    // agents in the same folders lay out identically. Only LEAVING is an exception.
     const busy: RadarSceneModel = {
       ...full,
-      agents: full.agents.map((a) => ({ ...a, status: 'idle' as const })),
+      agents: full.agents.map((a) =>
+        a.status === 'terminated' ? a : { ...a, status: 'idle' as const },
+      ),
     };
     expect(xOf(busy, 'root')).toBeCloseTo(xOf(full, 'root'), 10);
     expect(xOf(busy, 'kid-a')).toBeCloseTo(xOf(full, 'kid-a'), 10);
+  });
+
+  it('reflows exactly once, on the crossing into terminal', () => {
+    // The deliberate exception, and the whole point of the fix: the survivors move
+    // when the globe starts imploding, and then they are already where they will be
+    // when the backend drops it, so there is never a second late slide.
+    const allLive: RadarSceneModel = {
+      ...full,
+      agents: full.agents.map((a) => ({ ...a, status: 'working' as const })),
+    };
+    expect(xOf(allLive, 'root')).not.toBeCloseTo(xOf(full, 'root'), 3);
+    expect(xOf(full, 'root')).toBeCloseTo(xOf(withoutTerminated, 'root'), 10);
+  });
+});
+
+describe('boardAgents: a leaving agent stops holding its slot', () => {
+  const board = (agents: RadarAgent[]) => boardAgents(agents).map((a) => a.id);
+
+  it('keeps every non-terminal agent', () => {
+    const agents = [
+      agent({ id: 'a', status: 'working' }),
+      agent({ id: 'b', status: 'idle' }),
+    ];
+    expect(board(agents)).toEqual(['a', 'b']);
+  });
+
+  it('drops a finished subagent and a closed root', () => {
+    const agents = [
+      agent({ id: 'root' }),
+      agent({ id: 'done', parentId: 'root', depth: 1, status: 'terminated' }),
+      agent({ id: 'dead', status: 'closed' }),
+    ];
+    expect(board(agents)).toEqual(['root']);
+  });
+
+  it('keeps a terminal agent that still has a LIVE descendant', () => {
+    // Dropping it would promote the running sub-subagent to a solo root and throw it
+    // across the board: a far worse jump than the gap it was meant to close.
+    const agents = [
+      agent({ id: 'root' }),
+      agent({ id: 'mid', parentId: 'root', depth: 1, status: 'terminated' }),
+      agent({ id: 'deep', parentId: 'mid', depth: 2, status: 'working' }),
+    ];
+    expect(board(agents)).toEqual(['root', 'mid', 'deep']);
+  });
+
+  it('drops a whole terminal subtree at once', () => {
+    const agents = [
+      agent({ id: 'root' }),
+      agent({ id: 'mid', parentId: 'root', depth: 1, status: 'terminated' }),
+      agent({ id: 'deep', parentId: 'mid', depth: 2, status: 'terminated' }),
+    ];
+    expect(board(agents)).toEqual(['root']);
+  });
+
+  it('survives a malformed parent cycle instead of hanging', () => {
+    const agents = [
+      agent({ id: 'x', parentId: 'y', status: 'terminated' }),
+      agent({ id: 'y', parentId: 'x', status: 'terminated' }),
+      agent({ id: 'z', status: 'working' }),
+    ];
+    expect(board(agents)).toEqual(['z']);
+  });
+
+  it('reclaims the gap on the frame the sibling terminates, not when it is dropped', () => {
+    // The actual defect: the backend keeps emitting a finished subagent as
+    // `terminated` for a 5s grace window so the implode can play. Laying it out for
+    // that whole window is what made the survivors sit still and then slide 5s later.
+    const live: RadarSceneModel = {
+      generatedAt: 'T0',
+      agents: [
+        agent({ id: 'root', childCount: 2 }),
+        agent({ id: 'kid-a', parentId: 'root', depth: 1 }),
+        agent({ id: 'kid-b', parentId: 'root', depth: 1 }),
+      ],
+    };
+    const finishing: RadarSceneModel = {
+      ...live,
+      agents: live.agents.map((a) => (a.id === 'kid-a' ? { ...a, status: 'terminated' as const } : a)),
+    };
+    // ...and the state the backend reaches 5s later, once it drops the agent entirely.
+    const dropped: RadarSceneModel = {
+      ...live,
+      agents: live.agents.filter((a) => a.id !== 'kid-a'),
+    };
+
+    const xIn = (m: RadarSceneModel, id: string) =>
+      layoutRadarScene(m).nodes.find((n) => n.id === id)!.position.x;
+
+    expect(xIn(finishing, 'kid-b')).not.toBeCloseTo(xIn(live, 'kid-b'), 3);
+    // The board on termination is already the board after the drop: no second shift.
+    expect(xIn(finishing, 'kid-b')).toBeCloseTo(xIn(dropped, 'kid-b'), 10);
+    expect(xIn(finishing, 'root')).toBeCloseTo(xIn(dropped, 'root'), 10);
   });
 });

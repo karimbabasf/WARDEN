@@ -18,7 +18,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import { Environment, Lightformer, Wireframe, Html } from '@react-three/drei';
 import * as THREE from 'three';
-import type { LayoutNode, OrbLayout } from '@/viz/shared/types/orbTypes';
+import type { LayoutNode, OrbLayout, OrbLink } from '@/viz/shared/types/orbTypes';
 import type { RadarAgent, RadarSceneModel } from '@/viz/shared/types/radarTypes';
 import { layoutRadarScene, type RadarCluster } from './radarLayout';
 import { radarHarness } from './radarTheme';
@@ -167,6 +167,18 @@ let dotCache: THREE.Texture | null = null;
 const dotTexture = () => (dotCache ??= radialTexture(48, [[0, 1], [0.4, 0.75], [1, 0]]));
 
 // ── one live agent globe — lattice shell + crystal heart, heat-coloured ────────
+/**
+ * Where every mounted globe ACTUALLY is this frame, id → world position.
+ *
+ * The layout hands out target positions; a globe damps toward its target over about
+ * 0.75s. Anything that has to stay attached to a globe (today: the parent→child
+ * tethers) needs the animated value, not the target, or it arrives first and hangs in
+ * space until the globe catches up. Written by each globe in its own `useFrame` and
+ * read by `RadarLinks` in the same frame: a plain mutable Map, never state, so
+ * publishing a position can never trigger a render.
+ */
+export type LivePositions = Map<string, { x: number; y: number; z: number }>;
+
 function RadarGlobe({
   node,
   selected,
@@ -177,6 +189,7 @@ function RadarGlobe({
   reduced = false,
   interactive = true,
   lifecycleRef,
+  livePosRef,
   onHover,
   onLeave,
   onSelect,
@@ -199,6 +212,8 @@ function RadarGlobe({
   interactive?: boolean;
   /** Live read of the reconciler's per-id scale (no re-render on tween). */
   lifecycleRef: MutableRefObject<LifecycleMap>;
+  /** Write-side of the shared live-position registry (see `LivePositions`). */
+  livePosRef: MutableRefObject<LivePositions>;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -273,6 +288,19 @@ function RadarGlobe({
   // channel. `glow` is the damped emissive target; `colorDim` the legend filter.
   const sim = useRef({ scale: 0.0001, glow: 0.5, live: working ? 1 : 0, dim: 0, colorDim: 0, pos: { ...node.position } });
 
+  // Publish this globe's ANIMATED position into the shared registry, and take the
+  // entry back out when it unmounts so a dead id can never anchor a tether. One
+  // object per id, mutated in place: the registry is read every frame by RadarLinks.
+  // Keyed on the id ALONE: a re-layout must not re-seed the entry, or the tether would
+  // jump to the new target a beat before the globe damps its way there.
+  useEffect(() => {
+    const reg = livePosRef.current;
+    const id = node.id;
+    return () => {
+      reg.delete(id);
+    };
+  }, [livePosRef, node.id]);
+
   useFrame((state, dtRaw) => {
     const dt = Math.min(dtRaw, 0.05);
     const t = state.clock.elapsedTime;
@@ -328,7 +356,21 @@ function RadarGlobe({
     // gentle synced swell of the slow pulse instead (smooth, ~±4.5%).
     const breathe = 1 + idleBreath * (1 - liveK) + pulse * 0.045;
     group.current.scale.setScalar(s.scale * breathe);
-    group.current.position.set(s.pos.x, s.pos.y + Math.sin(t * 0.6 + seed * 6.28) * 0.05, s.pos.z);
+    const bobY = s.pos.y + Math.sin(t * 0.6 + seed * 6.28) * 0.05;
+    group.current.position.set(s.pos.x, bobY, s.pos.z);
+    // The tether reads THIS, not the layout target, so a link stays welded to the two
+    // globes it hangs between while they glide (see RadarLinks). Deliberately the
+    // DAMPED position without the idle bob: the bob never stops, so publishing it
+    // would mark every link dirty on every frame and cost the whole board a buffer
+    // upload forever, to chase a 0.05-unit wobble that is inside the globe anyway.
+    const slot = livePosRef.current.get(node.id);
+    if (slot) {
+      slot.x = s.pos.x;
+      slot.y = s.pos.y;
+      slot.z = s.pos.z;
+    } else {
+      livePosRef.current.set(node.id, { x: s.pos.x, y: s.pos.y, z: s.pos.z });
+    }
     // spin: a working globe turns faster. `liveK` is already damped, so the rate
     // GLIDES between resting and working and never snaps on a status flip.
     group.current.rotation.y += dt * globeSpinRate(isRoot, liveK, reduced);
@@ -517,11 +559,14 @@ function RadarLinks({
   layout,
   lifecycleRef,
   goneIdsRef,
+  livePosRef,
   reduced = false,
 }: {
   layout: OrbLayout;
   lifecycleRef: MutableRefObject<LifecycleMap>;
   goneIdsRef: MutableRefObject<Set<string>>;
+  /** Read-side of the live-position registry: where the two globes ACTUALLY are. */
+  livePosRef: MutableRefObject<LivePositions>;
   /** prefers-reduced-motion: the link snaps between drawn and absent, never travels. */
   reduced?: boolean;
 }) {
@@ -593,6 +638,7 @@ function RadarLinks({
     const t = state.clock.elapsedTime;
     const lc = lifecycleRef.current;
     const gone = goneIdsRef.current;
+    const livePos = livePosRef.current;
     const posAttr = lineGeo.getAttribute('position') as THREE.BufferAttribute;
     const colAttr = lineGeo.getAttribute('color') as THREE.BufferAttribute;
     const posArr = posAttr.array as Float32Array;
@@ -612,13 +658,37 @@ function RadarLinks({
       // LENGTH: how far along the parent→child vector the stroke currently reaches.
       const drawn = linkDrawProgress(linkSrcScratch, linkDstScratch, reduced);
       const l = i * stride;
-      if (lastDrawn[i] !== drawn) {
+      const an = i * 6;
+      // WHERE the two ends are. The anchors baked at layout time are the globes'
+      // TARGET positions, but a globe damps its way there over about 0.75s, so a
+      // board that reflows (a subagent finishes, its siblings close ranks) drew every
+      // tether snapped to where its globes were going while the globes were still on
+      // their way. Reading the live registry welds the line to the actual globes; the
+      // baked anchor stays as the fallback for a node that has not rendered a frame.
+      const src = livePos.get(m.sourceId);
+      const dst = livePos.get(m.targetId);
+      const ax = src ? src.x : anchors[an];
+      const ay = src ? src.y : anchors[an + 1];
+      const az = src ? src.z : anchors[an + 2];
+      const bx = dst ? dst.x : anchors[an + 3];
+      const by = dst ? dst.y : anchors[an + 4];
+      const bz = dst ? dst.z : anchors[an + 5];
+      // `anchors` doubles as "what we last drew", so this stays a pure change check:
+      // a settled board still uploads nothing.
+      const moved =
+        ax !== anchors[an] ||
+        ay !== anchors[an + 1] ||
+        az !== anchors[an + 2] ||
+        bx !== anchors[an + 3] ||
+        by !== anchors[an + 4] ||
+        bz !== anchors[an + 5];
+      if (lastDrawn[i] !== drawn || moved) {
         lastDrawn[i] = drawn;
-        const an = i * 6;
-        const ax = anchors[an], ay = anchors[an + 1], az = anchors[an + 2];
-        const dx = (anchors[an + 3] - ax) * drawn;
-        const dy = (anchors[an + 4] - ay) * drawn;
-        const dz = (anchors[an + 5] - az) * drawn;
+        anchors[an] = ax; anchors[an + 1] = ay; anchors[an + 2] = az;
+        anchors[an + 3] = bx; anchors[an + 4] = by; anchors[an + 5] = bz;
+        const dx = (bx - ax) * drawn;
+        const dy = (by - ay) * drawn;
+        const dz = (bz - az) * drawn;
         for (let s = 0; s < SEG; s++) {
           const ta = s / SEG;
           const tb = (s + 1) / SEG;
@@ -827,20 +897,22 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
   const goneIdsRef = useRef<Set<string>>(new Set());
   const [renderTick, setRenderTick] = useState(0);
   const nodeCache = useRef<Map<string, LayoutNode>>(new Map());
-  // ONE layout, from the WHOLE model. This used to lay out `radarModelWithoutGone`,
-  // which quietly made the forest's geometry a different board from the one every
-  // consumer OUTSIDE the canvas computes (WarRoom lays out the full model to derive
-  // `selectedNode`, `sceneBounds` and `subtreeBounds`). The divergence was not
-  // cosmetic: `placeSubtree` centres a parent over its children, so the frame a
-  // subagent finished, dropping it re-centred its parent sideways, and the camera
-  // then framed a position the globe no longer occupied (measured: a root sliding
+  // Live animated positions, published by the globes and read by the tethers.
+  const livePosRef = useRef<LivePositions>(new Map());
+  // ONE layout for the whole app. It used to be computed here over a locally-filtered
+  // model (`radarModelWithoutGone`), which quietly made the forest's geometry a
+  // different board from the one every consumer OUTSIDE the canvas computes (WarRoom
+  // derives `selectedNode`, `sceneBounds` and `subtreeBounds` from its own call). The
+  // divergence was not cosmetic: `placeSubtree` centres a parent over its children, so
+  // the frame a subagent finished, dropping it re-centred its parent sideways, and the
+  // camera framed a position the globe no longer occupied (measured: a root sliding
   // 0.88 world units, about 235px, straight under the fleet rack).
   //
-  // Dropping a dead node from the LAYOUT was never what unmounted it anyway:
-  // `renderNodes` below filters `goneIdsRef` out of the mount set, which is what
-  // actually removes the globe and its hit-sphere. So laying out the full model
-  // costs nothing and buys back the module's own stated law: position never depends
-  // on activity, and a globe never jumps because a sibling changed state.
+  // The rule that came out of that is one board, and it is why the terminal-agent
+  // filter now lives INSIDE `layoutRadarScene` (`boardAgents`) rather than here: every
+  // caller reflows on the same frame, so the camera still frames what is on screen.
+  // Unmounting is still a separate concern: `renderNodes` below filters `goneIdsRef`
+  // out of the mount set, which is what actually removes a globe and its hit-sphere.
   const layout = useMemo(() => layoutRadarScene(model), [model]);
   // Intentional mid-render write: append-only + idempotent. We record each live
   // node's latest layout so an imploding node keeps its last position after it
@@ -877,6 +949,22 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [layout, ghostNodes, renderTick],
   );
+  // A ghost has left the layout, so its tether left `layout.links` with it, and the
+  // stroke would blink out instead of being REELED HOME into the parent (spec §8).
+  // Rebuild that one edge from the ghost's own cached agent while both ends are still
+  // on screen; `linkDrawProgress` then retracts it exactly as before.
+  const renderLayout = useMemo(() => {
+    if (ghostNodes.length === 0) return { ...layout, nodes: renderNodes };
+    const mounted = new Set(renderNodes.map((n) => n.id));
+    const ghostLinks: OrbLink[] = [];
+    for (const g of ghostNodes) {
+      const parentId = g.radarAgent?.parentId;
+      if (parentId && mounted.has(parentId)) {
+        ghostLinks.push({ source: parentId, target: g.id, kind: 'agent_issue' });
+      }
+    }
+    return { ...layout, nodes: renderNodes, links: [...layout.links, ...ghostLinks] };
+  }, [layout, ghostNodes, renderNodes]);
   // Pin the hover card to whichever globe is currently rendered (live or a
   // still-imploding ghost) so it tracks the node even mid-lifecycle.
   const hoveredNode = useMemo(
@@ -898,7 +986,7 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
         <group onPointerMissed={onClear}>
           {/* the ONLY linking cue: a subtle parent -> child tether per subagent,
               drawn out and reeled back in with the child it belongs to */}
-          <RadarLinks layout={layout} lifecycleRef={lifecycleRef} goneIdsRef={goneIdsRef} reduced={reduced} />
+          <RadarLinks layout={renderLayout} lifecycleRef={lifecycleRef} goneIdsRef={goneIdsRef} livePosRef={livePosRef} reduced={reduced} />
           {renderNodes.map((node) => (
             <RadarGlobe
               key={node.id}
@@ -915,6 +1003,7 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
               reduced={reduced}
               interactive={interactive}
               lifecycleRef={lifecycleRef}
+              livePosRef={livePosRef}
               onHover={onHover}
               onLeave={onLeave}
               onSelect={onSelect}
