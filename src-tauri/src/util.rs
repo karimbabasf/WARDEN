@@ -165,6 +165,20 @@ pub fn radar_terminate_grace_ms() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(5_000)
 }
+
+/// How long an in-process TEAMMATE must be quiet before it is treated as finished,
+/// and then ONLY while its lead is idle and its own last turn has completed (see
+/// `assemble`). A teammate has no tool-result and no PID, so it used to ride the lead's
+/// whole lifetime and only clear when the lead PROCESS exited; for a monitor left open
+/// all day that meant a finished team lingered forever. The window is the grace on top
+/// of the lead-idle + member-idle gate, never the sole signal: a member is quiet between
+/// turns while the lead works, which is why the gate, not just the timer, decides.
+pub fn radar_teammate_done_ms() -> u64 {
+    std::env::var("WARDEN_RADAR_TEAMMATE_DONE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60_000)
+}
 pub fn default_codex_archived_sessions() -> PathBuf {
     std::env::var("WARDEN_CODEX_ARCHIVED_SESSIONS")
         .map(|s| expand_tilde(&s))

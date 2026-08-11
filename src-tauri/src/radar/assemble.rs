@@ -154,6 +154,7 @@ pub fn assemble(
     // idle and never resurrects.
     let terminate_ms = crate::util::radar_subagent_terminate_ms();
     let grace_ms = crate::util::radar_terminate_grace_ms();
+    let teammate_done_ms = crate::util::radar_teammate_done_ms();
     let mut terminated_now: HashSet<String> = HashSet::new();
     let mut terminated_drop: HashSet<String> = HashSet::new();
     for id in &keep {
@@ -180,16 +181,41 @@ pub fn assemble(
                 codex_subagent_completed_at(&store.session_events(id).unwrap_or_default())
             }
         } else if is_in_process_teammate(child) && !has_tool_use_id(child) {
-            // An in-process TEAMMATE is spawned when the roster is built, not by a Task
-            // call, so no tool-result will ever be logged for it and the only signal
-            // left would be the 90s file-silence backstop. That backstop is wrong here
-            // for exactly the reason it is wrong for a Codex subagent: a teammate sits
-            // quiet for minutes at a stretch while the lead works or while it waits its
-            // turn, so applying it implodes a live team into an empty board. Its real
-            // lifecycle is the LEAD's, and that is already enforced upstream: the open
-            // forest keeps a subagent only while the ROOT of its chain is open, so the
-            // whole team drops the moment the lead session closes.
-            None
+            // An in-process TEAMMATE has no tool-result and no PID, so it used to ride the
+            // lead's whole lifetime: it left the board only when the lead PROCESS exited.
+            // For a monitor left open all day that means a finished team lingers forever,
+            // which is the "you cannot tell when a subagent is done" complaint. The 90s
+            // file-silence backstop is still wrong here (a teammate is quiet for minutes
+            // while the lead works or while it waits its turn, so silence alone would
+            // implode a live team). What IS honest is the AND of three facts, none safe on
+            // its own:
+            //   (1) the LEAD is no longer generating. A member is quiet BETWEEN TURNS while
+            //       the lead works, so a working lead keeps every member; only an idle lead
+            //       means the run is not mid-flight.
+            //   (2) the member's own last turn COMPLETED, not dangling a tool call.
+            //       `agent_status` promotes a mid-tool member to Working, so an Idle verdict
+            //       is exactly "finished its turn, not paused inside a long call".
+            //   (3) it has then stayed quiet past the grace window.
+            // Recomputed from live state every pass, so a member that speaks again simply
+            // reappears; nothing here is persisted.
+            let lead_working = by_id
+                .get(parent.as_str())
+                .and_then(|lead| claude_status.get(&lead.external_id))
+                .map(|st| matches!(st, AgentStatus::Working))
+                .unwrap_or(false);
+            let member_idle = matches!(
+                agent_status(store, child, &claude_status, &mtime_secs_ago, now),
+                AgentStatus::Idle
+            );
+            match last {
+                Some(last_ts) if !lead_working && member_idle => {
+                    let quiet_ms =
+                        now.signed_duration_since(last_ts).num_milliseconds().max(0) as u64;
+                    (quiet_ms > teammate_done_ms)
+                        .then(|| last_ts + chrono::Duration::milliseconds(teammate_done_ms as i64))
+                }
+                _ => None,
+            }
         } else {
             let tid = child
                 .meta
@@ -546,6 +572,22 @@ mod tests {
             std::fs::write(
                 dir.path().join(format!("{pid}.json")),
                 serde_json::json!({ "pid": pid, "sessionId": sid, "cwd": "/work" }).to_string(),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    /// Like [`claude_registry`], but with an explicit per-session `status` ("busy" →
+    /// Working, anything else → Idle), for tests where a LEAD's working/idle verdict is
+    /// what decides a teammate's fate.
+    fn claude_registry_status(entries: &[(u32, &str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (pid, sid, status) in entries {
+            std::fs::write(
+                dir.path().join(format!("{pid}.json")),
+                serde_json::json!({ "pid": pid, "sessionId": sid, "cwd": "/work", "status": status })
+                    .to_string(),
             )
             .unwrap();
         }
@@ -1153,12 +1195,14 @@ mod tests {
 
     /// Regression, on the exact shape of a live agent team: an in-process TEAMMATE
     /// carries no `toolUseId`, because the lead spawns it when the roster is built
-    /// rather than through a `Task` call, so no tool-result will ever be logged for
-    /// it. That left only the 90s file-silence backstop, and a teammate is quiet for
-    /// far longer than 90s whenever the lead is working or it is waiting its turn: a
-    /// live 17-member team imploded to nothing and the lead rendered childless. A
-    /// PLAIN subagent in the same silence is still terminated, so the exemption is
-    /// scoped to the one case that has no completion signal at all.
+    /// rather than through a `Task` call, so no tool-result is ever logged for it and
+    /// the 90s file-silence backstop is wrong (a teammate is quiet for minutes WHILE
+    /// THE LEAD WORKS). Here the lead IS working, so every member stays however long it
+    /// has been quiet: a live 17-member team must not implode to a childless lead. A
+    /// PLAIN subagent in the same silence is still terminated by the backstop, so the
+    /// exemption is scoped to the one case with no completion signal of its own. (The
+    /// companion test below covers the other half: once the lead goes idle and a member
+    /// is done and quiet, it is finally retired.)
     #[test]
     fn an_idle_in_process_teammate_stays_nested_while_a_plain_subagent_still_retires() {
         let dir = tempfile::tempdir().unwrap();
@@ -1211,14 +1255,16 @@ mod tests {
         store.link_child_session("mate", "lead").unwrap();
         store.link_child_session("plain", "lead").unwrap();
 
-        let reg = claude_registry(&[(4242, "lead-ext")]); // only the lead holds a PID
+        // The lead holds a PID and is WORKING: a member is quiet between turns while the
+        // lead generates, so a working lead keeps every member on the board.
+        let reg = claude_registry_status(&[(4242, "lead-ext", "busy")]);
         let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
 
         let mate = state
             .agents
             .iter()
             .find(|a| a.id == "mate")
-            .expect("an idle teammate must stay in the forest");
+            .expect("an idle teammate must stay in the forest while its lead works");
         assert_eq!(mate.parent_id.as_deref(), Some("lead"));
         assert_ne!(mate.status, "terminated", "a quiet teammate is not a finished one");
         assert!(
@@ -1227,6 +1273,75 @@ mod tests {
         );
         let lead = state.agents.iter().find(|a| a.id == "lead").unwrap();
         assert_eq!(lead.child_count, 1, "the lead keeps the teammate as a child");
+    }
+
+    /// The other half of the teammate rule, and the one that answers "you cannot tell
+    /// when a subagent is done". Once the LEAD goes idle (the run is not mid-flight) and
+    /// a member has finished its turn and stayed quiet past the window, that member is
+    /// really done and leaves the board, instead of riding the lead until the terminal
+    /// is closed. A member still active stays, so a normal pause never implodes it.
+    #[test]
+    fn an_idle_teammate_under_an_idle_lead_retires_once_quiet_past_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let subs = dir.path().join("lead-session/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        let done_path = subs.join("agent-adone-11.jsonl");
+        let active_path = subs.join("agent-aactive-22.jsonl");
+        std::fs::write(&done_path, "{}\n").unwrap();
+        std::fs::write(&active_path, "{}\n").unwrap();
+        set_old_mtime(&done_path, 3600); // done its turn, quiet far past the window
+        set_old_mtime(&active_path, 3); // still writing: a live member, not a finished one
+
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let mk = |id: &str, ext: &str, path: PathBuf, meta: serde_json::Value| Session {
+            id: id.into(),
+            harness: Harness::ClaudeCode,
+            external_id: ext.into(),
+            project: None,
+            model_ids: vec![],
+            started_at: now - chrono::Duration::seconds(7200),
+            ended_at: None,
+            source_path: path,
+            raw_hash: 0,
+            ingested_at: now,
+            meta,
+        };
+        let teammate = serde_json::json!({
+            "taskKind": "in_process_teammate",
+            "teamName": "session-9854a095",
+            "spawnDepth": 0,
+        });
+        let lead = mk(
+            "lead",
+            "lead-ext",
+            dir.path().join("lead-session.jsonl"),
+            serde_json::json!({}),
+        );
+        let done = mk("done", "done-ext", done_path, teammate.clone());
+        let active = mk("active", "active-ext", active_path, teammate.clone());
+        for s in [&lead, &done, &active] {
+            store.upsert_session_batch(s, &[], &[], 0).unwrap();
+        }
+        store.link_child_session("done", "lead").unwrap();
+        store.link_child_session("active", "lead").unwrap();
+
+        // The lead is alive but IDLE: the run is over, so a finished member is free to go.
+        let reg = claude_registry_status(&[(4242, "lead-ext", "idle")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+
+        assert!(
+            state.agents.iter().all(|a| a.id != "done"),
+            "a member done and quiet under an idle lead must finally retire"
+        );
+        let active = state
+            .agents
+            .iter()
+            .find(|a| a.id == "active")
+            .expect("a member still writing is live, never retired by the quiet window");
+        assert_eq!(active.parent_id.as_deref(), Some("lead"));
+        let lead = state.agents.iter().find(|a| a.id == "lead").unwrap();
+        assert_eq!(lead.child_count, 1, "only the still-live member is a child");
     }
 
     /// Regression: a Codex Desktop subagent silent far longer than the Claude 90s file
