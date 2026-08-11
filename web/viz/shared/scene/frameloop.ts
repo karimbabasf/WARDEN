@@ -25,6 +25,26 @@ export function frameloopFor(hidden: boolean, focused = true): FrameloopMode {
   return focused ? 'always' : 'demand';
 }
 
+// How long a BLUR has to hold before the loop actually drops to the paced rate.
+//
+// Switching `<Canvas frameloop>` is not free: R3F tears down its render loop and
+// stands the other one up, and the paced loop's first frame waits on a fresh rAF.
+// One transition is imperceptible. The problem is that ordinary use of a monitor
+// generates them in pairs and in bursts: clicking WARDEN's window focuses it,
+// clicking back into the editor blurs it, and a click that PASSES THROUGH the
+// window (or a Cmd-Tab that lands somewhere else) produces a blur and a focus a
+// few frames apart. Each one restarted the loop, and the visible result was the
+// scene hitching for a beat every time the window was touched.
+//
+// Holding the blur for a moment collapses every one of those pairs into no
+// transition at all. The cost is bounded and tiny: at most this many extra
+// milliseconds at display rate on a window you really did leave, which is a
+// rounding error against a session that sits blurred for hours.
+//
+// The FOCUS direction is deliberately NOT delayed. Coming back has to be instant,
+// and going up to the full rate is the cheap direction to be wrong about.
+export const BLUR_SETTLE_MS = 400;
+
 // Frames per second for the visible-but-unfocused state.
 //
 // This was 8, picked purely as a cost number, and that was the wrong end of the

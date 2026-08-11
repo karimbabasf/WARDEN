@@ -11,6 +11,15 @@
 // `normalizeRadarState`, so the mock can never drift into a shape production does
 // not produce. There is no backend: `invoke` rejects and the components fall back
 // exactly as they do in the sandbox.
+//
+// `?watch=1` is the exception, and it is stubbed at the lowest possible level for a
+// reason. Watching a peer is the one part of the chrome that is entirely IPC-driven
+// (the peer list, the peer's frame, and therefore the watch popover, the second
+// constellation and the switcher above them), so with no backend it is unreachable
+// in a browser and the layout that state produces could never be checked. The stub
+// fills in `window.__TAURI_INTERNALS__`, which is exactly what the real
+// `@tauri-apps/api` reads, so the components still run their own untouched invoke
+// path and only the answers are fake.
 
 import { createRoot } from 'react-dom/client';
 import { createBridge } from '@/viz/shared/state/bridge';
@@ -162,12 +171,64 @@ const bridge = createBridge(noopListen);
 const el = document.getElementById('war-room-root');
 const params = new URLSearchParams(window.location.search);
 
+// A peer's board, in the redacted `ObservedState` shape the projection really emits:
+// no paths, no titles, no cwd. Deliberately a different size and mix from the local
+// forest so the two constellations are told apart at a glance in a screenshot.
+const PEER_STATE = {
+  generatedAt: new Date(NOW).toISOString(),
+  truncated: false,
+  agents: [
+    { id: 'p1', harness: 'codex', parentId: null, depth: 0, status: 'working', fillPct: 0.44, childCount: 1 },
+    { id: 'p2', harness: 'codex', parentId: 'p1', depth: 1, status: 'working', fillPct: 0.12, childCount: 0 },
+    { id: 'p3', harness: 'claude_code', parentId: null, depth: 0, status: 'idle', fillPct: 0.03, childCount: 0 },
+  ],
+};
+
+const PEER_ROW = {
+  peerId: 'peer-1',
+  hostLabel: 'Warden host',
+  fingerprint: '1a49-1089-43ad-4e6e-11a7-a61b',
+  connected: true,
+  lastFrameAt: new Date(NOW - 4000).toISOString(),
+  error: null,
+};
+
+// `?watch=1` makes the observer flows reachable without a backend: a peer already
+// added and already sending frames. Installed BEFORE mount so the first
+// `observe_list_peers` of the session already resolves.
+if (params.get('watch') === '1') {
+  // `?peer=silent` is a peer that has been added and selected but has sent nothing
+  // yet, and `?peer=error` is one whose connection failed. Both are states the
+  // observer path really produces and neither was reachable in a browser before.
+  const peerMode = params.get('peer') ?? 'live';
+  const answers: Record<string, unknown> = {
+    observe_list_peers: [
+      peerMode === 'error'
+        ? { ...PEER_ROW, connected: false, lastFrameAt: null, error: 'could not reach that machine' }
+        : peerMode === 'silent'
+          ? { ...PEER_ROW, connected: true, lastFrameAt: null }
+          : PEER_ROW,
+    ],
+    observe_peer_state: peerMode === 'live' ? PEER_STATE : null,
+    compact_status: { automation: 'granted', automationRecoverableInSettings: false, armed: [] },
+  };
+  (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
+    invoke: (cmd: string) =>
+      cmd in answers ? Promise.resolve(answers[cmd]) : Promise.reject(new Error(`no stub for ${cmd}`)),
+    transformCallback: (cb: unknown) => cb,
+  };
+}
+
 // `?solo=1` drops every non-Claude agent. A one-harness machine is the common case
 // and it is a DIFFERENT chrome (the filter dock does not render at all when there is
 // nothing to choose between), so it needs its own reachable state.
-const board = params.get('solo') === '1'
-  ? { ...FOREST, agents: FOREST.agents.filter((a) => a.harness === 'claude_code') }
-  : FOREST;
+// `?empty=1` is the cold machine: the radar is live and watching, nothing is running.
+// It is an honest state rather than a failure, so it has to be looked at like one.
+const board = params.get('empty') === '1'
+  ? { ...FOREST, agents: [] }
+  : params.get('solo') === '1'
+    ? { ...FOREST, agents: FOREST.agents.filter((a) => a.harness === 'claude_code') }
+    : FOREST;
 
 if (el) {
   createRoot(el).render(<WarRoom bridge={bridge} />);
@@ -203,5 +264,30 @@ if (el) {
       if (folded === (fold === '1')) return;
       document.querySelector<HTMLButtonElement>(fold === '1' ? '.wd-fleet-fold' : '.wd-fleet-tab')?.click();
     }, 450);
+  }
+
+  // With `?watch=1`, `?dock=open` holds the watch popover open over the rail (the
+  // state that used to tear into the fleet strips) and `?dock=peer` picks the peer,
+  // which closes the popover and leaves the two constellations plus the switcher.
+  // Both are unreachable in a static screenshot without the click.
+  if (params.get('watch') === '1') {
+    const dock = params.get('dock') ?? 'peer';
+    window.setTimeout(() => {
+      document.querySelector<HTMLButtonElement>('.wd-observe-watch-trigger')?.click();
+      if (dock === 'peer') {
+        window.setTimeout(() => {
+          document.querySelector<HTMLButtonElement>('.wd-observe-peer-btn')?.click();
+          // `?view=local` then switches back to your own board, which is the state
+          // that was unreachable before the switcher existed and therefore the one
+          // most worth being able to screenshot.
+          if (params.get('view') === 'local') {
+            window.setTimeout(
+              () => document.querySelectorAll<HTMLButtonElement>('.wd-constellation-seg')[0]?.click(),
+              300,
+            );
+          }
+        }, 250);
+      }
+    }, 500);
   }
 }

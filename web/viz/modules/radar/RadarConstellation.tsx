@@ -20,7 +20,7 @@ import { Environment, Lightformer, Wireframe, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import type { LayoutNode, OrbLayout, OrbLink } from '@/viz/shared/types/orbTypes';
 import type { RadarAgent, RadarSceneModel } from '@/viz/shared/types/radarTypes';
-import { layoutRadarScene, type RadarCluster } from './radarLayout';
+import { layoutRadarScene, type RadarCluster, type RadarLayout } from './radarLayout';
 import { radarHarness } from './radarTheme';
 import { AgentCore } from '@/viz/shared/scene/AgentCore';
 import { StarCatalog } from '@/viz/shared/scene/StarCatalog';
@@ -739,6 +739,18 @@ export type RadarConstellationProps = {
   scaleRef?: { current: number };
   /** Read-only board (a watched peer): no hit-spheres, no hover card, no rail clicks. */
   interactive?: boolean;
+  /**
+   * The board's layout, when the caller has already computed it.
+   *
+   * `layoutRadarScene` is pure over the model, so calling it here AND in the lead
+   * (which needs the same nodes for `sceneBounds`, `selectedNode` and
+   * `subtreeBounds`) computed the identical board twice on every emit, and a third
+   * and fourth time per emit while a peer board was mounted. That is pure waste, and
+   * it lands as a hitch INSIDE the 700ms camera fly, which is what a laggy zoom
+   * actually is. Passing the lead's layout down removes the duplicates without
+   * changing what is drawn: same function, same input, same board.
+   */
+  layout?: RadarLayout;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -874,7 +886,7 @@ function RadarClusterLabels({ clusters, onPick }: { clusters: RadarCluster[]; on
 // the persistent scene shell (WarRoom's SceneShell), so a Habits↔Radar swap only ever
 // remounts this forest (already folded to nothing) and the void never flickers. The
 // standalone dev harness wraps this in `RadarSceneBody`, which adds its own shell.
-export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, interactive = true, onHover, onLeave, onSelect, onClear, onPickFolder }: RadarConstellationProps) {
+export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = null, scaleRef, interactive = true, layout: providedLayout, onHover, onLeave, onSelect, onClear, onPickFolder }: RadarConstellationProps) {
   // The dev harness mounts the radar without a fold; default to a stable scale-1 ref.
   const fallbackScale = useRef(1);
   const sref = scaleRef ?? fallbackScale;
@@ -913,7 +925,11 @@ export function RadarForest({ model, hoveredId, selectedId, emphasisFilter = nul
   // caller reflows on the same frame, so the camera still frames what is on screen.
   // Unmounting is still a separate concern: `renderNodes` below filters `goneIdsRef`
   // out of the mount set, which is what actually removes a globe and its hit-sphere.
-  const layout = useMemo(() => layoutRadarScene(model), [model]);
+  const ownLayout = useMemo(
+    () => (providedLayout ? null : layoutRadarScene(model)),
+    [providedLayout, model],
+  );
+  const layout = providedLayout ?? (ownLayout as RadarLayout);
   // Intentional mid-render write: append-only + idempotent. We record each live
   // node's latest layout so an imploding node keeps its last position after it
   // leaves `model.agents`. Writing the same id twice with the current layout is a

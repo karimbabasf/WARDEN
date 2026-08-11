@@ -22,16 +22,17 @@ import { ApprovalModal } from '@/viz/modules/observe/ApprovalModal';
 import { FilterBar } from './FilterBar';
 import { Breadcrumb } from './Breadcrumb';
 import { FleetRail } from './FleetRail';
-import { layoutRadarScene, isFlatAgent } from '@/viz/modules/radar/radarLayout';
+import { ConstellationSwitcher, type ConstellationTarget } from './ConstellationSwitcher';
+import { layoutRadarScene, isFlatAgent, type RadarLayout } from '@/viz/modules/radar/radarLayout';
 import { PeerConstellation } from '@/viz/modules/radar/PeerConstellation';
-import { peerWorldPlacement } from '@/viz/modules/radar/peerFraming';
+import { peerLayout as layoutPeerScene, peerWorldPlacement } from '@/viz/modules/radar/peerFraming';
 import { observedToScene } from '@/viz/modules/observe/observedToScene';
 import type { ObservedState } from '@/viz/shared/types/observedTypes';
 import type { RadarAgent, RadarSceneModel } from '@/viz/shared/types/radarTypes';
 import type { EmphasisFilter } from '@/viz/shared/lib/emphasis';
 import type { LayoutNode } from '@/viz/shared/types/orbTypes';
 import { subtreeBounds, enclosingBounds, type Bounds } from '@/viz/shared/scene/cameraFraming';
-import { frameloopFor } from '@/viz/shared/scene/frameloop';
+import { frameloopFor, BLUR_SETTLE_MS } from '@/viz/shared/scene/frameloop';
 import { BackgroundFrameTick } from '@/viz/shared/scene/BackgroundFrameTick';
 
 const BG = '#020403';
@@ -65,7 +66,43 @@ export function activeFor(
  * media query below 980px, so the DOM is the only thing that knows the truth.
  * A fixed-position element always reports `offsetParent === null`, so visibility
  * is judged by measured width instead.
+ *
+ * LAYOUT GEOMETRY, NOT PAINTED GEOMETRY, and that distinction is what made the
+ * dive feel broken. `.wd-inspector` slides in over 220ms with
+ * `transform: translateX(16px)`, and `getBoundingClientRect()` reports the
+ * TRANSFORMED box, so a rect read during the slide is 16px out and settles later.
+ * The old code leaned into that with three staggered reads (sync, next frame,
+ * +300ms), which meant selecting a globe published up to three different inset
+ * values. Every one of them is a dependency of CameraRig's pose effects, so each
+ * one restarted the 700ms fly from wherever the camera had got to: the dive
+ * visibly stalled and re-eased twice on the way in. `offsetWidth` / `offsetLeft`
+ * ignore transforms, so the true final geometry is readable on the FIRST frame
+ * and the camera gets one pose and one glide.
  */
+/** The subset of an element the inset rule reads. Untransformed geometry only. */
+export type RailBox = { offsetLeft: number; offsetWidth: number };
+
+/**
+ * The inset rule, as a pure function so the property that matters can be tested:
+ * feeding it the same element mid-transition and at rest returns the SAME numbers.
+ *
+ * `offsetLeft` / `offsetWidth` are layout geometry and ignore transforms, which is
+ * the whole point (see `useRailInsets`). A rect-based read of the right dock changes
+ * while the panel slides its 16px in, and every distinct value it publishes restarts
+ * the camera's fly.
+ */
+export function railInsetsFrom(
+  rail: RailBox | null,
+  dock: RailBox | null,
+  dockOpen: boolean,
+  viewportWidth: number,
+): { left: number; right: number } {
+  const left = rail && rail.offsetWidth > 0 ? rail.offsetLeft + rail.offsetWidth : 0;
+  const right =
+    dockOpen && dock && dock.offsetWidth > 0 ? Math.max(0, viewportWidth - dock.offsetLeft) : 0;
+  return { left, right };
+}
+
 function useRailInsets(dockOpen: boolean, fleetFolded: boolean): { left: number; right: number } {
   const [insets, setInsets] = useState({ left: 0, right: 0 });
 
@@ -73,21 +110,17 @@ function useRailInsets(dockOpen: boolean, fleetFolded: boolean): { left: number;
     const measure = () => {
       const rail = document.querySelector('.wd-fleet') as HTMLElement | null;
       const dock = document.querySelector('.wd-radar-dock') as HTMLElement | null;
-      const railBox = rail?.getBoundingClientRect();
-      const dockBox = dock?.getBoundingClientRect();
-      const left = railBox && railBox.width > 0 ? railBox.right : 0;
-      const right = dockOpen && dockBox && dockBox.width > 0 ? window.innerWidth - dockBox.left : 0;
+      const { left, right } = railInsetsFrom(rail, dock, dockOpen, window.innerWidth);
       setInsets((cur) => (cur.left === left && cur.right === right ? cur : { left, right }));
     };
-    // Two frames: the dock animates its width in, so a single synchronous read
-    // right after a selection would measure the pre-transition box.
+    // One synchronous read is now enough: nothing here is mid-transition, because
+    // none of it is read through a transform. The rAF is kept only for the very
+    // first mount, where the dock has not been laid out yet at all.
     measure();
     const raf = window.requestAnimationFrame(measure);
-    const t = window.setTimeout(measure, 300);
     window.addEventListener('resize', measure);
     return () => {
       window.cancelAnimationFrame(raf);
-      window.clearTimeout(t);
       window.removeEventListener('resize', measure);
     };
     // Folding the rack changes the free channel as much as opening the dock does,
@@ -121,6 +154,34 @@ function writeFleetFolded(folded: boolean): void {
   }
 }
 
+/**
+ * Focus, with a short hold on the way DOWN only.
+ *
+ * `<Canvas frameloop>` is not a free switch: R3F tears one render loop down and
+ * stands the other up, and the paced loop's first frame waits on a fresh rAF. One
+ * transition is imperceptible, but ordinary use of a monitor produces them in pairs.
+ * Clicking WARDEN focuses it and clicking back into the editor blurs it; a click that
+ * passes THROUGH the window, or a Cmd-Tab that lands elsewhere, fires a blur and a
+ * focus a few frames apart. Every one of those restarted the loop, and the visible
+ * result was the scene hitching for a beat whenever the window was touched.
+ *
+ * Holding the blur collapses those pairs into no transition at all. Focus is never
+ * held: coming back has to be instant, and going UP to the full rate is the cheap
+ * direction to be wrong about.
+ */
+export function useSettledFocus(rawFocused: boolean, settleMs = BLUR_SETTLE_MS): boolean {
+  const [settled, setSettled] = useState(rawFocused);
+  useEffect(() => {
+    if (rawFocused) {
+      setSettled(true);
+      return;
+    }
+    const t = window.setTimeout(() => setSettled(false), settleMs);
+    return () => window.clearTimeout(t);
+  }, [rawFocused, settleMs]);
+  return settled;
+}
+
 export function isDiscoveryHomeDoubleClickAllowed({
   selectedId,
   focusDepth,
@@ -141,6 +202,8 @@ export function isDiscoveryHomeDoubleClickAllowed({
 // the radar board; Escape and empty-click ease it back to the framed overview.
 function SceneShell({
   radarModel,
+  radarLayout,
+  peerLayout,
   selected,
   selectedId,
   hoveredId,
@@ -152,6 +215,7 @@ function SceneShell({
   railInsets,
   peerModel,
   peerLabel,
+  viewTarget,
   onHover,
   onLeave,
   onSelect,
@@ -159,6 +223,10 @@ function SceneShell({
   onPickFolder,
 }: {
   radarModel: RadarSceneModel;
+  /** The local board, laid out once by the lead and shared with every consumer. */
+  radarLayout: RadarLayout;
+  /** The peer board's layout, likewise. Null when watching nobody. */
+  peerLayout: RadarLayout | null;
   selected: LayoutNode | null;
   selectedId: string | null;
   hoveredId: string | null;
@@ -175,6 +243,8 @@ function SceneShell({
   /** A watched peer's redacted board, or null when watching nobody. */
   peerModel: RadarSceneModel | null;
   peerLabel: string;
+  /** Which of the two constellations the camera frames (the top switcher drives it). */
+  viewTarget: ConstellationTarget;
   onHover: (node: LayoutNode) => void;
   onLeave: (node: LayoutNode) => void;
   onSelect: (node: LayoutNode) => void;
@@ -186,8 +256,8 @@ function SceneShell({
   // mounted: watching someone else is a lateral truck of the camera, never an
   // implode-and-rebloom, so your own board is still there when you come back.
   const peerPlacement = useMemo(
-    () => peerWorldPlacement(peerModel, sceneBounds),
-    [peerModel, sceneBounds],
+    () => peerWorldPlacement(peerModel, sceneBounds, undefined, peerLayout ?? undefined),
+    [peerModel, sceneBounds, peerLayout],
   );
 
   const { gl } = useThree();
@@ -229,13 +299,19 @@ function SceneShell({
         framingInsetLeft={railInsets.left}
         framingInsetRight={railInsets.right}
         peerBounds={peerPlacement.bounds}
-        viewTarget={peerModel ? 'peer' : 'local'}
+        // Explicitly the switcher's answer, never "is there a peer": the peer's board
+        // staying mounted must not mean the camera is stuck on it.
+        viewTarget={peerModel ? viewTarget : 'local'}
         // The radar board locks the rig (no rotate/pan, straight-on framing).
         locked
       />
 
       <RadarForest
         model={radarModel}
+        // The lead already laid this board out (it frames the camera against the
+        // same nodes), so hand the forest that result rather than having it repeat
+        // the work on every emit inside the camera's fly.
+        layout={radarLayout}
         selectedId={selectedId}
         hoveredId={hoveredId}
         emphasisFilter={emphasisFilter}
@@ -248,7 +324,13 @@ function SceneShell({
       />
 
       {peerModel ? (
-        <PeerConstellation model={peerModel} placement={peerPlacement} label={peerLabel} scaleRef={scaleRef} />
+        <PeerConstellation
+          model={peerModel}
+          placement={peerPlacement}
+          label={peerLabel}
+          layout={peerLayout ?? undefined}
+          scaleRef={scaleRef}
+        />
       ) : null}
 
       {/* multisampling AA on the composer input stops the thin bright lattice lines
@@ -280,7 +362,11 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
   // The native signal (Tauri `onFocusChanged`, routed through the bridge) is
   // authoritative in the packaged app; the DOM listener below covers the browser
   // harness, where no native event ever arrives.
-  const frameloop = frameloopFor(!active, scene.focused ?? windowFocused);
+  // Focus is taken through a settle so a click that lands on the window (or passes
+  // through it) does not swap the render loop twice in a few frames, which is what
+  // the "clicking the app and clicking out stalls for a beat" report was.
+  const settledFocused = useSettledFocus(scene.focused ?? windowFocused);
+  const frameloop = frameloopFor(!active, settledFocused);
   // The board never folds (no tab swap), so the forest scale is a constant 1.
   const foldScale = useRef(1);
   // The fleet rack folds away to a tab. It is the widest piece of chrome over the
@@ -312,7 +398,34 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
     () => (watched?.state ? observedToScene(watched.state) : null),
     [watched],
   );
-  const peerHasAgents = (peerModel?.agents.length ?? 0) > 0;
+  const peerAgentCount = peerModel?.agents.length ?? 0;
+  const peerHasAgents = peerAgentCount > 0;
+  // Laid out once here, then shared with the placement, the hazard frame and the
+  // forest, instead of each of the three re-deriving the identical board per emit.
+  const peerLayout = useMemo(() => (peerModel ? layoutPeerScene(peerModel) : null), [peerModel]);
+  // Which of the two constellations the camera frames. Watching someone used to slide
+  // the camera onto their board with no way back short of stopping watching, which
+  // made "watch a peer" cost you your own board. It is a switch now.
+  const [viewTarget, setViewTarget] = useState<ConstellationTarget>('local');
+  // Arriving at a peer's board is still automatic on the FIRST frame that has agents
+  // on it, because that is what "watch this person" asked for. It only auto-trucks on
+  // the transition into having a board, so a later frame never yanks the camera back
+  // off the local constellation after you have switched away from theirs.
+  const hadPeerBoard = useRef(false);
+  useEffect(() => {
+    if (peerHasAgents && !hadPeerBoard.current) setViewTarget('peer');
+    // Their board went away (peer removed, or they stopped sending): there is
+    // nothing on that side of the world to look at, so come home.
+    if (!peerHasAgents && hadPeerBoard.current) setViewTarget('local');
+    hadPeerBoard.current = peerHasAgents;
+  }, [peerHasAgents]);
+  // Framing the peer clears any local selection: the right-hand dock reads a LOCAL
+  // agent, so leaving it open over someone else's board would caption the wrong
+  // constellation.
+  const onViewTarget = useCallback((next: ConstellationTarget) => {
+    setViewTarget(next);
+    if (next === 'peer') setSelectedId(null);
+  }, []);
 
   useEffect(() => bridge.subscribe(setScene), [bridge]);
 
@@ -549,7 +662,7 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
 
   return (
     <div
-      className={`viz-root wd-radar-root${selectedRadarAgent ? ' has-dock' : ''}${fleetFolded ? ' fleet-folded' : ''}`}
+      className={`viz-root wd-radar-root${selectedRadarAgent ? ' has-dock' : ''}${fleetFolded ? ' fleet-folded' : ''}${peerHasAgents ? ' has-switcher' : ''}`}
       onDoubleClick={onDiscoveryHomeDoubleClick}
     >
       <Canvas
@@ -563,6 +676,8 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
         <BackgroundFrameTick paced={frameloop === 'demand'} />
         <SceneShell
           radarModel={radarModel}
+          radarLayout={radarLayout}
+          peerLayout={peerHasAgents ? peerLayout : null}
           selected={selectedNode}
           selectedId={selectedId}
           hoveredId={hoveredId}
@@ -574,6 +689,7 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
           railInsets={railInsets}
           peerModel={peerHasAgents ? peerModel : null}
           peerLabel={watched?.peer.label ?? ''}
+          viewTarget={viewTarget}
           onHover={onHover}
           onLeave={onLeave}
           onSelect={onSelect}
@@ -596,6 +712,16 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
           {radarModel.agents.length} agent{radarModel.agents.length === 1 ? '' : 's'}
         </span>
       </header>
+
+      {/* Whose board am I looking at. Top of the free channel, above the focus path,
+          and absent entirely until a watched peer actually has a constellation. */}
+      <ConstellationSwitcher
+        localCount={radarModel.agents.length}
+        peerLabel={peerHasAgents ? watched?.peer.label ?? null : null}
+        peerCount={peerAgentCount}
+        target={viewTarget}
+        onTarget={onViewTarget}
+      />
 
       <Breadcrumb
         focusStack={focusStack}
