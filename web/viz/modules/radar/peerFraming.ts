@@ -14,10 +14,23 @@
 
 import type { RadarSceneModel } from '@/viz/shared/types/radarTypes';
 import { enclosingBounds, enclosingBox, type Bounds, type Box } from '@/viz/shared/scene/cameraFraming';
-import { layoutRadarScene } from './radarLayout';
+import { layoutRadarScene, type RadarLayout } from './radarLayout';
 
 /** Empty air between the two bounding spheres, as a fraction of their combined radii. */
 const DEFAULT_PAD_FRACTION = 0.4;
+
+/**
+ * A peer board's layout, laid out once and shared.
+ *
+ * Three separate call sites here and in `PeerConstellation` need the peer's nodes
+ * (the placement, the hazard frame's box, and the forest itself), and each used to
+ * call `layoutRadarScene` for itself. That is the same pure function over the same
+ * model three times per emit, all of it inside the frame budget of a live scene, so
+ * the lead computes it once and threads it through.
+ */
+export function peerLayout(model: RadarSceneModel): RadarLayout {
+  return layoutRadarScene(model);
+}
 
 /** Where a peer constellation goes: its world X translation, and its bounds once moved. */
 export type PeerPlacement = {
@@ -27,24 +40,24 @@ export type PeerPlacement = {
   bounds: Bounds | null;
 };
 
-function layoutPoints(model: RadarSceneModel) {
-  return layoutRadarScene(model).nodes.map((n) => ({
+function layoutPoints(model: RadarSceneModel, layout?: RadarLayout) {
+  return (layout ?? layoutRadarScene(model)).nodes.map((n) => ({
     pos: [n.position.x, n.position.y, n.position.z] as [number, number, number],
     radius: n.radius,
   }));
 }
 
 /** Bounding sphere of a peer model's own layout, before it is moved anywhere. */
-export function peerLayoutBounds(model: RadarSceneModel): Bounds | null {
-  return enclosingBounds(layoutPoints(model));
+export function peerLayoutBounds(model: RadarSceneModel, layout?: RadarLayout): Bounds | null {
+  return enclosingBounds(layoutPoints(model, layout));
 }
 
 /**
  * Axis-aligned extent of a peer model's own layout, in the peer group's LOCAL space
  * (so the caller draws the hazard frame around it without undoing `offsetX`).
  */
-export function peerLayoutBox(model: RadarSceneModel): Box | null {
-  return enclosingBox(layoutPoints(model));
+export function peerLayoutBox(model: RadarSceneModel, layout?: RadarLayout): Box | null {
+  return enclosingBox(layoutPoints(model, layout));
 }
 
 /**
@@ -78,9 +91,10 @@ export function peerWorldPlacement(
   model: RadarSceneModel | null,
   localBounds: Bounds | null,
   padFraction = DEFAULT_PAD_FRACTION,
+  layout?: RadarLayout,
 ): PeerPlacement {
   if (!model) return { offsetX: 0, bounds: null };
-  const own = peerLayoutBounds(model);
+  const own = peerLayoutBounds(model, layout);
   if (!own) return { offsetX: 0, bounds: null };
   const offsetX = peerOffsetX(localBounds, own, padFraction);
   return {

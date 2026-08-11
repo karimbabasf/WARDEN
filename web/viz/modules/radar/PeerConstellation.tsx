@@ -31,6 +31,7 @@ import type { RadarSceneModel } from '@/viz/shared/types/radarTypes';
 import { FoldGroup } from '@/viz/shared/scene/Transition';
 import { type Box } from '@/viz/shared/scene/cameraFraming';
 import { RadarForest } from './RadarConstellation';
+import type { RadarLayout } from './radarLayout';
 import { peerLayoutBox, type PeerPlacement } from './peerFraming';
 
 // The amber the DOM uses for every "this came off another machine" surface (--warn).
@@ -78,7 +79,13 @@ function makeHazardTexture(): THREE.Texture {
       const onStripe = (x + y) % PERIOD < THICK;
       const [r, g, b] = onStripe ? HAZARD_RGB : VOID_RGB;
       d[i] = r; d[i + 1] = g; d[i + 2] = b;
-      d[i + 3] = onStripe ? 56 : 92; // both translucent: a wash, never a solid panel
+      // Both translucent: a wash, never a solid panel. These were roughly double,
+      // which was survivable while the peer board was only reachable through the
+      // observer dock and fatal once the switcher made it a place you actually look:
+      // a tall, narrow peer board turns the frame into a full-height amber column
+      // that goes through the bloom pass and beats its own globes. The curtain has to
+      // stay a MARK on the data, not the brightest object on screen.
+      d[i + 3] = onStripe ? 30 : 58;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -164,7 +171,7 @@ function PeerHazardFrame({ box, label }: { box: Box; label: string }) {
     <group position={[geom.cx, geom.cy, FRAME_Z]}>
       <mesh>
         <planeGeometry args={[geom.halfW * 2, geom.halfH * 2]} />
-        <meshBasicMaterial map={tex} transparent opacity={0.9} depthWrite={false} />
+        <meshBasicMaterial map={tex} transparent opacity={0.55} depthWrite={false} />
       </mesh>
 
       <lineSegments geometry={borderGeo}>
@@ -191,6 +198,8 @@ export type PeerConstellationProps = {
   placement: PeerPlacement;
   /** Whose board this is, shown in the hazard kicker (already redacted upstream). */
   label: string;
+  /** The peer's layout, laid out once by the lead and shared (see peerFraming). */
+  layout?: RadarLayout;
   /** The shared fold scale, so a tab swap folds the peer's board with everything else. */
   scaleRef?: { current: number };
 };
@@ -202,8 +211,8 @@ export type PeerConstellationProps = {
  * rig agree by construction: the lead computes it once and hands `offsetX` here and
  * `placement.bounds` to `<CameraRig peerBounds=...>`.
  */
-export function PeerConstellation({ model, placement, label, scaleRef }: PeerConstellationProps) {
-  const box = useMemo(() => peerLayoutBox(model), [model]);
+export function PeerConstellation({ model, placement, label, layout, scaleRef }: PeerConstellationProps) {
+  const box = useMemo(() => peerLayoutBox(model, layout), [model, layout]);
   return (
     <group position={[placement.offsetX, 0, 0]}>
       {/* Its own fold group: RadarForest already folds itself, and nesting the frame
@@ -216,6 +225,7 @@ export function PeerConstellation({ model, placement, label, scaleRef }: PeerCon
 
       <RadarForest
         model={model}
+        layout={layout}
         selectedId={null}
         hoveredId={null}
         scaleRef={scaleRef}
