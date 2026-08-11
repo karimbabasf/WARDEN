@@ -73,6 +73,16 @@ fn kick_radar_after_watch_event(signal: &RadarDirtySignal) {
     signal.mark_dirty_with_live_refresh();
 }
 
+/// True when a filesystem event is a globe ARRIVING or LEAVING rather than one
+/// growing: a subagent transcript being created, a session registry file being
+/// written or removed, a Codex rollout being archived. These are the events the
+/// radar is judged on, so they skip the recompute rate floor (see
+/// [`RadarDirtySignal::mark_dirty_urgent`]); a plain content append does not.
+fn is_structural_event(kind: &notify::EventKind) -> bool {
+    use notify::EventKind;
+    matches!(kind, EventKind::Create(_) | EventKind::Remove(_))
+}
+
 /// RADAR (Task 9): recompute the live forest and emit it as `radar_state`. Thin
 /// wrapper over [`crate::radar::recompute_radar_state`] + the Tauri emit, so the
 /// watcher closure stays small.
@@ -128,6 +138,7 @@ pub struct RadarDirtySignal {
 pub(crate) struct RadarDirtyInner {
     pub(crate) dirty: std::sync::atomic::AtomicBool,
     refresh_live_context: std::sync::atomic::AtomicBool,
+    pub(crate) urgent: std::sync::atomic::AtomicBool,
     pub(crate) notify: tokio::sync::Notify,
 }
 
@@ -137,6 +148,7 @@ impl RadarDirtySignal {
             inner: Arc::new(RadarDirtyInner {
                 dirty: std::sync::atomic::AtomicBool::new(false),
                 refresh_live_context: std::sync::atomic::AtomicBool::new(false),
+                urgent: std::sync::atomic::AtomicBool::new(false),
                 notify: tokio::sync::Notify::new(),
             }),
         }
@@ -159,6 +171,28 @@ impl RadarDirtySignal {
             .refresh_live_context
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.mark_dirty();
+    }
+
+    /// Mark the forest dirty for a STRUCTURAL change and let it skip the rate floor.
+    ///
+    /// The floor exists to stop a sustained stream of transcript APPENDS from pinning
+    /// a core, and against appends it is exactly right: a token count that lands a
+    /// second late is invisible. A globe appearing or disappearing is not that. A
+    /// subagent spawning, a subagent finishing, a session registry file being created
+    /// or removed: those are the frames the whole radar exists to show, and holding
+    /// them behind a one-second throttle is what read as "subagent tracking is slow".
+    ///
+    /// Safe to exempt because these events are RARE by construction. An append fires
+    /// on every token; a file is created once and removed once. So the urgent path
+    /// costs at most one extra recompute per real lifecycle event, while the sustained
+    /// stream that the floor was built for still pays the floor in full.
+    pub fn mark_dirty_urgent(&self) {
+        self.inner
+            .urgent
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // A structural change is exactly the case where the new bytes must be in the
+        // store BEFORE the forest is assembled, or the new globe is one frame late.
+        self.mark_dirty_with_live_refresh();
     }
 }
 
@@ -216,6 +250,10 @@ where
                 continue;
             }
 
+            // Claim the urgency with the work. A structural event (a globe arriving or
+            // leaving) skips the rate floor below; an append does not.
+            let urgent = signal.inner.urgent.swap(false, Ordering::SeqCst);
+
             // Coalesce the burst: further signals during this window just re-set the
             // flag (claimed by the next iteration), they do not stack recomputes.
             if !debounce.is_zero() {
@@ -235,9 +273,13 @@ where
             // stream that is already saturating the worker waits out the remainder of
             // the window. Anything that arrives during the wait folds into this same
             // recompute rather than queueing another.
+            //
+            // An URGENT signal is exempt. See `mark_dirty_urgent`: those events are
+            // rare by construction, so exempting them cannot reintroduce the pinned
+            // core, and they are the ones a monitor is judged on.
             if let Some(prev) = last_start {
                 let since = prev.elapsed();
-                if since < min_interval {
+                if !urgent && since < min_interval {
                     tokio::time::sleep(min_interval - since).await;
                     signal.inner.dirty.store(false, Ordering::SeqCst);
                 }
@@ -395,12 +437,16 @@ pub fn spawn_radar_watcher(
             ) {
                 return;
             }
-            // Do NOT recompute on the watcher thread — just signal the worker. The
+            // Do NOT recompute on the watcher thread, just signal the worker. The
             // burst is coalesced + serialized there, so overlapping events across
             // roots cannot spawn overlapping recomputes. File events also request a
             // live transcript refresh so just-created subagent files are in the
             // store before the forest is assembled.
-            kick_radar_after_watch_event(&signal);
+            if is_structural_event(&event.kind) {
+                signal.mark_dirty_urgent();
+            } else {
+                kick_radar_after_watch_event(&signal);
+            }
         })
         .context("create radar watcher")?;
 
@@ -680,6 +726,76 @@ mod tests {
 
         worker.abort();
         tick.abort();
+    }
+
+    /// The subagent-latency fix, and its guard rail.
+    ///
+    /// The rate floor is right for appends and wrong for lifecycle: a globe arriving
+    /// or leaving sat behind up to a full second of throttle built for token counts,
+    /// which is what "subagent tracking is slow, not on time" was. An urgent signal
+    /// skips the floor. The second half of the test is the part that matters more:
+    /// a plain signal must still pay it, or the pinned-core bug is back.
+    #[tokio::test]
+    async fn an_urgent_signal_skips_the_rate_floor_and_a_plain_one_still_pays_it() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let signal = RadarDirtySignal::new();
+        let worker = {
+            let runs = runs.clone();
+            spawn_radar_recompute_worker(
+                signal.clone(),
+                Duration::ZERO,
+                Duration::from_millis(400),
+                move |_| {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        };
+
+        // First event runs at once (leading edge) and arms the floor.
+        signal.mark_dirty();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // A plain follow-up inside the window waits for the floor to expire.
+        signal.mark_dirty();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "an append inside the floor must wait, or the CPU cap is gone"
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "and then it runs");
+
+        // An URGENT follow-up inside the window does not wait.
+        signal.mark_dirty_urgent();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            3,
+            "a globe arriving must not sit behind the append throttle"
+        );
+
+        worker.abort();
+    }
+
+    #[test]
+    fn only_a_file_appearing_or_vanishing_counts_as_structural() {
+        use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
+        use notify::EventKind;
+
+        // A subagent transcript being written for the first time, and a session
+        // registry file being removed when the process exits.
+        assert!(is_structural_event(&EventKind::Create(CreateKind::File)));
+        assert!(is_structural_event(&EventKind::Remove(RemoveKind::File)));
+        // A transcript growing is the common case by orders of magnitude, and it is
+        // exactly what the floor exists to bound.
+        assert!(!is_structural_event(&EventKind::Modify(ModifyKind::Data(
+            DataChange::Content
+        ))));
+        assert!(!is_structural_event(&EventKind::Access(
+            notify::event::AccessKind::Read
+        )));
     }
 
     #[test]

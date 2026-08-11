@@ -83,6 +83,21 @@ fn complete_jsonl_prefix(slice: &[u8], start_offset: u64) -> (&[u8], u64) {
     }
 }
 
+/// What one live-ingest pass actually did.
+///
+/// `activity` is the number the watcher has always reported. `new_sessions` is
+/// split out because the two mean very different things to the radar: an append is
+/// a globe growing, while a NEW session is a globe arriving, and only the second
+/// one is allowed to skip the recompute rate floor (see
+/// `RadarDirtySignal::mark_dirty_urgent`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LiveIngest {
+    /// Parsed events plus newly persisted sessions that have no events yet.
+    pub activity: usize,
+    /// Sessions persisted for the first time by this pass.
+    pub new_sessions: usize,
+}
+
 /// Ingest the new bytes of a single transcript file, advancing its watermark.
 ///
 /// Returns the amount of live-ingest activity (0 when nothing new): parsed events
@@ -96,9 +111,18 @@ fn complete_jsonl_prefix(slice: &[u8], start_offset: u64) -> (&[u8], u64) {
 /// * otherwise read `bytes[off..]` and `parse_range(path, slice, off, hash)`.
 /// * persist each batch with `watermark_offset = len` (the new EOF).
 pub fn ingest_file_once(registry: &AdapterRegistry, store: &Store, path: &Path) -> Result<usize> {
+    Ok(ingest_file_once_reporting(registry, store, path)?.activity)
+}
+
+/// [`ingest_file_once`], with the new-session count kept rather than folded away.
+pub fn ingest_file_once_reporting(
+    registry: &AdapterRegistry,
+    store: &Store,
+    path: &Path,
+) -> Result<LiveIngest> {
     // Only transcript files are ingestible.
     if path.extension().map(|x| x != "jsonl").unwrap_or(true) {
-        return Ok(0);
+        return Ok(LiveIngest::default());
     }
 
     // Find the adapter that owns this path (its root is an ancestor).
@@ -108,17 +132,17 @@ pub fn ingest_file_once(registry: &AdapterRegistry, store: &Store, path: &Path) 
         .find(|a| a.roots().iter().any(|r| path_under(path, r)));
     let adapter = match adapter {
         Some(a) => a,
-        None => return Ok(0), // not under any watched root — ignore
+        None => return Ok(LiveIngest::default()), // not under any watched root, ignore
     };
 
     // A file may vanish between the FSEvent and our read; treat as nothing to do.
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(_) => return Ok(0),
+        Err(_) => return Ok(LiveIngest::default()),
     };
     let len = bytes.len() as u64;
     if len == 0 {
-        return Ok(0);
+        return Ok(LiveIngest::default());
     }
     let hash = hash64(&bytes);
     let mut off = store.watermark_offset(path)?;
@@ -132,7 +156,7 @@ pub fn ingest_file_once(registry: &AdapterRegistry, store: &Store, path: &Path) 
             .map(|h| h == hash)
             .unwrap_or(false);
         if unchanged {
-            return Ok(0);
+            return Ok(LiveIngest::default());
         }
         off = 0;
     } else if len < off {
@@ -142,7 +166,7 @@ pub fn ingest_file_once(registry: &AdapterRegistry, store: &Store, path: &Path) 
 
     let (slice, watermark_offset) = complete_jsonl_prefix(&bytes[off as usize..], off);
     if slice.is_empty() {
-        return Ok(0);
+        return Ok(LiveIngest::default());
     }
     let batches = adapter
         .parse_range(path, slice, off, hash)
@@ -150,17 +174,18 @@ pub fn ingest_file_once(registry: &AdapterRegistry, store: &Store, path: &Path) 
 
     let existing_session_ids: HashSet<String> =
         store.sessions()?.into_iter().map(|s| s.id).collect();
-    let mut activity = 0usize;
+    let mut report = LiveIngest::default();
     for b in &batches {
-        activity += b.events.len();
+        report.activity += b.events.len();
         if !existing_session_ids.contains(&b.session.id) {
-            activity += 1;
+            report.activity += 1;
+            report.new_sessions += 1;
         }
         // Persist through the last complete JSONL record. If a watcher fired while
         // a line was half-written, leave those bytes unwatermarked for retry.
         store.upsert_session_batch(&b.session, &b.turns, &b.events, watermark_offset)?;
     }
-    Ok(activity)
+    Ok(report)
 }
 
 /// Owns the live `RecommendedWatcher`s so they outlive `setup()`. A bare
@@ -245,10 +270,10 @@ pub fn spawn_watchers(
                     continue;
                 }
 
-                match ingest_file_once(&registry, &store, &path) {
-                    Ok(activity) if activity > 0 => {
+                match ingest_file_once_reporting(&registry, &store, &path) {
+                    Ok(report) if report.activity > 0 => {
                         relink_after_live_ingest(&registry, &store, &path);
-                        kick_radar_after_live_ingest(activity, radar_signal.as_ref());
+                        kick_radar_after_live_ingest(report, radar_signal.as_ref());
                         let harness = harness_for_live_path(&registry, &path)
                             .map(|h| h.as_str().to_string())
                             .unwrap_or_default();
@@ -257,8 +282,8 @@ pub fn spawn_watchers(
                             serde_json::json!({
                                 "harness": harness,
                                 "path": path.to_string_lossy(),
-                                "activity": activity,
-                                "events": activity,
+                                "activity": report.activity,
+                                "events": report.activity,
                                 "phase": "live",
                             }),
                         );
@@ -281,9 +306,20 @@ pub fn spawn_watchers(
     Ok(watchers)
 }
 
-fn kick_radar_after_live_ingest(activity: usize, radar_signal: Option<&RadarDirtySignal>) {
-    if activity > 0 {
-        if let Some(signal) = radar_signal {
+/// Wake the radar after a live ingest.
+///
+/// A pass that persisted a NEW session is a globe arriving (a subagent spawning is
+/// exactly this), so it takes the urgent path and skips the recompute rate floor.
+/// A pass that only appended events to sessions the store already had is a globe
+/// growing, and waits its turn like every other append.
+fn kick_radar_after_live_ingest(report: LiveIngest, radar_signal: Option<&RadarDirtySignal>) {
+    if report.activity == 0 {
+        return;
+    }
+    if let Some(signal) = radar_signal {
+        if report.new_sessions > 0 {
+            signal.mark_dirty_urgent();
+        } else {
             signal.mark_dirty();
         }
     }
@@ -326,11 +362,63 @@ mod tests {
     #[test]
     fn live_ingest_with_new_events_marks_radar_dirty() {
         let signal = RadarDirtySignal::new();
-        kick_radar_after_live_ingest(3, Some(&signal));
+        kick_radar_after_live_ingest(
+            LiveIngest {
+                activity: 3,
+                new_sessions: 0,
+            },
+            Some(&signal),
+        );
 
         assert!(
             signal.inner.dirty.load(Ordering::SeqCst),
             "successful live ingest must immediately wake the radar recompute worker"
+        );
+        assert!(
+            !signal.inner.urgent.load(Ordering::SeqCst),
+            "a plain append must not skip the recompute rate floor, or the pinned-core bug is back"
+        );
+    }
+
+    /// A subagent spawning is a NEW session, and it is the case the radar is judged
+    /// on: it must not sit behind the one-second floor built for token appends.
+    #[test]
+    fn a_new_session_wakes_the_radar_urgently() {
+        let signal = RadarDirtySignal::new();
+        kick_radar_after_live_ingest(
+            LiveIngest {
+                activity: 1,
+                new_sessions: 1,
+            },
+            Some(&signal),
+        );
+
+        assert!(signal.inner.dirty.load(Ordering::SeqCst));
+        assert!(
+            signal.inner.urgent.load(Ordering::SeqCst),
+            "a globe arriving must skip the rate floor"
+        );
+    }
+
+    #[test]
+    fn ingest_reports_the_new_session_that_a_first_sighting_created() {
+        let dir = tempdir().unwrap();
+        let store = Store::memory().unwrap();
+        let registry = codex_registry(dir.path(), store.clone());
+
+        let body = format!("{META}{MSG1}");
+        let p = write_rollout(dir.path(), &body);
+
+        let first = ingest_file_once_reporting(&registry, &store, &p).unwrap();
+        assert_eq!(first.new_sessions, 1, "first sighting persists the session");
+
+        // An append to a session the store already has is growth, not arrival.
+        std::fs::write(&p, format!("{body}{MSG2}")).unwrap();
+        let second = ingest_file_once_reporting(&registry, &store, &p).unwrap();
+        assert_eq!(second.activity, 1);
+        assert_eq!(
+            second.new_sessions, 0,
+            "an append must not be reported as a new session"
         );
     }
 
