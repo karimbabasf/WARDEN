@@ -83,6 +83,22 @@ const OVERVIEW_DIR = new THREE.Vector3(0.35, 0.28, 1).normalize();
 // with no perspective tilt between rails (up stays +Y).
 const STRAIGHT_ON_DIR = new THREE.Vector3(0, 0, 1);
 
+/**
+ * Value identity of a selection: two different objects describing the same globe in
+ * the same place must produce the same string. Exported so the property the rig
+ * depends on (a re-emitted board is not a new selection) is tested rather than
+ * assumed.
+ */
+export function selectKey(
+  node: Pick<LayoutNode, 'id' | 'position' | 'radius'> | null,
+  insetLeft: number,
+  insetRight: number,
+): string {
+  if (!node) return `none@${insetLeft},${insetRight}`;
+  const p = node.position;
+  return `${node.id}:${p.x.toFixed(3)},${p.y.toFixed(3)},${p.z.toFixed(3)}:${node.radius.toFixed(3)}@${insetLeft},${insetRight}`;
+}
+
 function easeInOutExpo(t: number): number {
   if (t <= 0) return 0;
   if (t >= 1) return 1;
@@ -141,6 +157,7 @@ export function CameraRig({
   const flyFromTarget = useRef(new THREE.Vector3());
   const flyFromPos = useRef(new THREE.Vector3());
   const lastFocusKey = useRef<string | null>(null);
+  const lastSelectKey = useRef<string | null>(null);
   const lastHomeSignal = useRef(homeSignal);
 
   // Derive the scaled limits from the forest bounds. overviewDist frames the whole
@@ -267,8 +284,25 @@ export function CameraRig({
 
   // --- Orb selection focus: damped glide that preserves angle, with verbatim home
   // capture/restore on the focus edge. ---
+  //
+  // GUARDED BY VALUE, not by object identity, and that guard is load-bearing rather
+  // than an optimisation. `selected` is a node out of a layout that is rebuilt on
+  // every `radar_state` emit, so the lead hands this effect a fresh object roughly
+  // once a second for a globe that has not moved. Each of those re-runs rewrote the
+  // pose AND cleared `flyActive`, so an emit landing during a dive killed the focus
+  // fly mid-air and left the damped branch crawling toward the SELECT pose instead.
+  // The two poses are not the same distance (the fly frames the subtree, the select
+  // pose keeps its own cosy distance), so the camera visibly arrived, stopped, and
+  // then backed out again over the next ~430ms. Measured on a real dive: the goal
+  // flipped from z=5.000 to z=5.615 the frame the fly ended.
+  //
+  // `focusBounds` has had exactly this guard since it was written (`lastFocusKey`);
+  // this is the same discipline applied to the effect next to it.
   useEffect(() => {
     const c = controls.current;
+    const key = selectKey(selected, framingInsetLeft, framingInsetRight);
+    if (key === lastSelectKey.current) return;
+    lastSelectKey.current = key;
     if (selected) {
       if (!wasSelected.current && c) {
         homeTarget.current.copy(c.target);
