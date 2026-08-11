@@ -333,7 +333,13 @@ describe('RadarDetailPanel — children roster + identity/cost', () => {
 });
 
 // ── current-action hero ─────────────────────────────────────────────────────────
-describe('RadarDetailPanel — current action hero', () => {
+// The hero used to be CURRENT ACTION: the in-flight call and nothing else, which
+// left the panel's first section blank for every idle agent. It is AGENT SUMMARY
+// now. The live call is still its headline when there is one (every assertion about
+// that behaviour below is unchanged apart from the section name), and what the agent
+// has actually done is the part that is new.
+describe('RadarDetailPanel — agent summary hero', () => {
+  const HERO = '[data-section="agent-summary"]';
   const action = (over: Partial<RadarCurrentAction> = {}): RadarCurrentAction => ({
     kind: 'write',
     tool: 'Edit',
@@ -344,13 +350,13 @@ describe('RadarDetailPanel — current action hero', () => {
     ...over,
   });
 
-  it('renders the in-flight action as the hero, above the context window', () => {
+  it('leads with the in-flight action, above the context window', () => {
     const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
-    const hero = el.querySelector('[data-section="current-action"]');
+    const hero = el.querySelector(HERO);
     expect(hero).toBeTruthy();
     expect(hero?.getAttribute('data-current-action')).toBe('active');
     expect(hero?.getAttribute('data-kind')).toBe('write');
-    expect((hero?.textContent ?? '')).toContain('Edit agent.rs');
+    expect((hero?.textContent ?? '')).toContain('Editing agent.rs');
     expect((hero?.textContent ?? '')).toContain('Edit');
     // it sits before the context window in DOM order, i.e. it IS the first thing
     // under the header.
@@ -359,20 +365,46 @@ describe('RadarDetailPanel — current action hero', () => {
     expect(sections[1]?.hasAttribute('data-context-window')).toBe(true);
   });
 
-  it('renders an honest idle state, not a fake spinner, when currentAction is null', () => {
-    const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: null })} />);
-    const hero = el.querySelector('[data-section="current-action"]');
+  // The whole point of the swap: with nothing in flight the section still answers
+  // "what has this agent been doing" instead of only "nothing right now".
+  it('says what the agent last did, and counts what it has done, when nothing is in flight', () => {
+    const recent: RadarActivity[] = [
+      { ts: '2026-06-23T22:00:00Z', kind: 'write', label: 'Edit agent.rs', target: '~/WARDEN/agent.rs' },
+      { ts: '2026-06-23T21:59:00Z', kind: 'read', label: 'Read radar.rs', target: '~/WARDEN/radar.rs' },
+      { ts: '2026-06-23T21:58:00Z', kind: 'read', label: 'Read store.rs', target: '~/WARDEN/store.rs' },
+    ];
+    const el = render(
+      <RadarDetailPanel agent={agentFixture({ currentAction: null, recentActivity: recent })} />,
+    );
+    const hero = el.querySelector(HERO);
     expect(hero?.getAttribute('data-current-action')).toBe('idle');
-    expect((hero?.textContent ?? '').toLowerCase()).toContain('no action in flight');
-    expect(hero?.querySelector('button')).toBeFalsy();
+    expect((hero?.textContent ?? '')).toContain('Last edited agent.rs');
+    // Exact counts off the real feed, never a rounded or invented figure.
+    const tally = (hero?.querySelector('[data-summary-tally]')?.textContent ?? '');
+    expect(tally).toContain('2 files read');
+    expect(tally).toContain('1 edit');
+    // And which files, because a count on its own is half an answer.
+    const files = hero?.querySelector('[data-summary-files]')?.textContent ?? '';
+    expect(files).toContain('agent.rs');
+    expect(files).toContain('store.rs');
   });
 
-  // The hero now offers TWO distinct verbs on a target, so each is asserted by its
+  it('says the feed is empty rather than inventing a summary', () => {
+    const el = render(
+      <RadarDetailPanel agent={agentFixture({ currentAction: null, recentActivity: [] })} />,
+    );
+    const hero = el.querySelector(HERO);
+    expect((hero?.textContent ?? '')).toContain('No recorded actions yet');
+    expect(hero?.querySelector('[data-summary-tally]')).toBeFalsy();
+    expect(hero?.querySelector('[data-summary-files]')).toBeFalsy();
+  });
+
+  // The hero offers TWO distinct verbs on a target, so each is asserted by its
   // own accessible name rather than by "the first button in the section".
   it('shows a clickable, accessibly-named Finder-reveal button when a target is present, and calls reveal_path with it', () => {
     const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
     const btn = el.querySelector(
-      '[data-section="current-action"] button[aria-label="Reveal agent.rs in Finder"]',
+      `${HERO} button[aria-label="Reveal agent.rs in Finder"]`,
     ) as HTMLButtonElement;
     expect(btn).toBeTruthy();
     act(() => btn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -381,7 +413,7 @@ describe('RadarDetailPanel — current action hero', () => {
 
   it('offers an in-app view toggle for the in-flight target, separate from Finder', () => {
     const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
-    const view = el.querySelector('[data-section="current-action"] .wd-action-hero-target') as HTMLButtonElement;
+    const view = el.querySelector(`${HERO} .wd-action-hero-target`) as HTMLButtonElement;
     expect(view).toBeTruthy();
     expect(view.getAttribute('aria-expanded')).toBe('false');
     // Shows the path with the FILENAME intact: the directory is the part allowed
@@ -397,12 +429,18 @@ describe('RadarDetailPanel — current action hero', () => {
     });
   });
 
-  it('renders no target button when the action has no single-file target (e.g. a shell run)', () => {
+  it('renders no target controls when the action has no single-file target (e.g. a shell run)', () => {
     const el = render(
-      <RadarDetailPanel agent={agentFixture({ currentAction: action({ kind: 'run', tool: 'Bash', label: 'pnpm test', target: null }) })} />,
+      <RadarDetailPanel
+        agent={agentFixture({
+          currentAction: action({ kind: 'run', tool: 'Bash', label: 'pnpm test', target: null }),
+          recentActivity: [],
+        })}
+      />,
     );
-    const hero = el.querySelector('[data-section="current-action"]');
-    expect(hero?.querySelector('button')).toBeFalsy();
+    const hero = el.querySelector(HERO);
+    expect(hero?.querySelector('.wd-action-hero-target')).toBeFalsy();
+    expect(hero?.querySelector('[aria-label^="Reveal"]')).toBeFalsy();
     expect((hero?.textContent ?? '')).toContain('pnpm test');
   });
 
@@ -436,7 +474,9 @@ describe('RadarDetailPanel — current action hero', () => {
     vi.mocked(invoke).mockRejectedValueOnce(new Error('no such path'));
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
-    const btn = el.querySelector('[data-section="current-action"] button') as HTMLButtonElement;
+    const btn = el.querySelector(
+      `${HERO} button[aria-label="Reveal agent.rs in Finder"]`,
+    ) as HTMLButtonElement;
     await act(async () => {
       btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await Promise.resolve();

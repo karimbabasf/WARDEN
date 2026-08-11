@@ -3,7 +3,7 @@
 // Mounted by WarRoom as a right-dock glass panel (the `wd-detail` / `wd-inspector`
 // look from the Habits inspector, NOT forked from it), opened when a radar globe is
 // selected and the camera has dived in. Five honest sections:
-//   0. Current action (hero)        the in-flight tool call, or an honest idle line
+//   0. Agent summary (hero)         what it is doing, what it has done, how long
 //   1. Live context window          (Task 19)
 //   2. Live activity feed           (Task 20)
 //   3. Children roster              (Task 21)
@@ -15,10 +15,11 @@
 import type { CSSProperties, KeyboardEvent } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { RadarActivity, RadarAgent, RadarContextRow, RadarCurrentAction } from '@/viz/shared/types/radarTypes';
+import type { RadarActivity, RadarAgent, RadarContextRow } from '@/viz/shared/types/radarTypes';
 import { radarSubtitle, formatTokens as tokens } from '@/viz/shared/types/radarTypes';
 import { FilePreview } from '@/viz/shared/ui/FilePreview';
 import { CompactControl } from '@/viz/shared/ui/CompactControl';
+import { summarizeAgent } from './agentSummary';
 import { radarHarness } from './radarTheme';
 
 // ── small pure formatters ──────────────────────────────────────────────────────
@@ -159,63 +160,63 @@ function activityKind(kind: string): { glyph: string; label: string } {
   return ACTIVITY_KIND[kind] ?? { glyph: '•', label: kind || 'Event' };
 }
 
-// ── Hero: the in-flight action, the first thing under the header ──────────────
-// The largest, highest-contrast element in the panel when present: a per-kind
-// accent (style.css keys off `[data-kind]`) makes a write/edit read heavier than
-// a read. `currentAction === null` renders an honest idle line, never a fake
-// "waiting" spinner implying activity that is not there (honest-viz).
-function CurrentActionSection({ action }: { action: RadarCurrentAction | null }) {
-  const now = useTick(action != null);
+// ── Hero: the agent summary, the first thing under the header ─────────────────
+//
+// This used to be CURRENT ACTION: the in-flight tool call and nothing else. That is
+// a real signal but a narrow one. It is null for every idle agent and null in the
+// gaps between calls, so the section people look at first sat empty most of the time
+// and never said what the agent had actually been doing. The summary keeps the live
+// call as its headline when there is one, and otherwise answers the question the
+// panel gets opened to answer: what has this thing done.
+//
+// Everything rendered here is a count or a label off the real feed (see
+// `summarizeAgent`), so the section stays as honest as the globe it describes: no
+// intent, no paraphrase, no invented progress.
+function AgentSummarySection({ agent }: { agent: RadarAgent }) {
   const [open, setOpen] = useState(false);
-  // Collapse the viewer whenever the in-flight call changes target, otherwise the
-  // panel keeps showing the previous file under a new action's heading.
-  const target = action?.target ?? null;
+  const action = agent.currentAction ?? null;
+  // Tick only while something is in flight; an idle agent's summary carries no live
+  // number, so it costs no interval.
+  const now = useTick(action != null);
+  const summary = summarizeAgent(agent, now);
+
+  // Collapse the viewer whenever the headline changes target, otherwise the panel
+  // keeps showing the previous file under a new heading.
+  const target = summary.target;
   const prevTargetRef = useRef(target);
   if (prevTargetRef.current !== target) {
     prevTargetRef.current = target;
     if (open) setOpen(false);
   }
 
-  if (!action) {
-    return (
-      <section className="wd-radar-section wd-action-hero is-idle" data-section="current-action" data-current-action="idle">
-        <div className="wd-card-kicker">Current action</div>
-        <div className="wd-action-hero-idle">
-          <span className="wd-action-hero-idle-glyph" aria-hidden>
-            ·
-          </span>
-          No action in flight
-        </div>
-      </section>
-    );
-  }
-
-  const k = activityKind(action.kind);
-  // Re-derive elapsed from startedAt on every tick so it ages live between
-  // backend snapshots; fall back to the backend's own elapsedMs if the
-  // timestamp cannot be parsed rather than freezing at 0 or showing NaN.
-  const startMs = Date.parse(action.startedAt);
-  const elapsedMs = Number.isFinite(startMs) ? Math.max(0, now - startMs) : action.elapsedMs;
+  const k = activityKind(action?.kind ?? '');
+  // One number, and it changes meaning with the state rather than vanishing: how
+  // long the live call has run, else how long ago the last one landed.
+  const clockMs = summary.inFlight ? summary.elapsedMs : summary.lastActivityMs;
 
   return (
     <section
-      className="wd-radar-section wd-action-hero"
-      data-section="current-action"
-      data-current-action="active"
-      data-kind={action.kind}
+      className={`wd-radar-section wd-action-hero${summary.inFlight ? '' : ' is-idle'}`}
+      data-section="agent-summary"
+      data-current-action={summary.inFlight ? 'active' : 'idle'}
+      data-kind={action?.kind}
     >
-      <div className="wd-card-kicker">Current action</div>
+      <div className="wd-card-kicker">Agent summary</div>
       <div className="wd-action-hero-body">
-        <span className={`wd-action-hero-glyph is-${action.kind}`} aria-hidden>
-          {k.glyph}
-        </span>
+        {action ? (
+          <span className={`wd-action-hero-glyph is-${action.kind}`} aria-hidden>
+            {k.glyph}
+          </span>
+        ) : null}
         <div className="wd-action-hero-main">
-          <div className="wd-action-hero-meta">
-            <span className="wd-action-hero-kind">{k.label}</span>
-            <span className="wd-action-hero-tool">{action.tool}</span>
-          </div>
-          <div className="wd-action-hero-verb">{action.label || k.label}</div>
-          {action.target ? (
+          {action ? (
+            <div className="wd-action-hero-meta">
+              <span className="wd-action-hero-kind">{k.label}</span>
+              <span className="wd-action-hero-tool">{action.tool}</span>
+            </div>
+          ) : null}
+          <div className="wd-action-hero-verb">{summary.headline}</div>
+          {target ? (
             <div className="wd-action-hero-target-row">
               {/* Two distinct verbs, so neither is a mystery meat icon: OPEN reads
                   the file inside WARDEN, REVEAL hands it to Finder. */}
@@ -224,21 +225,21 @@ function CurrentActionSection({ action }: { action: RadarCurrentAction | null })
                 className="wd-action-hero-target"
                 onClick={() => setOpen((o) => !o)}
                 aria-expanded={open}
-                aria-label={`${open ? 'Hide' : 'View'} ${basename(action.target)}`}
+                aria-label={`${open ? 'Hide' : 'View'} ${basename(target)}`}
               >
                 <span className="wd-action-hero-target-glyph" aria-hidden>
                   {open ? '▾' : '▸'}
                 </span>
-                <span className="wd-path" title={action.target}>
-                  <span className="wd-path-dir">{splitPath(action.target).dir}</span>
-                  <span className="wd-path-base">{splitPath(action.target).base}</span>
+                <span className="wd-path" title={target}>
+                  <span className="wd-path-dir">{splitPath(target).dir}</span>
+                  <span className="wd-path-base">{splitPath(target).base}</span>
                 </span>
               </button>
               <button
                 type="button"
                 className="wd-icon-btn"
-                onClick={() => revealInFinder(action.target as string)}
-                aria-label={`Reveal ${basename(action.target)} in Finder`}
+                onClick={() => revealInFinder(target)}
+                aria-label={`Reveal ${basename(target)} in Finder`}
                 title="Reveal in Finder"
               >
                 ⌖
@@ -246,12 +247,53 @@ function CurrentActionSection({ action }: { action: RadarCurrentAction | null })
             </div>
           ) : null}
         </div>
-        <div className="wd-action-hero-elapsed">
-          <span className="wd-action-hero-elapsed-value">{elapsedClock(elapsedMs)}</span>
-          <span className="wd-action-hero-elapsed-label">Elapsed</span>
-        </div>
+        {clockMs != null ? (
+          <div className="wd-action-hero-elapsed">
+            <span className="wd-action-hero-elapsed-value">{elapsedClock(clockMs)}</span>
+            <span className="wd-action-hero-elapsed-label">{summary.inFlight ? 'Elapsed' : 'Since'}</span>
+          </div>
+        ) : null}
       </div>
-      {open && action.target ? <FilePreview path={action.target} onClose={() => setOpen(false)} /> : null}
+
+      {/* What it has done, as exact counts over the whole recorded feed. */}
+      {summary.tally.length > 0 ? (
+        <ul className="wd-summary-tally" data-summary-tally>
+          {summary.tally.map((t) => (
+            <li key={t.kind} className="wd-summary-tally-item" data-kind={t.kind}>
+              <span className="wd-summary-tally-glyph" aria-hidden>
+                {activityKind(t.kind).glyph}
+              </span>
+              {t.label}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="wd-summary-empty">Nothing recorded on this agent yet.</p>
+      )}
+
+      {/* And which files, because "12 edits" is only half an answer. */}
+      {summary.files.length > 0 ? (
+        <div className="wd-summary-files" data-summary-files>
+          <span className="wd-summary-files-label">Touched</span>
+          <ul className="wd-summary-files-list">
+            {summary.files.map((f) => (
+              <li key={f}>
+                <button
+                  type="button"
+                  className="wd-summary-file"
+                  title={f}
+                  onClick={() => revealInFinder(f)}
+                  aria-label={`Reveal ${basename(f)} in Finder`}
+                >
+                  {basename(f)}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {open && target ? <FilePreview path={target} onClose={() => setOpen(false)} /> : null}
     </section>
   );
 }
@@ -740,7 +782,6 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
   const heading = agent.label || agent.nickname || agent.id;
   const sessionTitle = agent.title ?? null;
   const subtitle = radarSubtitle(agent);
-  const currentAction = agent.currentAction ?? null;
 
   // Accent is the flat harness hue — colour no longer encodes fill (that's the
   // globe's SIZE channel). CSS resolves `--heat` → `--harness` via its fallback.
@@ -770,7 +811,7 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
         ) : null}
       </div>
 
-      <CurrentActionSection action={currentAction} />
+      <AgentSummarySection agent={agent} />
       <ContextSection agent={agent} />
       <ActivitySection agent={agent} />
       <RosterSection children={children} onJumpTo={onJumpTo} />
