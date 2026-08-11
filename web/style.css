@@ -481,53 +481,57 @@ html, body {
 .wd-radar-section { margin-top: 16px; }
 .wd-radar-section + .wd-radar-section { border-top: 1px solid var(--hair); padding-top: 14px; }
 
-/* ── agent-summary hero: what the agent is doing and what it has done, the first
-   thing under the header and above the context gauge. `--action` keys off
-   [data-kind] so a write/edit runs a stronger accent than a read, with zero
-   colour literals in the component. `.is-idle` is deliberately quiet: no pulse,
-   no fake spinner, because "nothing in flight" is a real, honest state, not a
-   loading state, and the summary still has counts to show in it. ────────────*/
-.wd-action-hero {
+/* ── agent summary: four labelled rows (Is / Done / Doing / Next), the first thing
+   under the header and above the context gauge. It replaced a single CHURNING headline
+   (the in-flight verb WAS the whole section, and it rewrote itself several times a
+   second as the tool call turned over). Now the live call is ONE row, so the stable
+   rows hold still and the block reads at a glance. Chrome stays neutral steel like the
+   sections below it: the only accent is the harness hue on the DOING tag while a call
+   is live, plus the per-kind glyph colour, which is always paired with a glyph and a
+   word so colour is never the only signal. ────────────*/
+.wd-agent-summary {
   --action: var(--harness, var(--green));
-  padding: 12px 13px;
-  border: 1px solid color-mix(in srgb, var(--action) 50%, transparent);
-  background: linear-gradient(160deg, color-mix(in srgb, var(--action) 13%, transparent), rgba(2, 9, 6, 0.7));
-  box-shadow: var(--key), var(--lift);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
 }
-.wd-action-hero[data-kind="read"] { --action: #7fd7ff; }
-.wd-action-hero[data-kind="write"] { --action: #ffcf7a; }
-.wd-action-hero[data-kind="search"] { --action: #8bffb0; }
-.wd-action-hero[data-kind="run"],
-.wd-action-hero[data-kind="tool"] { --action: var(--acid); }
-.wd-action-hero[data-kind="thinking"] { --action: #b98cff; }
-/* a write/edit reads heavier: a brighter glow and a bolder verb than a read. */
-.wd-action-hero[data-kind="write"] {
-  box-shadow: var(--key), var(--lift);
-  border-color: color-mix(in srgb, var(--action) 64%, transparent);
+
+/* Four labelled rows in one column: the tag sits in a fixed gutter so Is / Done /
+   Doing / Next line up and the eye jumps straight to the row it wants. */
+.wd-summary-row { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.wd-summary-tag {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
-.wd-action-hero[data-kind="write"] .wd-action-hero-verb { font-weight: 700; }
+.wd-summary-val { min-width: 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.wd-summary-is .wd-summary-val { color: var(--ink); }
+/* Live: the DOING tag alone takes the harness hue, so "a call is running" reads
+   without the loud per-kind wash the old hero card used. */
+.wd-agent-summary.is-live .wd-summary-doing .wd-summary-tag { color: var(--action); }
 
-.wd-action-hero-body { display: flex; align-items: flex-start; gap: 11px; }
-.wd-action-hero-glyph { flex: none; font-size: 22px; line-height: 1.1; }
-.wd-action-hero-glyph.is-tool, .wd-action-hero-glyph.is-run { color: var(--acid); }
-.wd-action-hero-glyph.is-read { color: #7fd7ff; }
-.wd-action-hero-glyph.is-write { color: #ffcf7a; }
-.wd-action-hero-glyph.is-search { color: #8bffb0; }
-.wd-action-hero-glyph.is-message { color: var(--ink-soft); }
-.wd-action-hero-glyph.is-thinking { color: #b98cff; }
+/* DONE: the stat line, then the tally + files evidence, stacked under it. */
+.wd-summary-done-body { min-width: 0; display: flex; flex-direction: column; }
+.wd-summary-done-body > .wd-summary-val { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
 
-.wd-action-hero-main { flex: 1; min-width: 0; }
-.wd-action-hero-meta { display: flex; align-items: baseline; gap: 8px; }
-.wd-action-hero-kind { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--action); }
-.wd-action-hero-tool { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
-/* The headline is the section's one sentence, so it WRAPS rather than truncating.
-   It used to be a single nowrap line, which was survivable when it only ever said
-   "Edit agent.rs" and is not now that it carries a summary: "Last wrote a message"
-   came out as "Last wrote a mes..." next to a wide elapsed clock, which is the one
-   line in the panel that must not be the one that gets cut. Two lines, then ellipsis. */
-.wd-action-hero-verb {
-  margin-top: 3px;
-  font-size: 16px;
+/* DOING: the one live line. The verb is the section's biggest text and the clock is the
+   only thing that moves between real data changes. The verb WRAPS to two lines rather
+   than truncating: it is the one line in the panel that must not be the one cut. */
+.wd-summary-doing-body { min-width: 0; }
+.wd-summary-doing-main { display: flex; align-items: flex-start; gap: 8px; }
+.wd-summary-glyph { flex: none; font-size: 15px; line-height: 1; margin-top: 1px; }
+.wd-summary-glyph.is-tool, .wd-summary-glyph.is-run { color: var(--acid); }
+.wd-summary-glyph.is-read { color: #7fd7ff; }
+.wd-summary-glyph.is-write { color: #ffcf7a; }
+.wd-summary-glyph.is-search { color: #8bffb0; }
+.wd-summary-glyph.is-message { color: var(--ink-soft); }
+.wd-summary-glyph.is-thinking { color: #b98cff; }
+.wd-summary-doing-verb {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
   font-weight: 600;
   line-height: 1.3;
   color: var(--ink);
@@ -537,42 +541,36 @@ html, body {
   -webkit-line-clamp: 2;
   overflow-wrap: anywhere;
 }
-.wd-action-hero-target {
+.wd-summary-clock { flex: none; text-align: right; white-space: nowrap; line-height: 1.15; }
+.wd-summary-clock-value { display: block; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 15px; color: var(--ink); }
+.wd-summary-clock-label { display: block; font-size: 8.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); }
+.wd-summary-doing-last { margin-top: 3px; color: var(--ink-faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* the file the live/last step touched: open it in-app (chevron) or reveal in Finder. */
+.wd-summary-target-row { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+.wd-summary-target {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
-  margin-top: 7px;
+  flex: 1;
+  min-width: 0;
   padding: 5px 8px;
-  border: 1px solid color-mix(in srgb, var(--action) 42%, transparent);
-  background: rgba(2, 9, 6, 0.5);
+  border: 1px solid var(--hair);
+  border-radius: var(--r-control);
+  background: var(--surface-1);
   color: var(--ink-soft);
   font: inherit;
   font-size: 11px;
   text-align: left;
   cursor: pointer;
-  transition: background 140ms ease, border-color 140ms ease;
+  transition: background var(--t-micro) var(--ease-out), border-color var(--t-micro) var(--ease-out);
 }
-.wd-action-hero-target:hover {
-  background: color-mix(in srgb, var(--action) 15%, transparent);
-  border-color: color-mix(in srgb, var(--action) 62%, transparent);
-}
-.wd-action-hero-target-glyph { flex: none; color: var(--action); }
-.wd-action-hero-target-path {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--mono);
-}
+.wd-summary-target:hover { color: var(--ink); border-color: var(--hair-bright); }
+.wd-summary-target-glyph { flex: none; color: var(--action); }
 
-.wd-action-hero-elapsed { flex: none; text-align: right; font-variant-numeric: tabular-nums; }
-.wd-action-hero-elapsed-value { display: block; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 19px; color: var(--ink); }
-.wd-action-hero-elapsed-label { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); }
-
-.wd-action-hero.is-idle { border-color: var(--hair); background: rgba(196, 212, 240, 0.03); box-shadow: none; }
-.wd-action-hero-idle { display: flex; align-items: center; gap: 8px; margin-top: 2px; color: var(--ink-faint); font-size: 12px; letter-spacing: 0.03em; }
-.wd-action-hero-idle-glyph { font-size: 15px; opacity: 0.6; }
+/* NEXT: a grounded forward line, softer than the rest because it is inference from role
+   and state, not a recorded fact. */
+.wd-summary-next .wd-summary-val { color: var(--ink-faint); }
 
 /* The summary's two evidence rows: the tally (what it did, counted) and the files
    (what it did it to). Both are chips rather than a table because the rail is

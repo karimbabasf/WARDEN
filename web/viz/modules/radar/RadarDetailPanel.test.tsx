@@ -335,9 +335,9 @@ describe('RadarDetailPanel — children roster + identity/cost', () => {
 // ── current-action hero ─────────────────────────────────────────────────────────
 // The hero used to be CURRENT ACTION: the in-flight call and nothing else, which
 // left the panel's first section blank for every idle agent. It is AGENT SUMMARY
-// now. The live call is still its headline when there is one (every assertion about
-// that behaviour below is unchanged apart from the section name), and what the agent
-// has actually done is the part that is new.
+// now: four labelled rows (Is / Done / Doing / Next). The live call is the DOING
+// row when there is one; the other rows hold still so the block reads at a glance
+// instead of rewriting itself every second.
 describe('RadarDetailPanel — agent summary hero', () => {
   const HERO = '[data-section="agent-summary"]';
   const action = (over: Partial<RadarCurrentAction> = {}): RadarCurrentAction => ({
@@ -394,7 +394,7 @@ describe('RadarDetailPanel — agent summary hero', () => {
       <RadarDetailPanel agent={agentFixture({ currentAction: null, recentActivity: [] })} />,
     );
     const hero = el.querySelector(HERO);
-    expect((hero?.textContent ?? '')).toContain('No recorded actions yet');
+    expect((hero?.textContent ?? '')).toContain('recorded yet');
     expect(hero?.querySelector('[data-summary-tally]')).toBeFalsy();
     expect(hero?.querySelector('[data-summary-files]')).toBeFalsy();
   });
@@ -413,7 +413,7 @@ describe('RadarDetailPanel — agent summary hero', () => {
 
   it('offers an in-app view toggle for the in-flight target, separate from Finder', () => {
     const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
-    const view = el.querySelector(`${HERO} .wd-action-hero-target`) as HTMLButtonElement;
+    const view = el.querySelector(`${HERO} .wd-summary-target`) as HTMLButtonElement;
     expect(view).toBeTruthy();
     expect(view.getAttribute('aria-expanded')).toBe('false');
     // Shows the path with the FILENAME intact: the directory is the part allowed
@@ -439,7 +439,7 @@ describe('RadarDetailPanel — agent summary hero', () => {
       />,
     );
     const hero = el.querySelector(HERO);
-    expect(hero?.querySelector('.wd-action-hero-target')).toBeFalsy();
+    expect(hero?.querySelector('.wd-summary-target')).toBeFalsy();
     expect(hero?.querySelector('[aria-label^="Reveal"]')).toBeFalsy();
     expect((hero?.textContent ?? '')).toContain('pnpm test');
   });
@@ -452,7 +452,7 @@ describe('RadarDetailPanel — agent summary hero', () => {
       const el = render(
         <RadarDetailPanel agent={agentFixture({ currentAction: action({ startedAt: start.toISOString() }) })} />,
       );
-      const value = () => el.querySelector('.wd-action-hero-elapsed-value')?.textContent;
+      const value = () => el.querySelector('.wd-summary-clock-value')?.textContent;
       expect(value()).toBe('0s');
       act(() => {
         vi.advanceTimersByTime(3_000);
@@ -467,7 +467,7 @@ describe('RadarDetailPanel — agent summary hero', () => {
     const el = render(
       <RadarDetailPanel agent={agentFixture({ currentAction: action({ startedAt: 'not-a-date', elapsedMs: 42_000 }) })} />,
     );
-    expect(el.querySelector('.wd-action-hero-elapsed-value')?.textContent).toBe('42s');
+    expect(el.querySelector('.wd-summary-clock-value')?.textContent).toBe('42s');
   });
 
   it('swallows a rejected reveal_path without throwing', async () => {

@@ -1,21 +1,32 @@
-// agentSummary.ts: "what is this agent actually doing", in one readable block.
+// agentSummary.ts: the detail panel's four-part read on one agent, in a form you can
+// take in at a glance and that does NOT rewrite itself every second.
 //
-// This replaces the CURRENT ACTION hero, which answered a narrower question than the
-// one people ask of it. The in-flight tool call is a single frame of a session: it is
-// null for every idle agent, it is null in the gaps between calls, and even when it is
-// there it says "Edit" and a path without saying that this is the fourteenth edit in a
-// run of work on the same file. The panel's first section should answer "what has this
-// thing been doing", and the live call is one line of that answer, not all of it.
+// The panel's first section answers four questions about an agent:
+//   1. what it IS           identity, assembled by the panel from stable fields
+//   2. what it has DONE      cumulative counts over its whole feed  (tally/files/actions)
+//   3. what it is DOING      its one in-flight line, the only live part  (doing/target/clock)
+//   4. what it will do NEXT  a grounded forward line, never a guess  (next)
 //
-// HONEST-VIZ, which is the whole constraint here. A summary is the easiest place in
-// the app to invent something: it is prose, and prose reads as authoritative. So every
-// sentence below is a COUNT or a LABEL that came off the real feed. There is no model
-// in this file, nothing is inferred about intent, and nothing is smoothed over. When
-// the feed is empty the summary says the feed is empty. `headline` is assembled from
-// the agent's own status plus its own last action, so the worst case is that it is
-// terse, never that it is wrong.
+// This replaces a single CHURNING `headline`. That line was the whole section, and it
+// flipped between "Editing X", "Reading Y" and "Last ran Z" several times a second as
+// the in-flight call turned over, so the part that never changes (what this agent is,
+// how much it has done) was drowned by the part that changes constantly. Here the live
+// call is ONE small line; the identity and the totals carry the section and hold still.
 //
-// Pure and injectable-clock, so the whole thing is unit-tested without a backend.
+// HONEST-VIZ, the whole constraint. This is the one place in the app that renders
+// PROSE, so it is the easiest place to state something the feed never said. Every
+// count is off the real feed. `doing` is the agent's own status plus its own last
+// action. `next` is derived ONLY from structural facts already on the agent (it is a
+// subagent, it leads N children, it is idle, it is finished) and NEVER predicts a
+// specific action: WARDEN watches, it cannot read an agent's mind. An agent's real
+// plan is only knowable when the agent WROTE one (a todo list, a plan), and none is
+// surfaced yet, so `next` stays a statement about role and state, not about intent.
+//
+// Pure and NO injected clock: nothing here depends on `now`. The live stopwatch is the
+// panel's job (it owns the 1s tick), so `summarizeAgent` returns clock BASES, not aged
+// values, and the whole block memoises on `key`, a value signature of every field it
+// depends on. Guarding by value, never by the agent object (the radar poll hands a
+// fresh object every 750ms), is the same discipline the camera rig uses next door.
 
 import type { RadarActivity, RadarAgent } from '@/viz/shared/types/radarTypes';
 
@@ -32,7 +43,7 @@ const TALLY_NOUN: Record<string, [one: string, many: string]> = {
   thinking: ['thinking step', 'thinking steps'],
 };
 
-/** Present-tense verb for a kind, for the "doing right now" headline. */
+/** Present-tense verb for a kind, for the "doing right now" line. */
 const ACTIVE_VERB: Record<string, string> = {
   read: 'Reading',
   write: 'Editing',
@@ -43,7 +54,7 @@ const ACTIVE_VERB: Record<string, string> = {
   thinking: 'Thinking',
 };
 
-/** Past-tense verb for a kind, for the "last thing it did" headline. */
+/** Past-tense verb for a kind, for the "last thing it did" sub-line. */
 const DONE_VERB: Record<string, string> = {
   read: 'Last read',
   write: 'Last edited',
@@ -57,22 +68,45 @@ const DONE_VERB: Record<string, string> = {
 export type SummaryTally = { kind: string; count: number; label: string };
 
 export type AgentSummary = {
-  /** One sentence: what it is doing, or what it last did. Never fabricated. */
-  headline: string;
-  /** The file or command the headline refers to, when there is exactly one. */
-  target: string | null;
-  /** Whether `headline` describes something IN FLIGHT (vs the last finished step). */
-  inFlight: boolean;
-  /** How long the in-flight call has been running, in ms. Null when nothing is. */
-  elapsedMs: number | null;
-  /** Counts by kind over the agent's whole recorded feed, biggest first. */
-  tally: SummaryTally[];
-  /** Distinct files this agent has touched, most recent first. */
-  files: string[];
+  // Part 2: what it has done since it began (cumulative, only grows).
   /** Total rows the tally was computed from. Zero means an empty feed. */
   actions: number;
-  /** Age of the newest feed row in ms, or null when there is none. */
-  lastActivityMs: number | null;
+  /** Counts by kind over the agent's whole recorded feed, biggest first. */
+  tally: SummaryTally[];
+  /** Distinct files this agent has touched, most recent first (capped for the rail). */
+  files: string[];
+  /** Epoch ms the session started, or null when unparseable. The panel ages it. */
+  startedAtMs: number | null;
+
+  // Part 3: what it is doing now (the ONE live line).
+  /** The state line: "Editing agent.rs", "Working", "Idle", "Finished after 12 actions". */
+  doing: string;
+  /** Kind of the in-flight call, for the glyph; null when nothing is in flight. */
+  doingKind: string | null;
+  /** Whether `doing` describes an IN-FLIGHT call (vs a state with no live call). */
+  inFlight: boolean;
+  /** The one file `doing`/`lastAction` refers to, for preview + reveal; else null. */
+  target: string | null;
+  /** The last finished step, shown muted under an idle/working state; null in flight
+   * (the live line already names it) or on an empty feed. */
+  lastAction: string | null;
+  /** Epoch ms to subtract from `now` for the live clock (start of the in-flight call,
+   * or the last activity). Null when there is nothing to age. */
+  clockBaseMs: number | null;
+  /** A FIXED elapsed to show when `clockBaseMs` can't be derived (an unparseable
+   * startedAt), so the readout is the backend's count rather than NaN or nothing. */
+  clockFixedMs: number | null;
+  /** What the clock measures: 'Elapsed' for a live call, 'Since' for the last one. */
+  clockLabel: 'Elapsed' | 'Since' | null;
+
+  // Part 4: what it is going to do next (grounded, never fabricated).
+  /** A one-liner on what happens next, from role + state only; null when there is
+   * genuinely nothing to say (a finished agent has no "next"). */
+  next: string | null;
+
+  /** Value signature of every field above. Memoise on THIS, not on the agent object:
+   * the radar poll hands a fresh object every 750ms and would bust an identity memo. */
+  key: string;
 };
 
 function basename(path: string): string {
@@ -87,9 +121,9 @@ function noun(kind: string, count: number): string {
 }
 
 /**
- * Newest feed row first. Rows with an unparseable timestamp keep their original
- * order and sink to the end, matching the activity feed's own ordering so the two
- * sections can never disagree about which action was last.
+ * Newest feed row first. Rows with an unparseable timestamp keep their original order
+ * and sink to the end, matching the activity feed's own ordering so the two sections
+ * can never disagree about which action was last.
  */
 function newestFirst(rows: RadarActivity[]): RadarActivity[] {
   return rows
@@ -103,18 +137,36 @@ function newestFirst(rows: RadarActivity[]): RadarActivity[] {
 }
 
 /**
- * Everything the summary section renders, derived from one agent.
- *
- * `now` is injected so the elapsed/idle readouts are testable. `fileLimit` caps the
- * distinct-file list; the cap is a LAYOUT decision (the rail is narrow), and the
- * count of everything it touched is still exact in `tally`, so nothing is hidden by
- * it that is not also stated.
+ * What happens next, from structural facts ONLY. Never a predicted action: an agent's
+ * real plan is only knowable when it wrote one, and none is surfaced yet. A finished
+ * agent returns null (there is no next), which is the honest answer.
  */
-export function summarizeAgent(
-  agent: RadarAgent,
-  now: number = Date.now(),
-  fileLimit = 4,
-): AgentSummary {
+function nextLine(agent: RadarAgent): string | null {
+  const status = agent.status;
+  if (status === 'terminated' || status === 'closed') return null;
+
+  const children = Math.max(0, agent.childCount ?? 0);
+  if (children > 0) {
+    return `Coordinating ${children} subagent${children === 1 ? '' : 's'}`;
+  }
+  // A subagent (depth > 0) hands its result back to the lead that spawned it. That is
+  // a fact of the harness, not a prediction, so it is honest whether it is mid-run or
+  // between calls.
+  if ((agent.depth ?? 0) > 0) {
+    return status === 'idle' ? 'Waiting, then reports to its lead' : 'Working, then reports to its lead';
+  }
+  // A root session.
+  if (status === 'idle') return 'Idle, waiting for the next instruction';
+  return 'Continuing its run';
+}
+
+/**
+ * Everything the summary section renders, derived from one agent. `fileLimit` caps the
+ * distinct-file list; the cap is a LAYOUT decision (the rail is narrow), and the count
+ * of everything it touched is still exact in `tally`, so nothing is hidden by it that
+ * is not also stated.
+ */
+export function summarizeAgent(agent: RadarAgent, fileLimit = 4): AgentSummary {
   const rows = newestFirst(agent.recentActivity ?? []);
   const action = agent.currentAction ?? null;
 
@@ -130,9 +182,9 @@ export function summarizeAgent(
     .map(([kind, count]) => ({ kind, count, label: `${count} ${noun(kind, count)}` }))
     .sort((a, b) => {
       if (b.count !== a.count) return b.count - a.count;
-      // Stable, meaningful tie-break: the kinds that say the most about what an
-      // agent did (it CHANGED things, it RAN things) come before the ones that
-      // only say it looked around.
+      // Stable, meaningful tie-break: the kinds that say the most about what an agent
+      // did (it CHANGED things, it RAN things) come before the ones that only say it
+      // looked around.
       const ia = TALLY_ORDER.indexOf(a.kind as (typeof TALLY_ORDER)[number]);
       const ib = TALLY_ORDER.indexOf(b.kind as (typeof TALLY_ORDER)[number]);
       return (ia < 0 ? TALLY_ORDER.length : ia) - (ib < 0 ? TALLY_ORDER.length : ib);
@@ -140,51 +192,89 @@ export function summarizeAgent(
 
   const newest = rows[0] ?? null;
   const newestTs = newest ? Date.parse(newest.ts) : NaN;
-  const lastActivityMs = Number.isFinite(newestTs) ? Math.max(0, now - newestTs) : null;
+  const newestMs = Number.isFinite(newestTs) ? newestTs : null;
+  const startedTs = Date.parse(agent.startedAt);
+  const startedAtMs = Number.isFinite(startedTs) ? startedTs : null;
 
-  // An in-flight call outranks everything: it is happening right now, and it is the
-  // one fact the panel used to lead with. Elapsed is re-derived from `startedAt` so
-  // it ages between backend snapshots, falling back to the backend's own count when
-  // the timestamp will not parse (never NaN, never a frozen zero).
+  const base = {
+    actions: rows.length,
+    tally,
+    files: files.slice(0, fileLimit),
+    startedAtMs,
+    next: nextLine(agent),
+  };
+
+  // An in-flight call outranks everything: it is happening right now, and it is the one
+  // fact people used to lead with. The clock ages from `startedAt` in the panel; the
+  // backend's own elapsed is the fallback when that timestamp will not parse.
   if (action) {
     const startMs = Date.parse(action.startedAt);
-    const elapsedMs = Number.isFinite(startMs) ? Math.max(0, now - startMs) : action.elapsedMs;
+    const clockBaseMs = Number.isFinite(startMs) ? startMs : null;
     const verb = ACTIVE_VERB[action.kind] ?? `Running ${action.tool}`;
-    const headline = action.target ? `${verb} ${basename(action.target)}` : action.label || verb;
+    const doing = action.target ? `${verb} ${basename(action.target)}` : action.label || verb;
     return {
-      headline,
-      target: action.target,
+      ...base,
+      doing,
+      doingKind: action.kind,
       inFlight: true,
-      elapsedMs,
-      tally,
-      files: files.slice(0, fileLimit),
-      actions: rows.length,
-      lastActivityMs,
+      target: action.target,
+      lastAction: null,
+      clockBaseMs,
+      clockFixedMs: clockBaseMs === null ? Math.max(0, action.elapsedMs) : null,
+      clockLabel: 'Elapsed',
+      key: summaryKey(agent, base.actions, newestMs, action.kind, `${action.target ?? action.label}@${action.startedAt}`),
     };
   }
 
-  // Nothing in flight. Say what it last did rather than only that it is idle: "Idle"
-  // alone is the line that made people open the feed to find out anything at all.
-  let headline: string;
-  let target: string | null = null;
-  if (agent.status === 'terminated' || agent.status === 'closed') {
-    headline = rows.length > 0 ? `Finished after ${rows.length} action${rows.length === 1 ? '' : 's'}` : 'Finished';
-  } else if (newest) {
-    target = newest.target ?? null;
-    const verb = DONE_VERB[newest.kind] ?? 'Last action';
-    headline = target ? `${verb} ${basename(target)}` : `${verb}: ${newest.label || newest.kind}`;
+  // Nothing in flight. `doing` is the plain STATE; the last finished step rides under it
+  // as muted context, so an idle agent still says what it was doing without a churning
+  // verb up top. A finished agent states the SIZE of what it did instead.
+  const finished = agent.status === 'terminated' || agent.status === 'closed';
+  let doing: string;
+  if (finished) {
+    doing = rows.length > 0 ? `Finished after ${rows.length} action${rows.length === 1 ? '' : 's'}` : 'Finished';
   } else {
-    headline = 'No recorded actions yet';
+    doing = agent.status === 'working' ? 'Working' : 'Idle';
+  }
+
+  let lastAction: string | null = null;
+  if (!finished && newest) {
+    const t = newest.target ?? null;
+    const verb = DONE_VERB[newest.kind] ?? 'Last action';
+    lastAction = t ? `${verb} ${basename(t)}` : `${verb}: ${newest.label || newest.kind}`;
   }
 
   return {
-    headline,
-    target,
+    ...base,
+    doing,
+    doingKind: !finished && newest ? newest.kind : null,
     inFlight: false,
-    elapsedMs: null,
-    tally,
-    files: files.slice(0, fileLimit),
-    actions: rows.length,
-    lastActivityMs,
+    target: finished ? null : (newest?.target ?? null),
+    lastAction,
+    clockBaseMs: newestMs,
+    clockFixedMs: null,
+    clockLabel: newestMs !== null ? 'Since' : null,
+    key: summaryKey(agent, base.actions, newestMs, null, ''),
   };
+}
+
+/** The memo signature. Time is bucketed out entirely (the live stopwatch is rendered
+ * outside the memo from `now`), so nothing here changes on a tick, only on real data. */
+function summaryKey(
+  agent: RadarAgent,
+  actions: number,
+  newestMs: number | null,
+  actionKind: string | null,
+  actionSig: string,
+): string {
+  return [
+    agent.id,
+    agent.status,
+    actions,
+    newestMs ?? '',
+    actionKind ?? '',
+    actionSig,
+    agent.childCount ?? 0,
+    agent.depth ?? 0,
+  ].join('|');
 }

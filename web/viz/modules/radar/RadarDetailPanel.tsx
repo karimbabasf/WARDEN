@@ -13,10 +13,10 @@
 // the backend when available, and fall back to honest occupancy/free-space rows.
 
 import type { CSSProperties, KeyboardEvent } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { RadarActivity, RadarAgent, RadarContextRow } from '@/viz/shared/types/radarTypes';
-import { radarSubtitle, formatTokens as tokens } from '@/viz/shared/types/radarTypes';
+import { radarSubtitle, shortModel, formatTokens as tokens } from '@/viz/shared/types/radarTypes';
 import { FilePreview } from '@/viz/shared/ui/FilePreview';
 import { CompactControl } from '@/viz/shared/ui/CompactControl';
 import { summarizeAgent } from './agentSummary';
@@ -160,28 +160,81 @@ function activityKind(kind: string): { glyph: string; label: string } {
   return ACTIVITY_KIND[kind] ?? { glyph: '•', label: kind || 'Event' };
 }
 
-// ── Hero: the agent summary, the first thing under the header ─────────────────
+/** Coarse age ("45s", "12m", "2h", "3d"): changes at most once a minute past the first
+ * minute, so a per-second tick never churns the line it sits on. */
+function coarseAge(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  return `${Math.floor(hr / 24)}d`;
+}
+
+/** The one identity clause the header does NOT carry: root vs subagent, and the team
+ * role. Model + harness are repeated in short so the summary reads on its own. */
+function identityLine(agent: RadarAgent, harnessLabel: string): string {
+  const parts = [(agent.depth ?? 0) > 0 ? 'Subagent' : 'Root agent', harnessLabel];
+  const model = shortModel(agent.model);
+  if (model) parts.push(model);
+  let line = parts.join(' · ');
+  const team = agent.team;
+  if (team) {
+    line += team.isLead
+      ? ` · leads ${team.name}`
+      : ` · in ${team.name}${team.memberName ? ` as ${team.memberName}` : ''}`;
+  }
+  return line;
+}
+
+// ── The agent summary: four things, at a glance, that do NOT rewrite every second ──
 //
-// This used to be CURRENT ACTION: the in-flight tool call and nothing else. That is
-// a real signal but a narrow one. It is null for every idle agent and null in the
-// gaps between calls, so the section people look at first sat empty most of the time
-// and never said what the agent had actually been doing. The summary keeps the live
-// call as its headline when there is one, and otherwise answers the question the
-// panel gets opened to answer: what has this thing done.
+// This replaces a single CHURNING headline. The old section WAS the in-flight verb, and
+// it flipped between "Editing X", "Reading Y" and "Last ran Z" several times a second as
+// the tool call turned over, so the parts that never change (what this agent is, how
+// much it has done) were drowned by the one part that changes constantly. Now the block
+// answers, in order, the four questions people open the panel to ask:
 //
-// Everything rendered here is a count or a label off the real feed (see
-// `summarizeAgent`), so the section stays as honest as the globe it describes: no
-// intent, no paraphrase, no invented progress.
+//   Is    what this agent is        (root vs subagent, harness, model, team), stays put
+//   Done  what it has done so far    (exact counts + files over its whole feed), only grows
+//   Doing what it is doing now       (its one live line, the ONLY ticking part)
+//   Next  what it will do next       (a grounded line from role + state, never a guess)
+//
+// The block MEMOISES on `summary.key`, a value signature of the underlying data, so the
+// 750ms radar poll (which hands a fresh agent object every time) and the 1s clock tick
+// do not rebuild it. Only the live stopwatch re-renders, aged in the panel from `now`.
+// Everything rendered is a count or a label off the real feed (see `summarizeAgent`):
+// no intent, no paraphrase, no invented progress.
 function AgentSummarySection({ agent }: { agent: RadarAgent }) {
   const [open, setOpen] = useState(false);
-  const action = agent.currentAction ?? null;
-  // Tick only while something is in flight; an idle agent's summary carries no live
-  // number, so it costs no interval.
-  const now = useTick(action != null);
-  const summary = summarizeAgent(agent, now);
+  const theme = radarHarness(agent.harness);
 
-  // Collapse the viewer whenever the headline changes target, otherwise the panel
-  // keeps showing the previous file under a new heading.
+  // Memoise by VALUE, never by the agent object: the poll replaces the object every
+  // 750ms with equal data, so an identity memo would rebuild on every tick. `memoKey`
+  // busts only when something real changed (a new row, a status flip, a new live call).
+  const memoKey = [
+    agent.id,
+    agent.status,
+    agent.recentActivity?.length ?? 0,
+    agent.recentActivity?.[0]?.ts ?? '',
+    agent.currentAction?.kind ?? '',
+    agent.currentAction?.startedAt ?? '',
+    agent.childCount ?? 0,
+    agent.depth ?? 0,
+  ].join('|');
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- memoKey is the value signature of `agent`
+  const summary = useMemo(() => summarizeAgent(agent), [memoKey]);
+
+  // The single live number, aged against a ticking `now`. Tick only while there is
+  // something to age (an in-flight call, a "since", or an uptime), so a fully static
+  // summary costs no interval. A per-second tick re-renders this section, but the
+  // memoised body is unchanged, so only the clock text moves.
+  const now = useTick(summary.clockBaseMs != null || summary.startedAtMs != null);
+  const clockMs = summary.clockBaseMs != null ? Math.max(0, now - summary.clockBaseMs) : summary.clockFixedMs;
+
+  // Collapse the viewer whenever the live target changes, otherwise the panel keeps
+  // showing the previous file under a new heading.
   const target = summary.target;
   const prevTargetRef = useRef(target);
   if (prevTargetRef.current !== target) {
@@ -189,45 +242,99 @@ function AgentSummarySection({ agent }: { agent: RadarAgent }) {
     if (open) setOpen(false);
   }
 
-  const k = activityKind(action?.kind ?? '');
-  // One number, and it changes meaning with the state rather than vanishing: how
-  // long the live call has run, else how long ago the last one landed.
-  const clockMs = summary.inFlight ? summary.elapsedMs : summary.lastActivityMs;
+  const doingGlyph = summary.doingKind ? activityKind(summary.doingKind) : null;
+  const ranFor = summary.startedAtMs != null ? coarseAge(now - summary.startedAtMs) : null;
+  const cost = agent.estCostUsd != null && agent.estCostUsd > 0 ? `$${agent.estCostUsd.toFixed(2)}` : null;
+  const doneStat = [ranFor, `${summary.actions} action${summary.actions === 1 ? '' : 's'}`, cost]
+    .filter(Boolean)
+    .join(' · ');
 
   return (
     <section
-      className={`wd-radar-section wd-action-hero${summary.inFlight ? '' : ' is-idle'}`}
+      className={`wd-radar-section wd-agent-summary${summary.inFlight ? ' is-live' : ''}`}
       data-section="agent-summary"
       data-current-action={summary.inFlight ? 'active' : 'idle'}
-      data-kind={action?.kind}
+      data-kind={summary.doingKind ?? undefined}
     >
       <div className="wd-card-kicker">Agent summary</div>
-      <div className="wd-action-hero-body">
-        {action ? (
-          <span className={`wd-action-hero-glyph is-${action.kind}`} aria-hidden>
-            {k.glyph}
-          </span>
-        ) : null}
-        <div className="wd-action-hero-main">
-          {action ? (
-            <div className="wd-action-hero-meta">
-              <span className="wd-action-hero-kind">{k.label}</span>
-              <span className="wd-action-hero-tool">{action.tool}</span>
+
+      {/* 1. What it IS. The one identity clause the header does not carry. */}
+      <p className="wd-summary-row wd-summary-is">
+        <span className="wd-summary-tag">Is</span>
+        <span className="wd-summary-val">{identityLine(agent, theme.label)}</span>
+      </p>
+
+      {/* 2. What it has DONE since it began: exact counts over the whole feed. */}
+      <div className="wd-summary-row wd-summary-done">
+        <span className="wd-summary-tag">Done</span>
+        <div className="wd-summary-done-body">
+          <span className="wd-summary-val">{summary.actions > 0 ? doneStat : ranFor ? `${ranFor} · nothing recorded yet` : 'Nothing recorded yet'}</span>
+          {summary.tally.length > 0 ? (
+            <ul className="wd-summary-tally" data-summary-tally>
+              {summary.tally.map((t) => (
+                <li key={t.kind} className="wd-summary-tally-item" data-kind={t.kind}>
+                  <span className="wd-summary-tally-glyph" aria-hidden>
+                    {activityKind(t.kind).glyph}
+                  </span>
+                  {t.label}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {summary.files.length > 0 ? (
+            <div className="wd-summary-files" data-summary-files>
+              <span className="wd-summary-files-label">Touched</span>
+              <ul className="wd-summary-files-list">
+                {summary.files.map((f) => (
+                  <li key={f}>
+                    <button
+                      type="button"
+                      className="wd-summary-file"
+                      title={f}
+                      onClick={() => revealInFinder(f)}
+                      aria-label={`Reveal ${basename(f)} in Finder`}
+                    >
+                      {basename(f)}
+                    </button>
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : null}
-          <div className="wd-action-hero-verb">{summary.headline}</div>
+        </div>
+      </div>
+
+      {/* 3. What it is DOING now: the one live line, the only part that ticks. */}
+      <div className="wd-summary-row wd-summary-doing" data-inflight={summary.inFlight ? 'yes' : 'no'}>
+        <span className="wd-summary-tag">Doing</span>
+        <div className="wd-summary-doing-body">
+          <div className="wd-summary-doing-main">
+            {doingGlyph ? (
+              <span className={`wd-summary-glyph is-${summary.doingKind}`} aria-hidden>
+                {doingGlyph.glyph}
+              </span>
+            ) : null}
+            <span className="wd-summary-doing-verb">{summary.doing}</span>
+            {clockMs != null ? (
+              <span className="wd-summary-clock">
+                <span className="wd-summary-clock-value">{elapsedClock(clockMs)}</span>
+                <span className="wd-summary-clock-label">{summary.clockLabel}</span>
+              </span>
+            ) : null}
+          </div>
+          {summary.lastAction ? <div className="wd-summary-doing-last">{summary.lastAction}</div> : null}
           {target ? (
-            <div className="wd-action-hero-target-row">
-              {/* Two distinct verbs, so neither is a mystery meat icon: OPEN reads
-                  the file inside WARDEN, REVEAL hands it to Finder. */}
+            <div className="wd-summary-target-row">
+              {/* Two distinct verbs, so neither is a mystery-meat icon: OPEN reads the
+                  file inside WARDEN, REVEAL hands it to Finder. */}
               <button
                 type="button"
-                className="wd-action-hero-target"
+                className="wd-summary-target"
                 onClick={() => setOpen((o) => !o)}
                 aria-expanded={open}
                 aria-label={`${open ? 'Hide' : 'View'} ${basename(target)}`}
               >
-                <span className="wd-action-hero-target-glyph" aria-hidden>
+                <span className="wd-summary-target-glyph" aria-hidden>
                   {open ? '▾' : '▸'}
                 </span>
                 <span className="wd-path" title={target}>
@@ -247,50 +354,14 @@ function AgentSummarySection({ agent }: { agent: RadarAgent }) {
             </div>
           ) : null}
         </div>
-        {clockMs != null ? (
-          <div className="wd-action-hero-elapsed">
-            <span className="wd-action-hero-elapsed-value">{elapsedClock(clockMs)}</span>
-            <span className="wd-action-hero-elapsed-label">{summary.inFlight ? 'Elapsed' : 'Since'}</span>
-          </div>
-        ) : null}
       </div>
 
-      {/* What it has done, as exact counts over the whole recorded feed. */}
-      {summary.tally.length > 0 ? (
-        <ul className="wd-summary-tally" data-summary-tally>
-          {summary.tally.map((t) => (
-            <li key={t.kind} className="wd-summary-tally-item" data-kind={t.kind}>
-              <span className="wd-summary-tally-glyph" aria-hidden>
-                {activityKind(t.kind).glyph}
-              </span>
-              {t.label}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="wd-summary-empty">Nothing recorded on this agent yet.</p>
-      )}
-
-      {/* And which files, because "12 edits" is only half an answer. */}
-      {summary.files.length > 0 ? (
-        <div className="wd-summary-files" data-summary-files>
-          <span className="wd-summary-files-label">Touched</span>
-          <ul className="wd-summary-files-list">
-            {summary.files.map((f) => (
-              <li key={f}>
-                <button
-                  type="button"
-                  className="wd-summary-file"
-                  title={f}
-                  onClick={() => revealInFinder(f)}
-                  aria-label={`Reveal ${basename(f)} in Finder`}
-                >
-                  {basename(f)}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
+      {/* 4. What it will do NEXT: a grounded line from role + state, or nothing. */}
+      {summary.next ? (
+        <p className="wd-summary-row wd-summary-next">
+          <span className="wd-summary-tag">Next</span>
+          <span className="wd-summary-val">{summary.next}</span>
+        </p>
       ) : null}
 
       {open && target ? <FilePreview path={target} onClose={() => setOpen(false)} /> : null}
