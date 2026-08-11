@@ -187,7 +187,7 @@ pub struct PassOutcome {
 pub fn evaluate(
     pending: &[ArmRecord],
     registry: &[RegistryEntry],
-    codex_status: &dyn Fn(&ArmRecord) -> SessionStatus,
+    quiet_status: &dyn Fn(&ArmRecord) -> SessionStatus,
     alive: &dyn Fn(u32) -> bool,
     tracker: &mut IdleTracker,
     now: DateTime<Utc>,
@@ -206,7 +206,10 @@ pub fn evaluate(
                 .get(rec.session_id.as_str())
                 .map(|e| e.status)
                 .unwrap_or(SessionStatus::Gone),
-            IdleSource::CodexQuietWindow => codex_status(rec),
+            // Both quiet windows are a file that stopped being written, so one
+            // injected resolver serves them and the caller decides which file.
+            src if src.is_quiet_window() => quiet_status(rec),
+            _ => SessionStatus::Unknown,
         };
 
         if status == SessionStatus::Gone {
@@ -255,6 +258,22 @@ fn codex_status_at(thread_id: &str, sessions_root: &Path, now: DateTime<Utc>) ->
         return SessionStatus::Gone;
     };
     codex_quiet_status(true, mtime_secs_ago(&path, now), codex_quiet_secs())
+}
+
+/// The generic quiet window: a session's own transcript, read as a status.
+///
+/// The same rule the Codex path uses, minus the archive-location test that only
+/// Codex has. A transcript that no longer exists means the session is gone; one
+/// that has not been written for the quiet window means the agent stopped.
+pub(crate) fn transcript_status_now(path: &Path) -> SessionStatus {
+    transcript_status_at(path, Utc::now())
+}
+
+fn transcript_status_at(path: &Path, now: DateTime<Utc>) -> SessionStatus {
+    if !path.exists() {
+        return SessionStatus::Gone;
+    }
+    codex_quiet_status(true, mtime_secs_ago(path, now), codex_quiet_secs())
 }
 
 /// Locate `~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl` for one uuid.
@@ -393,11 +412,22 @@ fn run_pass(
     }
     let now = Utc::now();
     let entries = registry::snapshot(sessions_dir);
-    let codex = |rec: &ArmRecord| codex_status_at(&rec.session_id, codex_sessions_dir, now);
+    // One resolver for both quiet windows: a Codex thread is found by walking the
+    // sessions root for its rollout, anything else by the transcript path the store
+    // still holds for it (re-read every pass, so a moved file is not a false idle).
+    let quiet = |rec: &ArmRecord| match rec.idle_source {
+        IdleSource::CodexQuietWindow => codex_status_at(&rec.session_id, codex_sessions_dir, now),
+        _ => store
+            .sessions()
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|s| s.id == rec.agent_id))
+            .map(|s| transcript_status_at(&s.source_path, now))
+            .unwrap_or(SessionStatus::Gone),
+    };
     let outcome = evaluate(
         &pending,
         &entries,
-        &codex,
+        &quiet,
         &crate::platform::process_alive,
         tracker,
         now,

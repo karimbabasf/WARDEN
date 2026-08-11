@@ -173,8 +173,29 @@ pub(crate) fn arm_with(
 ) -> Result<ArmedRow> {
     let rec = resolve(store, sessions_dir, codex_sessions_dir, agent_id, probe)?;
     arm::put(store, &rec)?;
-    let (last_status, alive) = observe_one(&rec, sessions_dir, codex_sessions_dir);
+    let (last_status, alive) = observe_one(store, &rec, sessions_dir, codex_sessions_dir);
     Ok(model::to_row(&rec, last_status.as_str(), alive))
+}
+
+/// Resolve what arming `agent_id` WOULD do, without writing or sending anything.
+///
+/// Exists for `examples/compact_probe.rs`, which walks the real board and reports the
+/// decision for every live agent. The bug this feature shipped with (the radar's store
+/// id being looked up in a registry keyed by harness id) could not be seen from any
+/// fixture, only from real ids, so the probe is part of how this path stays honest.
+pub fn resolve_for_probe(
+    store: &Store,
+    sessions_dir: &Path,
+    codex_sessions_dir: &Path,
+    agent_id: &str,
+) -> Result<ArmRecord> {
+    resolve(
+        store,
+        sessions_dir,
+        codex_sessions_dir,
+        agent_id,
+        &Probe::real(),
+    )
 }
 
 /// Disarm `agent_id`. Returns false when nothing was armed.
@@ -197,7 +218,7 @@ pub fn status(
     let armed = arm::all(store)?
         .into_iter()
         .map(|rec| {
-            let (last_status, alive) = observe_one(&rec, sessions_dir, codex_sessions_dir);
+            let (last_status, alive) = observe_one(store, &rec, sessions_dir, codex_sessions_dir);
             model::to_row(&rec, last_status.as_str(), alive)
         })
         .collect();
@@ -211,6 +232,7 @@ pub fn status(
 /// Current status and liveness for one record, read from the world right now
 /// rather than from whatever the watcher last saw.
 fn observe_one(
+    store: &Store,
     rec: &ArmRecord,
     sessions_dir: &Path,
     codex_sessions_dir: &Path,
@@ -229,14 +251,59 @@ fn observe_one(
             let status = watch::codex_status_now(&rec.session_id, codex_sessions_dir);
             (status, Some(status != SessionStatus::Gone))
         }
+        IdleSource::TranscriptQuietWindow => {
+            // The transcript path is not carried on the record (it can move), so it
+            // is re-resolved from the store on every observation.
+            let status = transcript_path(store, &rec.agent_id)
+                .map(|p| watch::transcript_status_now(&p))
+                .unwrap_or(SessionStatus::Gone);
+            (status, Some(status != SessionStatus::Gone))
+        }
     }
+}
+
+/// Where an armed agent's transcript lives right now, for the generic quiet
+/// window. `None` once the store no longer knows the session.
+fn transcript_path(store: &Store, agent_id: &str) -> Option<std::path::PathBuf> {
+    store
+        .sessions()
+        .ok()?
+        .into_iter()
+        .find(|s| s.id == agent_id)
+        .map(|s| s.source_path)
+}
+
+/// Walk `agent_id` up to the root session it belongs to.
+///
+/// A subagent has no process and no control channel of its own, so everything
+/// about DELIVERY belongs to the root that spawned it; only the row's identity
+/// stays with the globe that was clicked. The walk is bounded so a cycle in the
+/// parent table cannot hang the arm command.
+fn root_ancestor(store: &Store, agent_id: &str) -> Result<String> {
+    let mut id = agent_id.to_string();
+    for _ in 0..64 {
+        match store.parent_of(&id)? {
+            Some(parent) => id = parent,
+            None => return Ok(id),
+        }
+    }
+    Ok(id)
 }
 
 /// Build the record for one agent id: which harness it is, whether a control
 /// channel exists, and what its status is right now.
 ///
-/// A live Claude session is identified by the registry, which is also the only
-/// place a pid can come from. Everything else is resolved from the store.
+/// THE ID TRANSLATION, which is the whole reason this is not a one-liner. The
+/// radar hands us a `RadarAgent.id`, which is the STORE's session id (a hash),
+/// while the Claude registry keys on the harness's own `sessionId` (a uuid). The
+/// two are never equal, so looking the agent id up in the registry directly
+/// matched nothing and EVERY live Claude session fell through to the
+/// "not running" arm below. The store row's `external_id` is the bridge, and it
+/// is resolved from the ROOT of the agent's tree so a subagent arms the session
+/// that actually owns its context.
+///
+/// The direct registry lookup is kept as a fallback for callers that already
+/// hold a harness session id (the tests, and any future non-radar caller).
 fn resolve(
     store: &Store,
     sessions_dir: &Path,
@@ -246,7 +313,21 @@ fn resolve(
 ) -> Result<ArmRecord> {
     let now = Utc::now();
 
-    if let Some(entry) = registry::find(sessions_dir, agent_id) {
+    let sessions = store.sessions()?;
+    let session = sessions.iter().find(|s| s.id == agent_id);
+    let root_id = match session {
+        Some(_) => root_ancestor(store, agent_id)?,
+        None => agent_id.to_string(),
+    };
+    let root = sessions.iter().find(|s| s.id == root_id);
+    // The harness id to look the registry up by: the root row's external id when
+    // the store knows this agent, else whatever the caller passed.
+    let external = root.map(|s| s.external_id.as_str()).unwrap_or(agent_id);
+    // True when the click landed on a subagent and the arm was redirected to its
+    // root. The user is told this in `mode_reason` rather than being refused.
+    let delegated = root.is_some() && root_id != agent_id;
+
+    if let Some(entry) = registry::find(sessions_dir, external) {
         let tty = (probe.tty)(entry.pid);
         let terminal = (probe.terminal)(entry.pid);
         // Only ask for the permission when this session could actually use it:
@@ -256,13 +337,25 @@ fn resolve(
             Some(app) if entry.entrypoint == "cli" => (probe.automation)(app),
             _ => automation_status(),
         };
-        let (mode, mode_reason) =
+        let (mode, channel_reason) =
             deliver::claude_mode(&entry.entrypoint, tty.as_deref(), terminal, automation);
-        let label = if entry.name.is_empty() {
-            short_id(agent_id)
+        let parent_label = if entry.name.is_empty() {
+            short_id(&entry.session_id)
         } else {
             entry.name.clone()
         };
+        let mode_reason = if delegated {
+            format!(
+                "a subagent shares its parent's context, so this arms the parent session ({parent_label}) and compacts when the PARENT finishes: {channel_reason}"
+            )
+        } else {
+            channel_reason
+        };
+        // The row is labelled with the globe that was clicked, so a delegated arm
+        // still reads as belonging to the subagent it was armed from.
+        let label = session
+            .and_then(session_label)
+            .unwrap_or_else(|| parent_label.clone());
         return Ok(ArmRecord {
             agent_id: agent_id.to_string(),
             session_id: entry.session_id,
@@ -280,13 +373,11 @@ fn resolve(
         });
     }
 
-    let session = store
-        .sessions()?
-        .into_iter()
-        .find(|s| s.id == agent_id)
+    let session = session
+        .cloned()
         .ok_or_else(|| anyhow!("no agent with id {agent_id}"))?;
 
-    match session.harness {
+    match &session.harness {
         Harness::Codex => {
             let originator = session.meta.get("originator").and_then(|v| v.as_str());
             let (mode, mode_reason) = deliver::codex_mode(originator);
@@ -315,25 +406,49 @@ fn resolve(
                 detail: None,
             })
         }
-        // A Claude session the store knows but the registry does not is either a
-        // subagent (no process of its own, so it cannot be compacted separately)
-        // or a session that has already exited. Say which.
-        Harness::ClaudeCode => {
-            if store.parent_of(agent_id)?.is_some() {
-                Err(anyhow!(
-                    "this is a subagent and shares its parent's context: arm the parent session instead"
-                ))
-            } else {
-                Err(anyhow!(
-                    "that session is not running, so there is nothing to compact"
-                ))
-            }
-        }
-        other => Err(anyhow!(
-            "{} sessions expose no compaction channel",
-            other.as_str()
+        // A Claude session whose ROOT has no registry entry has no live process:
+        // the registry is written by the process itself, so its absence is the
+        // exit. There is genuinely nothing to compact, and saying so is better
+        // than arming something that can never fire.
+        Harness::ClaudeCode => Err(anyhow!(
+            "that session is not running, so there is nothing to compact"
         )),
+        // Every other harness (Cursor, and anything a future adapter adds). WARDEN
+        // has no control channel and no status file for these, but it does have the
+        // transcript it is already tailing, so it can still watch the agent stop and
+        // tell you. Refusing here was the wrong call: the button exists to say "tell
+        // me when this is done", and that half always works.
+        other => {
+            let harness = other.as_str().to_string();
+            let baseline = watch::transcript_status_now(&session.source_path);
+            Ok(ArmRecord {
+                agent_id: agent_id.to_string(),
+                session_id: session.external_id.clone(),
+                pid: None,
+                harness: harness.clone(),
+                mode: DeliveryMode::NotifyOnly,
+                mode_reason: format!(
+                    "notify only: WARDEN has no control channel into {harness}, so it watches the transcript and tells you the moment this agent stops"
+                ),
+                idle_source: IdleSource::TranscriptQuietWindow,
+                label: session_label(&session).unwrap_or_else(|| short_id(agent_id)),
+                baseline_status: baseline.as_str().to_string(),
+                armed_at: now,
+                state: ArmState::Armed,
+                fired_at: None,
+                detail: None,
+            })
+        }
     }
+}
+
+/// The display name a session carries, if it has one worth showing.
+fn session_label(s: &crate::ir::Session) -> Option<String> {
+    s.meta
+        .get("agent_nickname")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// First segment of a uuid, for a label when the harness gave us no name.
@@ -371,6 +486,125 @@ mod tests {
 
     fn arm(store: &Store, dir: &Path, codex: &Path, id: &str) -> Result<ArmedRow> {
         arm_with(store, dir, codex, id, &granted_probe())
+    }
+
+    /// Persist a session row shaped the way the real pipeline writes one: the id is
+    /// the STORE's hash, the external id is the harness's own session id. That gap
+    /// is the whole point of these fixtures.
+    fn put_session(store: &Store, external_id: &str, harness: crate::ir::Harness) -> String {
+        let source_path = std::path::PathBuf::from(format!("/tmp/warden-test/{external_id}.jsonl"));
+        let id = crate::util::stable_id(&[
+            harness.as_str(),
+            external_id,
+            &source_path.to_string_lossy(),
+        ]);
+        let session = crate::ir::Session {
+            id: id.clone(),
+            harness,
+            external_id: external_id.to_string(),
+            project: None,
+            model_ids: vec![],
+            started_at: Utc::now(),
+            ended_at: None,
+            source_path,
+            raw_hash: 0,
+            ingested_at: Utc::now(),
+            meta: serde_json::json!({}),
+        };
+        store
+            .upsert_session_batch(&session, &[], &[], 0)
+            .expect("persist session");
+        id
+    }
+
+    /// THE BUG THIS FEATURE SHIPPED WITH, pinned.
+    ///
+    /// The radar hands `compact_arm` a `RadarAgent.id`, which is the store's sha256
+    /// session id. The Claude registry keys on the harness uuid. Looking the agent id
+    /// up in the registry directly therefore matched nothing, so every live Claude
+    /// session on the board answered "that session is not running" and the button was
+    /// dead for the entire harness. Arming by the store id must resolve the registry
+    /// entry through the row's `external_id`.
+    #[test]
+    fn arming_by_the_radar_agent_id_resolves_the_live_registry_session() {
+        let store = Store::memory().expect("store");
+        let dir = fixture_dir();
+        let codex = tempfile::tempdir().expect("tempdir");
+        let agent_id = put_session(
+            &store,
+            "aaaaaaaa-0000-4000-8000-000000000001",
+            Harness::ClaudeCode,
+        );
+        assert_ne!(
+            agent_id, "aaaaaaaa-0000-4000-8000-000000000001",
+            "precondition: the radar id is NOT the harness session id"
+        );
+
+        let row = arm(&store, dir.path(), codex.path(), &agent_id).expect("arm");
+
+        assert_eq!(row.agent_id, agent_id, "the row belongs to the clicked globe");
+        assert_eq!(
+            row.session_id, "aaaaaaaa-0000-4000-8000-000000000001",
+            "delivery targets the harness session"
+        );
+        assert_eq!(row.pid, Some(990015));
+        assert_eq!(row.mode, "terminal_applescript");
+        assert!(row.acts, "a terminal session must really compact");
+        assert_eq!(row.idle_source, "registry_transition");
+    }
+
+    /// A subagent has no process of its own, so it used to be refused outright. It now
+    /// arms against the session that owns its context, and the reason says so instead
+    /// of the user being told to go find the parent themselves.
+    #[test]
+    fn arming_a_subagent_delegates_to_its_parent_instead_of_refusing() {
+        let store = Store::memory().expect("store");
+        let dir = fixture_dir();
+        let codex = tempfile::tempdir().expect("tempdir");
+        let root = put_session(
+            &store,
+            "aaaaaaaa-0000-4000-8000-000000000001",
+            Harness::ClaudeCode,
+        );
+        let child = put_session(&store, "agent-aExplore-c0ffee", Harness::ClaudeCode);
+        store.link_child_session(&child, &root).expect("link");
+
+        let row = arm(&store, dir.path(), codex.path(), &child).expect("arm");
+
+        assert_eq!(row.agent_id, child);
+        assert_eq!(
+            row.session_id, "aaaaaaaa-0000-4000-8000-000000000001",
+            "the parent is what actually gets compacted"
+        );
+        assert!(row.acts);
+        assert!(
+            row.mode_reason.contains("parent session"),
+            "the delegation must be stated, not hidden: {}",
+            row.mode_reason
+        );
+    }
+
+    /// "Works for every agent on the board" includes the harnesses WARDEN has no
+    /// channel into. Those arm as notify-only against their own transcript rather
+    /// than erroring, because "tell me when this is done" always works.
+    #[test]
+    fn a_harness_with_no_control_channel_still_arms_as_notify_only() {
+        let store = Store::memory().expect("store");
+        let dir = fixture_dir();
+        let codex = tempfile::tempdir().expect("tempdir");
+        let agent_id = put_session(&store, "cursor-thread-1", Harness::Cursor);
+
+        let row = arm(&store, dir.path(), codex.path(), &agent_id).expect("arm");
+
+        assert_eq!(row.harness, "cursor");
+        assert_eq!(row.mode, "notify_only");
+        assert!(!row.acts);
+        assert_eq!(row.idle_source, "transcript_quiet_window");
+        assert!(
+            row.mode_reason.starts_with("notify only:"),
+            "reason: {}",
+            row.mode_reason
+        );
     }
 
     #[test]

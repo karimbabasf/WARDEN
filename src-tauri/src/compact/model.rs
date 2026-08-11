@@ -63,6 +63,11 @@ pub enum IdleSource {
     /// A `~/.codex/sessions` rollout that has not been written for the quiet
     /// window and is not archived. Inferred, not observed.
     CodexQuietWindow,
+    /// Any other harness: the session's own transcript has not been written for
+    /// the quiet window. The weakest of the three, and the only one that needs no
+    /// harness-specific knowledge at all, which is exactly why it exists: every
+    /// agent the radar can draw is armable, even one WARDEN has no channel into.
+    TranscriptQuietWindow,
 }
 
 impl IdleSource {
@@ -70,14 +75,25 @@ impl IdleSource {
         match self {
             IdleSource::RegistryTransition => "registry_transition",
             IdleSource::CodexQuietWindow => "codex_quiet_window",
+            IdleSource::TranscriptQuietWindow => "transcript_quiet_window",
         }
     }
 
     pub fn from_wire(s: &str) -> Self {
         match s {
             "codex_quiet_window" => IdleSource::CodexQuietWindow,
+            "transcript_quiet_window" => IdleSource::TranscriptQuietWindow,
             _ => IdleSource::RegistryTransition,
         }
+    }
+
+    /// True when the signal is a file going quiet rather than a status the harness
+    /// itself declared. Both quiet windows resolve through the same code path.
+    pub fn is_quiet_window(&self) -> bool {
+        matches!(
+            self,
+            IdleSource::CodexQuietWindow | IdleSource::TranscriptQuietWindow
+        )
     }
 }
 
