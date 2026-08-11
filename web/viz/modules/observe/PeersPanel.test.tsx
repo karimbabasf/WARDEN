@@ -17,12 +17,16 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(()
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
+// The popover is PORTALLED to the body (it has to escape the fleet rack's transform,
+// see PeersPanel's header note), so a query scoped to the mount container would miss
+// the whole dock. Tests query the document, and assert the trigger through the
+// container so the split is still visible.
 function render(node: React.ReactNode): HTMLElement {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => root!.render(node));
-  return container;
+  return document.body;
 }
 
 async function flush() {
@@ -112,7 +116,10 @@ describe('PeersPanel', () => {
     expect(el.textContent).toContain('token expired');
   });
 
-  it('selecting a peer fetches and renders that peer\'s state, and back returns to the list', async () => {
+  // Picking a peer hands the answer to the SCENE (WarRoom parks their constellation
+  // beside yours), so the popover closes on select instead of staying open over the
+  // fleet rack it was covering. The state fetch and the lift upward still happen.
+  it("selecting a peer fetches that peer's state, lifts it upward, and closes the popover", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
       if (cmd === 'observe_list_peers') return Promise.resolve([PEER]);
       if (cmd === 'observe_peer_state') {
@@ -121,7 +128,8 @@ describe('PeersPanel', () => {
       }
       return Promise.resolve(undefined);
     });
-    const el = render(<PeersPanel />);
+    const watched = vi.fn();
+    const el = render(<PeersPanel onWatchedPeer={watched} />);
     await open(el);
 
     const peerBtn = el.querySelector('.wd-observe-peer-btn') as HTMLButtonElement;
@@ -129,6 +137,15 @@ describe('PeersPanel', () => {
     await flush();
 
     expect(invoke).toHaveBeenCalledWith('observe_peer_state', { peerId: 'peer-1' });
+    expect(el.querySelector('.wd-observe-dock')).toBeNull();
+    expect(el.querySelector('.wd-observe-dock-scrim')).toBeNull();
+    expect(watched).toHaveBeenCalledWith(
+      { id: 'peer-1', label: "Askhat's machine" },
+      expect.objectContaining({ generatedAt: 'now' }),
+    );
+
+    // Reopening lands on that peer's readout, with a way to stop watching.
+    await open(el);
     expect(el.querySelector('.wd-observe-radar')).not.toBeNull();
     expect(el.textContent).toContain('No active agents');
 
@@ -136,6 +153,27 @@ describe('PeersPanel', () => {
     act(() => back.click());
     await flush();
     expect(el.querySelector('.wd-observe-peer-list')).not.toBeNull();
+  });
+
+  it('closes on the scrim and on Escape, so it can never be left sitting over the rail', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'observe_list_peers' ? Promise.resolve([PEER]) : Promise.resolve(undefined),
+    );
+    const el = render(<PeersPanel />);
+
+    await open(el);
+    const scrim = el.querySelector('.wd-observe-dock-scrim') as HTMLButtonElement;
+    expect(scrim).not.toBeNull();
+    act(() => scrim.click());
+    await flush();
+    expect(el.querySelector('.wd-observe-dock')).toBeNull();
+
+    await open(el);
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    await flush();
+    expect(el.querySelector('.wd-observe-dock')).toBeNull();
   });
 
   it('removing a peer calls observe_remove_peer with its id and drops the selection if it was open', async () => {
@@ -155,6 +193,9 @@ describe('PeersPanel', () => {
     const peerBtn = el.querySelector('.wd-observe-peer-btn') as HTMLButtonElement;
     act(() => peerBtn.click());
     await flush();
+
+    // Selecting closed the popover; reopen to reach the peer's readout and the list.
+    await open(el);
     expect(el.querySelector('.wd-observe-radar')).not.toBeNull();
 
     const back = el.querySelector('.wd-observe-back') as HTMLButtonElement;
