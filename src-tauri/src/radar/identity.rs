@@ -91,10 +91,11 @@ fn circled(n: u32) -> String {
 }
 
 /// When a subagent became terminated, or `None` if still live.
-/// Primary: the parent logged a tool RESULT for the subagent's `tool_use_id` →
-/// terminated at the result's timestamp (a permanent transcript fact ⇒ idempotent
-/// across recomputes). Backstop: no result, but the subagent has been silent longer
-/// than `terminate_ms` while its parent is alive → terminated at `last + terminate_ms`.
+/// Primary: the parent logged an explicit COMPLETION for the subagent's `tool_use_id`
+/// (see [`parent_completion_at`]) → terminated at that timestamp (a permanent transcript
+/// fact ⇒ idempotent across recomputes). Backstop: no completion, but the subagent has
+/// been silent longer than `terminate_ms` while its parent is alive → terminated at
+/// `last + terminate_ms`.
 pub(crate) fn subagent_terminated_at(
     tool_use_id: Option<&str>,
     parent_events: &[(crate::ir::Turn, crate::ir::EventRecord)],
@@ -102,37 +103,86 @@ pub(crate) fn subagent_terminated_at(
     now: DateTime<Utc>,
     terminate_ms: u64,
 ) -> Option<DateTime<Utc>> {
-    if let Some(tid) = tool_use_id {
-        if let Some(ts) = parent_events
-            .iter()
-            .filter_map(|(_, e)| match &e.event {
-                Event::UserPrompt { text, .. } if task_notification_completed_for(text, tid) => {
-                    Some(e.ts)
-                }
-                _ => None,
-            })
-            .max()
-        {
-            return Some(ts);
-        }
-        if let Some(ts) = parent_events
-            .iter()
-            .filter_map(|(_, e)| match &e.event {
-                Event::ToolResult {
-                    call_id, summary, ..
-                } if call_id == tid && !is_async_agent_launch_summary(summary.as_deref()) => {
-                    Some(e.ts)
-                }
-                _ => None,
-            })
-            .max()
-        {
-            return Some(ts);
-        }
+    if let Some(ts) = tool_use_id.and_then(|tid| parent_completion_at(tid, parent_events)) {
+        return Some(ts);
     }
     let last = child_last_activity?;
     let quiet_ms = now.signed_duration_since(last).num_milliseconds().max(0) as u64;
     (quiet_ms > terminate_ms).then(|| last + chrono::Duration::milliseconds(terminate_ms as i64))
+}
+
+/// The explicit COMPLETION the parent logged for a subagent dispatch `tool_use_id`, or
+/// `None` if it has logged neither yet (the dispatch is still open). Two shapes, newest
+/// wins: a completed `task-notification` naming the call (a background/async agent, whose
+/// immediate tool-result is only the launch ack), else a tool-result for the call (a
+/// foreground dispatch returns its result there).
+///
+/// This carries NO file-silence backstop. That timer is the caller's separate policy and
+/// is wrong for an agent that legitimately goes quiet while still assigned (an in-process
+/// teammate between turns), so the pure "the parent said this call is done" signal is
+/// kept on its own for callers that must not fall back to silence.
+pub(crate) fn parent_completion_at(
+    tool_use_id: &str,
+    parent_events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+) -> Option<DateTime<Utc>> {
+    if let Some(ts) = parent_events
+        .iter()
+        .filter_map(|(_, e)| match &e.event {
+            Event::UserPrompt { text, .. } if task_notification_completed_for(text, tool_use_id) => {
+                Some(e.ts)
+            }
+            _ => None,
+        })
+        .max()
+    {
+        return Some(ts);
+    }
+    parent_events
+        .iter()
+        .filter_map(|(_, e)| match &e.event {
+            Event::ToolResult {
+                call_id, summary, ..
+            } if call_id == tool_use_id && !is_async_agent_launch_summary(summary.as_deref()) => {
+                Some(e.ts)
+            }
+            _ => None,
+        })
+        .max()
+}
+
+/// Recover the `Agent`/`Task` tool-call id that dispatched an in-process TEAMMATE, by
+/// matching the member's roster `name` to the call's `name` argument in the LEAD's events
+/// (newest match wins, so a re-dispatched member keys off its latest run).
+///
+/// Claude writes a teammate's sidecar WITHOUT a `toolUseId` (only ~1 in 3 sidecars carry
+/// one), yet the lead spawned each member through an `Agent` call whose `input.name` is
+/// the member name, and logs a result for that call when the member finishes. Recovering
+/// the id here is what lets a finished teammate retire on its own completion via
+/// [`parent_completion_at`] instead of riding the lead's whole lifetime.
+pub(crate) fn teammate_dispatch_call_id(
+    member_name: &str,
+    parent_events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+) -> Option<String> {
+    if member_name.is_empty() {
+        return None;
+    }
+    parent_events
+        .iter()
+        .filter_map(|(_, e)| match &e.event {
+            Event::ToolCall {
+                tool,
+                input,
+                call_id,
+                ..
+            } if (tool == "Agent" || tool == "Task")
+                && input.get("name").and_then(|v| v.as_str()) == Some(member_name) =>
+            {
+                Some((e.ts, call_id.clone()))
+            }
+            _ => None,
+        })
+        .max_by_key(|(ts, _)| *ts)
+        .map(|(_, id)| id)
 }
 
 fn task_notification_completed_for(text: &str, tool_use_id: &str) -> bool {

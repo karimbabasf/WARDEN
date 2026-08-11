@@ -146,8 +146,10 @@ pub struct SubagentMeta {
 }
 
 impl SubagentMeta {
-    /// An in-process team member: spawned by the team lead when the roster was built,
-    /// not by a `Task` call, so no tool-result will ever be logged for it.
+    /// An in-process team member. Its sidecar omits `toolUseId`, but the lead still
+    /// spawns it through an `Agent`/`Task` call whose `name` argument is `member_name`
+    /// and logs a result for that call when the member finishes, so a completion signal
+    /// does exist, recoverable by name (see `radar::identity::teammate_dispatch_call_id`).
     pub fn is_teammate(&self) -> bool {
         self.task_kind == "in_process_teammate" || !self.team_name.is_empty()
     }
