@@ -1,75 +1,33 @@
-WARDEN End User License Agreement
+MIT License
 
-Copyright (c) 2026 Karim Baba. All rights reserved.
+Copyright (c) 2026 Karim Baba
 
-By installing, running, or purchasing WARDEN you accept this agreement.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-PRIOR MIT-LICENSED RELEASES
-WARDEN was distributed under the MIT License up to and including commit 0d55bf8.
-That grant is perpetual and irrevocable: any copy obtained under it stays MIT for
-whoever holds it, and nothing here withdraws it. Everything committed after
-0d55bf8 is licensed only by this agreement.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-1. LICENSE GRANTED
-On payment in full you get a perpetual, non-exclusive, non-transferable license
-to install and use WARDEN for personal or commercial purposes on the number of
-Macs your purchase covers:
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
-  One Mac     1 machine
-  Two Macs    2 machines
-  Three Macs  3 machines
 
-A machine may be replaced (a new Mac, a rebuilt Mac) without buying again. The
-count limits how many machines run WARDEN at once, not how many you ever own.
+LICENSE HISTORY
 
-2. WHAT YOU MAY NOT DO
-You may not redistribute, resell, sublicense, rent, or publish WARDEN or its
-source. You may not share your license key beyond the seat count above, publish
-it, or use it to generate keys. You may not remove or circumvent the license
-check, and you may not distribute a build with it removed.
+WARDEN was MIT licensed up to and including commit 0d55bf8. Between that commit
+and 2026-08-12 it was distributed under a paid end user license agreement. As of
+2026-08-12 the whole project is MIT again, on the terms above, and the paid
+agreement is withdrawn for every release from that date on.
 
-You may read, modify, and build the source for your own use on your licensed
-machines. Modifying it does not extend the seat count and does not create a right
-to distribute the result.
-
-3. WHAT WARDEN DOES, STATED PLAINLY
-WARDEN reads the on-disk transcripts your coding agents already write, indexes
-them locally, and draws them. It does not write to your projects' source files.
-It opens no network connection unless you explicitly turn on remote observation,
-and that feature sends a redacted projection, never your prompts, paths, or file
-contents. There is no telemetry and no account. License checking happens entirely
-on your machine and contacts nothing.
-
-4. OWNERSHIP
-WARDEN is licensed, not sold. Karim Baba retains all right, title, and interest
-in it, except for the pre-0d55bf8 MIT grant described above.
-
-5. REFUNDS
-Fourteen days, no questions asked. Email the address on your purchase receipt and
-you get your money back.
-
-6. NO WARRANTY
-WARDEN IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
-INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE, AND NONINFRINGEMENT.
-
-7. LIMITATION OF LIABILITY
-IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM,
-OUT OF, OR IN CONNECTION WITH WARDEN OR ITS USE. Total liability is limited to
-what you paid. Some jurisdictions do not allow these exclusions, so they may not
-apply to you.
-
-8. TERMINATION
-This license ends if you materially breach section 2. On termination you stop
-using WARDEN and delete your copies. Sections 4, 6, and 7 survive.
-
-9. GOVERNING LAW
-The laws of the State of California, United States, without regard to conflict of
-law rules.
-
-Questions: the contact address on your purchase receipt.
-
----
-This is a plain-language EULA written for a small paid product, not legal advice.
-Have a lawyer read it before you are doing real volume.
+Nothing here changes what anyone already holds. A copy obtained under either
+grant keeps the terms it was obtained under, and both of those grants were
+perpetual.
