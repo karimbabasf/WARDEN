@@ -29,9 +29,8 @@ docs
 *.srt
 
 # Root-only files. The leading slash is load-bearing: these patterns match at ANY
-# depth without it, so a bare `index.html` also excludes landing/index.html (which
-# is the entire site) and a bare `tsconfig.json` also excludes site/tsconfig.json
-# (which is what compiles the functions). Both were real failures, not theory.
+# depth without it, so a bare `index.html` also excludes landing/index.html, which
+# is the entire site. That was a real failure, not theory.
 /radar-lab.html
 /war-room-lab.html
 /activation-lab.html
