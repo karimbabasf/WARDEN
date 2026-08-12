@@ -6,24 +6,26 @@
 <title>WARDEN &middot; every agent you are running, on one live board</title>
 <meta name="description" content="A macOS board for every coding agent running on your Mac. What each one is doing right now, which have stalled, how much context and money they have burned. $15, one payment.">
 
-<!-- Share card. og.png is the real hero shot at 1200x630, taken from this page by
-     the same browser that renders it, so the card can never drift from the site.
-     og:image is RELATIVE, which Slack and Twitter resolve against the page URL but
-     some older scrapers do not. Once this page has a domain, make it absolute and
-     add <meta property="og:url">. Deliberately left relative rather than guessing
-     a hostname that does not exist yet. -->
+<!-- Share card. og.png is the real hero shot taken from this page by the same
+     browser that renders it, so the card can never drift from the site.
+     og:image MUST be an ABSOLUTE url. It was relative while this page had no
+     hostname, and LinkedIn does not resolve a relative one: it renders the card
+     with the title and domain and NO image at all (seen on a real post,
+     2026-08-11). The dimensions below are the file's real ones, measured, not
+     the 1200x630 the shot was first specified at. -->
+<meta property="og:url" content="https://warden.karimbabasf.com/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="WARDEN">
 <meta property="og:title" content="WARDEN &middot; every agent you are running, on one live board">
 <meta property="og:description" content="What each agent is doing right now, which have stalled, how much context and money they have burned. One screen instead of fourteen terminal tabs.">
-<meta property="og:image" content="og.png">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
+<meta property="og:image" content="https://warden.karimbabasf.com/og.png">
+<meta property="og:image:width" content="2400">
+<meta property="og:image:height" content="1260">
 <meta property="og:image:alt" content="The WARDEN wordmark ringed by lattice globes, one per live agent.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="WARDEN &middot; every agent you are running, on one live board">
 <meta name="twitter:description" content="What each agent is doing right now, which have stalled, and what they are costing you.">
-<meta name="twitter:image" content="og.png">
+<meta name="twitter:image" content="https://warden.karimbabasf.com/og.png">
 
 <!-- Favicon inline as a data URI so the page still makes ZERO external requests and
      still works opened straight off the disk. A lit vertex ring around a core: the
