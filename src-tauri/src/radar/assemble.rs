@@ -553,6 +553,7 @@ mod tests {
                 ts: now + chrono::Duration::milliseconds(10),
                 event: Event::AssistantText {
                     text: "here you go".into(),
+                    turn_complete: None,
                 },
                 raw_ref: RawRef {
                     source_path: session.source_path.clone(),
@@ -1597,7 +1598,7 @@ mod tests {
         let now = Utc::now();
         let done = now - chrono::Duration::minutes(30); // finished 30 min ago
         let events = vec![
-            codex_child_event(10, done, Event::AssistantText { text: "final result".into() }),
+            codex_child_event(10, done, Event::AssistantText { text: "final result".into(), turn_complete: None }),
             codex_child_event(
                 20,
                 done,
@@ -1631,7 +1632,7 @@ mod tests {
         let now = Utc::now();
         let quiet = now - chrono::Duration::minutes(30);
         let events = vec![
-            codex_child_event(10, quiet, Event::AssistantText { text: "thinking out loud".into() }),
+            codex_child_event(10, quiet, Event::AssistantText { text: "thinking out loud".into(), turn_complete: None }),
             codex_child_event(
                 20,
                 quiet,
@@ -2076,6 +2077,7 @@ mod tests {
                 now,
                 Event::AssistantText {
                     text: "newest final answer".into(),
+                    turn_complete: None,
                 },
             ),
             mk(
@@ -2375,6 +2377,7 @@ mod tests {
             ts: done_ts,
             event: Event::AssistantText {
                 text: "done".into(),
+                turn_complete: None,
             },
             raw_ref: RawRef {
                 source_path: done_session.source_path.clone(),
@@ -2649,6 +2652,7 @@ mod tests {
             ts: base,
             event: Event::AssistantText {
                 text: "I will update the files now.".into(),
+                turn_complete: None,
             },
             raw_ref: RawRef {
                 source_path: path.clone(),
@@ -2730,6 +2734,7 @@ mod tests {
             ts: base,
             event: Event::AssistantText {
                 text: "I will update the files now.".into(),
+                turn_complete: None,
             },
             raw_ref: RawRef {
                 source_path: path.clone(),

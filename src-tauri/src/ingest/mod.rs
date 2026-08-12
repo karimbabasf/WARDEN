@@ -268,7 +268,7 @@ mod tests {
         let ev = batches[0]
             .events
             .iter()
-            .find(|e| matches!(&e.event, Event::AssistantText { text } if text == "tail"))
+            .find(|e| matches!(&e.event, Event::AssistantText { text, .. } if text == "tail"))
             .expect("appended AssistantText present");
         assert_eq!(ev.raw_ref.offset, eof, "tail offset must be absolute");
     }

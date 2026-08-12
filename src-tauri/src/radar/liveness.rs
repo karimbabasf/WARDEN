@@ -131,33 +131,43 @@ pub fn codex_status(
 ///
 /// Why semantic, not a recency window: the transcript is written per step, and the
 /// SHAPE of the last step says exactly what the agent is doing right now. An actively
-/// working agent's transcript ends mid tool-loop — on a `ToolCall` (a tool is in
-/// flight) or a `ToolResult` (a tool just returned and the next assistant turn is
-/// coming). A finished agent's transcript ends on an `AssistantText`: a Claude
-/// `end_turn` message is text-only (a message that will CONTINUE carries `tool_use`,
-/// which maps to a `ToolCall`, never a trailing `AssistantText`), so a trailing
-/// assistant text means the turn COMPLETED and the agent is waiting on the operator.
+/// working agent's transcript ends mid tool-loop, on a `ToolCall` (a tool is in flight)
+/// or a `ToolResult` (a tool just returned and the next assistant turn is coming).
 ///
-/// This reads "is it working right now?" with ~one filesystem event of latency, and is
-/// also DETERMINISTIC across reads (stable on an unchanged store → no flicker). The old
-/// recency window was a guess that flipped a busy agent to idle during any long
-/// generation / tool run that wrote nothing for a few seconds, and (worse) leaned on a
-/// Claude registry `status` field the DESKTOP app does not write — so desktop agents
-/// fell through to that timer and read idle while hard at work.
+/// This reads "is it working right now?" with about one filesystem event of latency, and
+/// is also DETERMINISTIC across reads (stable on an unchanged store, so no flicker). The
+/// old recency window was a guess that flipped a busy agent to idle during any long
+/// generation or tool run that wrote nothing for a few seconds.
 ///
-/// Rule on the LAST action event — bookkeeping (`TokenUsage`/`Thinking`/`SystemNotice`/
+/// A TRAILING TEXT BLOCK IS NOT A FINISHED TURN. This was the load-bearing mistake, and
+/// it is worth stating plainly because the shape of the data invites it. The rule used to
+/// read: "a message that will CONTINUE carries `tool_use`, so a trailing `AssistantText`
+/// means the turn completed." That is true of the API message and false of the
+/// TRANSCRIPT, because the harness writes ONE LINE PER CONTENT BLOCK. An agent that says
+/// "Let me check the config." and then calls a tool writes the text as its own line, so
+/// the newest action is a lone text block for as long as the next step takes to arrive.
+/// Measured over the real transcripts on this machine: 79% of text-only assistant lines
+/// are that case (671 of 847), the gap runs to a median of 3s, a p90 of 21s and a worst
+/// case of 7 minutes, and scoring the old rule against what the agents actually did next
+/// put it at 19% correct overall and 13% on subagents, always failing the same way, by
+/// calling a working agent done. `Event::AssistantText::turn_complete` carries the
+/// message's own `stop_reason`, which is the only honest separator, and the rule below
+/// reads it.
+///
+/// Rule on the LAST action event. Bookkeeping (`TokenUsage`/`Thinking`/`SystemNotice`/
 /// `ModeChange`/`FileSnapshot`) is skipped because it trails or accompanies the real
-/// action and would mask it (e.g. `TokenUsage` is emitted right AFTER each assistant
-/// message):
-/// * `AssistantText` ⇒ Idle  (completed `end_turn`; the agent stopped, waiting on the operator);
-/// * `UserPrompt`    ⇒ Working (the operator asked; the agent owes its answer);
-/// * `ToolCall`      ⇒ Working (a tool is in flight — its result is not written yet);
-/// * `ToolResult`    ⇒ Working (a tool just returned; the next assistant turn is coming).
+/// action and would mask it (`TokenUsage` is emitted right AFTER each assistant message):
+/// * `AssistantText`, turn complete   => Idle (the agent stopped, waiting on the operator);
+/// * `AssistantText`, turn continuing => Working (a mid-turn preamble, a tool call follows);
+/// * `UserPrompt`  => Working (the operator asked; the agent owes its answer);
+/// * `ToolCall`    => Working (a tool is in flight, its result is not written yet);
+/// * `ToolResult`  => Working (a tool just returned; the next assistant turn is coming).
 ///
-/// Backstop: a Working verdict whose last action is older than `stale_secs` is a wedged
-/// step (the agent fell silent mid-tool and never continued) → Idle, so a stuck globe
-/// does not glow forever. A live agent rewrites its transcript far inside this window,
-/// so the backstop never fires on real work.
+/// Backstop: a Working verdict that has gone quiet past `stale_secs` is a wedged step
+/// (the agent fell silent mid-step and never continued) => Idle, so a stuck globe does not
+/// glow forever. Quiet is measured from the freshest SIGN OF LIFE, not from the last
+/// action: see [`newest_sign_of_life`]. A live agent writes far inside this window, so the
+/// backstop never fires on real work.
 ///
 /// Returns `None` when there is no usable action event at all — the caller then falls
 /// back to mtime. The process-alive check is the caller's responsibility (this is a
@@ -181,21 +191,52 @@ pub fn status_from_last_event(
                 .then(a.id.cmp(&b.id))
         })?;
 
-    // A completed assistant turn (text-only `end_turn`) is the ONLY idle tail; every
-    // other action (operator prompt, tool in flight, tool just returned) is mid-step.
-    if matches!(last.1.event, Event::AssistantText { .. })
-        || matches!(&last.1.event, Event::UserPrompt { text, .. } if is_completed_task_notification(text))
-    {
+    // A COMPLETED assistant turn is the only idle tail; every other action (operator
+    // prompt, tool in flight, tool just returned) is mid-step.
+    //
+    // "Completed" is the message's own `stop_reason`, not the mere presence of text. The
+    // harness writes one line per content block, so a mid-turn preamble and a final
+    // answer are both a lone text block, and 79% of the text-only lines on this machine
+    // are the preamble. Treating those as finished is what reported a working agent as
+    // done. A row with no stop reason (legacy, or a harness that reports none) keeps the
+    // old assumption.
+    let turn_finished = match &last.1.event {
+        Event::AssistantText { turn_complete, .. } => *turn_complete != Some(false),
+        Event::UserPrompt { text, .. } => is_completed_task_notification(text),
+        _ => false,
+    };
+    if turn_finished {
         return Some(AgentStatus::Idle);
     }
 
-    // Backstop: a Working tail older than the stale window is a wedged step → Idle.
-    let age_secs = now.signed_duration_since(last.1.ts).num_seconds().max(0) as u64;
+    // Backstop: a Working tail that has gone quiet past the stale window is a wedged step
+    // → Idle. Silence is measured from the freshest SIGN OF LIFE rather than from the
+    // last action, because a long reasoning block writes only `Thinking`: reading the
+    // action alone aged a hard-thinking agent into Idle while it was still producing.
+    let quiet_since = newest_sign_of_life(events).unwrap_or(last.1.ts);
+    let age_secs = now.signed_duration_since(quiet_since).num_seconds().max(0) as u64;
     Some(if age_secs > stale_secs {
         AgentStatus::Idle
     } else {
         AgentStatus::Working
     })
+}
+
+/// The newest event proving the agent is still PRODUCING, action or not.
+///
+/// This answers "has it gone silent?" and nothing else. What the agent is doing is still
+/// decided by the last action's shape; mixing the two is what made a long think look like
+/// a stall. `Thinking` and `TokenUsage` are bookkeeping for the shape rule but they are
+/// unmistakable evidence of a live model, so they count here.
+fn newest_sign_of_life(events: &[(Turn, EventRecord)]) -> Option<DateTime<Utc>> {
+    events
+        .iter()
+        .filter(|(_, e)| {
+            action_priority(&e.event).is_some()
+                || matches!(e.event, Event::Thinking { .. } | Event::TokenUsage { .. })
+        })
+        .map(|(_, e)| e.ts)
+        .max()
 }
 
 fn action_priority(event: &Event) -> Option<u8> {
@@ -479,6 +520,7 @@ mod tests {
                 t(40),
                 Event::AssistantText {
                     text: "done".into(),
+                    turn_complete: None,
                 },
             ),
         ];
@@ -504,6 +546,7 @@ mod tests {
                 t(4),
                 Event::AssistantText {
                     text: "all done".into(),
+                    turn_complete: None,
                 },
             ),
         ];
@@ -515,7 +558,7 @@ mod tests {
 
         // (b) last event is a UserPrompt (asked, not yet answered) → working.
         let asked = vec![
-            ev(1, t(6), Event::AssistantText { text: "hi".into() }),
+            ev(1, t(6), Event::AssistantText { text: "hi".into(), turn_complete: None }),
             ev(
                 2,
                 t(2),
@@ -631,6 +674,126 @@ mod tests {
         assert_eq!(status_from_last_event(&none, now, stale), None);
     }
 
+    /// A text block is NOT proof the turn ended.
+    ///
+    /// The harness writes one transcript line per content block, so an agent that says
+    /// "Let me check the config." and then calls a tool leaves a lone text block as the
+    /// newest action for as long as the next step takes. Measured over the real
+    /// transcripts on this machine, 79% of text-only assistant lines are that case, and
+    /// the gap runs to a median of 3s, a p90 of 21s, and a worst case of 7 minutes. The
+    /// old rule called every one of them a finished turn, which is why a thinking agent
+    /// showed as done. `turn_complete` is the harness's own `stop_reason` and settles it.
+    #[test]
+    fn a_mid_turn_preamble_is_working_not_finished() {
+        let now = Utc::now();
+        let t = |secs: i64| now - chrono::Duration::seconds(secs);
+        let stale = 180u64;
+
+        let preamble = |complete: Option<bool>| {
+            vec![
+                ev(
+                    1,
+                    t(30),
+                    Event::UserPrompt {
+                        text: "go".into(),
+                        attachments: vec![],
+                        is_meta: false,
+                    },
+                ),
+                ev(
+                    2,
+                    t(5),
+                    Event::AssistantText {
+                        text: "Let me check the config.".into(),
+                        turn_complete: complete,
+                    },
+                ),
+            ]
+        };
+
+        // stop_reason `tool_use` or a null (still streaming) reason: the turn continues.
+        assert_eq!(
+            status_from_last_event(&preamble(Some(false)), now, stale),
+            Some(AgentStatus::Working),
+            "a preamble whose message did not end the turn is an agent mid-step, not a finished one"
+        );
+        // stop_reason `end_turn`: the agent really did stop and is waiting on the operator.
+        assert_eq!(
+            status_from_last_event(&preamble(Some(true)), now, stale),
+            Some(AgentStatus::Idle),
+            "a completed turn is still idle"
+        );
+        // Rows stored before the field existed carry no verdict, so they keep the old one.
+        assert_eq!(
+            status_from_last_event(&preamble(None), now, stale),
+            Some(AgentStatus::Idle),
+            "a legacy row with no stop reason keeps the pre-existing assumption"
+        );
+    }
+
+    /// An unfinished turn still answers to the wedged-step backstop: if the agent wrote
+    /// a preamble and then went silent for longer than the stale window, it is stuck, not
+    /// working. Without this the fix above would trade a false "done" for a globe that
+    /// glows forever.
+    #[test]
+    fn a_stalled_preamble_still_ages_out_to_idle() {
+        let now = Utc::now();
+        let events = vec![ev(
+            1,
+            now - chrono::Duration::seconds(400),
+            Event::AssistantText {
+                text: "Let me check the config.".into(),
+                turn_complete: Some(false),
+            },
+        )];
+        assert_eq!(
+            status_from_last_event(&events, now, 180),
+            Some(AgentStatus::Idle),
+            "an unfinished turn that went quiet past the stale window is wedged, not working"
+        );
+    }
+
+    /// Thinking is evidence the agent is ALIVE, even though it is not an action.
+    ///
+    /// The backstop asks "has this agent gone silent?", and it used to answer from the
+    /// last ACTION event only. A long reasoning block writes `Thinking` and nothing else,
+    /// so an agent thinking hard for longer than the stale window aged into Idle while it
+    /// was demonstrably still producing. Shape still comes from the last action; only the
+    /// silence measurement now reads the freshest sign of life.
+    #[test]
+    fn a_long_think_does_not_age_a_live_agent_into_idle() {
+        let now = Utc::now();
+        let stale = 180u64;
+        let events = vec![
+            ev(
+                1,
+                now - chrono::Duration::seconds(400),
+                Event::UserPrompt {
+                    text: "think hard about this".into(),
+                    attachments: vec![],
+                    is_meta: false,
+                },
+            ),
+            // Still reasoning 10s ago: not an action, but proof it is alive.
+            ev(2, now - chrono::Duration::seconds(10), Event::Thinking {
+                tokens: 900,
+            }),
+        ];
+        assert_eq!(
+            status_from_last_event(&events, now, stale),
+            Some(AgentStatus::Working),
+            "a fresh thinking block proves the step is not wedged"
+        );
+
+        // With no such sign of life, the same aged prompt is still a wedged step.
+        let silent = vec![events[0].clone()];
+        assert_eq!(
+            status_from_last_event(&silent, now, stale),
+            Some(AgentStatus::Idle),
+            "a genuinely silent agent still ages out"
+        );
+    }
+
     /// Claude incremental tail parses can carry reset/partial turn indexes, so store
     /// order is not always chronological. A finished assistant message newer than an
     /// older tool-result must settle the agent to idle even if the older result sorts
@@ -646,6 +809,7 @@ mod tests {
                 newer,
                 Event::AssistantText {
                     text: "all done".into(),
+                    turn_complete: None,
                 },
             ),
             ev(

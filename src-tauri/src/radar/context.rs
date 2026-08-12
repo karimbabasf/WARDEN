@@ -41,7 +41,7 @@ fn compute_token_counts(
     let mut thinking = 0u64;
     for (_, e) in events {
         match &e.event {
-            Event::AssistantText { text } => conversation += tokenize_len(text),
+            Event::AssistantText { text, .. } => conversation += tokenize_len(text),
             Event::UserPrompt { text, .. } => conversation += tokenize_len(text),
             // ToolResult byte size as a coarse token proxy (≈ bytes/4); the
             // calibration step rescales it to the exact anchor anyway.

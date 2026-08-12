@@ -917,6 +917,30 @@ fn map_user(
         }
     }
 }
+/// Read an assistant message's `stop_reason` into [`Event::AssistantText::turn_complete`].
+///
+/// This is the ONLY place the "did the turn end" fact enters the IR, and it is the fact
+/// the whole working/idle verdict rests on. The harness writes one transcript line per
+/// content block, so a mid-turn preamble and a final answer are both a lone text block:
+/// without the stop reason they are indistinguishable, and the radar had to guess (it
+/// guessed "finished", which reported a thinking agent as done).
+///
+/// Only an explicit terminal reason ends the turn. `tool_use` says a tool call follows.
+/// A NULL reason means the message is still streaming, which is the strongest "still
+/// working" signal there is, so it must not be confused with the key being absent.
+/// Absent (no such key at all) is a harness that does not report one, and yields `None`
+/// so the reader keeps the old assumption.
+fn turn_complete_from_stop_reason(msg: &Value) -> Option<bool> {
+    match msg.get("stop_reason") {
+        None => None,
+        Some(Value::Null) => Some(false),
+        Some(v) => Some(matches!(
+            v.as_str(),
+            Some("end_turn") | Some("stop_sequence") | Some("max_tokens")
+        )),
+    }
+}
+
 fn map_assistant(
     events: &mut Vec<EventRecord>,
     sid: &str,
@@ -930,6 +954,7 @@ fn map_assistant(
     if let Some(m) = msg.get("model").and_then(Value::as_str) {
         models.insert(m.to_string());
     }
+    let turn_complete = turn_complete_from_stop_reason(msg);
     if let Some(text) = msg.get("content").and_then(Value::as_str) {
         events.push(EventRecord {
             id: stable_id(&[tid, "text"]),
@@ -938,6 +963,7 @@ fn map_assistant(
             ts,
             event: Event::AssistantText {
                 text: text.to_string(),
+                turn_complete,
             },
             raw_ref: raw.clone(),
         });
@@ -951,6 +977,7 @@ fn map_assistant(
                     ts,
                     event: Event::AssistantText {
                         text: block_text(b.get("text")),
+                        turn_complete,
                     },
                     raw_ref: raw.clone(),
                 }),
@@ -1123,7 +1150,62 @@ mod tests {
         assert!(b
             .events
             .iter()
-            .any(|e| matches!(&e.event, Event::AssistantText { text } if text == "plain answer")));
+            .any(|e| matches!(&e.event, Event::AssistantText { text, .. } if text == "plain answer")));
+    }
+
+    /// `stop_reason` is the ONE fact that separates a mid-turn preamble from a finished
+    /// answer, and the radar's whole working/idle verdict rests on it. The four shapes
+    /// below are the four that occur in real transcripts (4409 assistant lines sampled on
+    /// this machine: 2784 `tool_use`, 1418 explicit null, 205 `end_turn`, 2
+    /// `stop_sequence`, and never an absent key). Absent is covered anyway, because the
+    /// store still holds rows written before this field existed.
+    #[test]
+    fn stop_reason_decides_whether_the_turn_ended() {
+        let line = |stop: &str| {
+            format!(
+                r#"{{"type":"assistant","uuid":"a1","sessionId":"s","timestamp":"2026-01-01T00:00:00Z","message":{{"role":"assistant","model":"claude",{stop}"content":[{{"type":"text","text":"hello"}}]}}}}"#
+            )
+        };
+        let turn_complete_of = |stop: &str| {
+            let dir = tempdir().unwrap();
+            let p = dir.path().join("s.jsonl");
+            std::fs::write(&p, format!("{}\n", line(stop))).unwrap();
+            let bytes = std::fs::read(&p).unwrap();
+            let b = parse_file(&p, &bytes, hash64(&bytes)).unwrap();
+            b.events
+                .iter()
+                .find_map(|e| match &e.event {
+                    Event::AssistantText { turn_complete, .. } => Some(*turn_complete),
+                    _ => None,
+                })
+                .expect("an AssistantText event is parsed")
+        };
+
+        assert_eq!(
+            turn_complete_of(r#""stop_reason":"end_turn","#),
+            Some(true),
+            "end_turn: the agent stopped and is waiting on the operator"
+        );
+        assert_eq!(
+            turn_complete_of(r#""stop_reason":"stop_sequence","#),
+            Some(true),
+            "stop_sequence also ends the turn"
+        );
+        assert_eq!(
+            turn_complete_of(r#""stop_reason":"tool_use","#),
+            Some(false),
+            "tool_use: a tool call follows, so the turn continues"
+        );
+        assert_eq!(
+            turn_complete_of(r#""stop_reason":null,"#),
+            Some(false),
+            "a null reason is a message still streaming, the strongest working signal"
+        );
+        assert_eq!(
+            turn_complete_of(""),
+            None,
+            "an absent key is no information, so the reader keeps the old assumption"
+        );
     }
 
     /// Incremental tail parse (Claude): appending one `assistant` line and
@@ -1154,7 +1236,7 @@ mod tests {
         // Only the appended AssistantText event is present (the original user line is not in the slice).
         assert!(
             b.events.iter().any(
-                |e| matches!(&e.event, Event::AssistantText { text } if text == "appended answer")
+                |e| matches!(&e.event, Event::AssistantText { text, .. } if text == "appended answer")
             ),
             "appended AssistantText must be parsed"
         );

@@ -631,7 +631,7 @@ mod tests {
             .unwrap()
             .into_iter()
             .find_map(|(_, e)| match &e.event {
-                Event::AssistantText { text } if text == "second" => Some(e.raw_ref.offset),
+                Event::AssistantText { text, .. } if text == "second" => Some(e.raw_ref.offset),
                 _ => None,
             })
             .expect("appended 'second' event present");
@@ -670,7 +670,7 @@ mod tests {
         let sid = store.sessions().unwrap()[0].id.clone();
         assert!(
             store.session_events(&sid).unwrap().iter().any(
-                |(_, e)| matches!(&e.event, Event::AssistantText { text } if text == "second")
+                |(_, e)| matches!(&e.event, Event::AssistantText { text, .. } if text == "second")
             ),
             "the line that was initially partial must not be lost"
         );

@@ -536,6 +536,7 @@ mod tests {
     fn non_token_usage_event_is_zeroed() {
         let e = Event::AssistantText {
             text: "hi".into(),
+            turn_complete: None,
         };
         let size = claude_context_size(&e, "claude-opus-4-8");
         assert_eq!(size.context_tokens, 0);

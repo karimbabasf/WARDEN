@@ -147,6 +147,23 @@ pub enum Event {
     },
     AssistantText {
         text: String,
+        /// Did the assistant message carrying this text END the turn?
+        ///
+        /// The harness writes ONE transcript line per content block, so a mid-turn
+        /// preamble ("Let me check the config.") and a final answer are both a lone
+        /// text block and cannot be told apart by shape. The message's `stop_reason`
+        /// is what separates them, and it is the only honest source:
+        /// * `Some(true)`: `end_turn`/`stop_sequence`/`max_tokens`, so the agent
+        ///   stopped and is waiting on the operator.
+        /// * `Some(false)`: `tool_use`, or a null (still streaming) reason, so the
+        ///   turn CONTINUES and a tool call is coming. Measured on this machine, 79%
+        ///   of text-only assistant lines are this case.
+        /// * `None`: no information. Rows ingested before this field existed, and
+        ///   harnesses that do not report a stop reason (Codex). Readers must treat
+        ///   it as the pre-existing "a trailing text ends the turn" assumption, so
+        ///   old stored events keep their old verdict.
+        #[serde(default)]
+        turn_complete: Option<bool>,
     },
     Thinking {
         tokens: u32,
@@ -208,7 +225,7 @@ impl Event {
     }
     pub fn searchable_text(&self) -> String {
         match self {
-            Event::UserPrompt { text, .. } | Event::AssistantText { text } => text.clone(),
+            Event::UserPrompt { text, .. } | Event::AssistantText { text, .. } => text.clone(),
             Event::ToolCall { tool, input, .. } => format!("{tool} {input}"),
             Event::ToolResult { summary, .. } => summary.clone().unwrap_or_default(),
             Event::Error { source, message } => format!("{source} {message}"),

@@ -128,6 +128,15 @@ rendering a palette the app has already moved off.
 - **Adapter contract**: adding a harness is one adapter, zero downstream changes. An unknown record degrades gracefully; schema drift never drops a session.
 - **Watermarks are byte-offset.** FSEvents coalesces rapid writes: on each event, seek to the saved offset and read to EOF; do not trust event counts.
 - **Honest viz**: every globe and flare maps to a REAL signal (session liveness, context-token weight, subagent hierarchy). Never fabricate a count or a link. A sidecar that reports `spawnDepth >= 2` or names a `parentAgentId` was spawned by another SUBAGENT, so it must never fall back onto the root: the root is its ancestor, not its parent, and an unparented globe beats a wrong edge.
+- **A trailing text block is NOT a finished turn.** The harness writes one transcript
+  line per CONTENT BLOCK, so a mid-turn preamble ("Let me check the config.") and a final
+  answer are both a lone text block and cannot be told apart by shape. 79% of text-only
+  assistant lines are the preamble. Only the message's own `stop_reason` separates them,
+  and it reaches the radar as `Event::AssistantText::turn_complete` (`None` means no
+  information, so keep the old assumption). This matters most for SUBAGENTS and TEAM
+  MEMBERS: a root has a PID and a live registry entry whose `status` is authoritative,
+  they have neither, so this rule is their only judge. Score any change to it against
+  real transcripts with `cargo run --example liveness_ab`.
 - **The subagent sidecar is the source of nesting AND membership.** Every subagent of a session lands in one flat `<root>/subagents/` directory however deep it really is, so the path can never carry the tree. `parentAgentId` names the spawner, `spawnDepth` states the level, and `teamName` + `name` state team membership (the filename stopped carrying it: members are `agent-a<name>-<hex>`, not `agent-<name>@session-<hex>`). An in-process teammate has no `toolUseId` and its parent never logs a tool-result for it, so the 90s file-silence backstop must not apply to it: its lifecycle is the lead's, which `root_is_open` already enforces.
 - **Position never depends on activity, with one exception: leaving.** A terminal agent stops holding a slot on the board the frame it goes terminal (`boardAgents`), so its siblings close ranks as it implodes rather than 5s later when the backend finally drops it. The filter lives INSIDE `layoutRadarScene` so every consumer still computes one identical board.
 - **FSD layering (frontend)**: imports point DOWN only; no sibling-module imports; `dev/` is exempt. Use the `@/` alias; colocate tests; no app-wide barrels.

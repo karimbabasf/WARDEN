@@ -203,7 +203,7 @@ fn pending_context_after_latest_usage(events: &[(crate::ir::Turn, crate::ir::Eve
         .iter()
         .skip(last_usage_idx + 1)
         .map(|(_, e)| match &e.event {
-            Event::UserPrompt { text, .. } | Event::AssistantText { text } => tokenize_len(text),
+            Event::UserPrompt { text, .. } | Event::AssistantText { text, .. } => tokenize_len(text),
             Event::Thinking { tokens } => *tokens as u64,
             Event::ToolCall { tool, input, .. } => tokenize_len(&format!("{tool} {input}")),
             Event::ToolResult { bytes, .. } => bytes / 4,
@@ -238,7 +238,7 @@ pub(crate) fn recent_activity(
             // File writes: Codex `patch_apply_end` and Claude edits arrive here as real
             // paths. Previously dropped (no "writing files" ever showed on the radar).
             Event::FileSnapshot { files } => ("write", file_snapshot_label(files)),
-            Event::AssistantText { text } => ("message", crate::util::truncate_chars(text, 80)),
+            Event::AssistantText { text, .. } => ("message", crate::util::truncate_chars(text, 80)),
             Event::UserPrompt { text, .. } => ("message", crate::util::truncate_chars(text, 80)),
             Event::Thinking { .. } => ("thinking", "thinking".to_string()),
             // ToolResult (and the rest) is not a distinct action; its bare
@@ -400,13 +400,16 @@ pub(crate) fn in_flight_tool_call(
     // The newest point at which the conversation visibly moved past a tool call: a
     // final assistant message or a fresh operator prompt. A call older than this never
     // returned and is not what the agent is doing now.
+    // A mid-turn preamble does NOT advance the turn: the agent narrating a step before
+    // it acts is the same turn still running, so only an assistant text that ENDED the
+    // turn (or a fresh operator prompt) retires a call. Counting every text block here
+    // dropped the live action off the panel while the agent was still mid-step.
     let turn_advanced_at = events
         .iter()
-        .filter(|(_, e)| {
-            matches!(
-                e.event,
-                Event::AssistantText { .. } | Event::UserPrompt { .. }
-            )
+        .filter(|(_, e)| match &e.event {
+            Event::AssistantText { turn_complete, .. } => *turn_complete != Some(false),
+            Event::UserPrompt { .. } => true,
+            _ => false,
         })
         .map(|(_, e)| e.ts)
         .max();
@@ -885,6 +888,7 @@ mod tests {
                 2,
                 Event::AssistantText {
                     text: "done".into(),
+                    turn_complete: None,
                 },
             ),
         ];

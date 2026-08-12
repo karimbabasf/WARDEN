@@ -614,7 +614,14 @@ fn parse_slice(
                         turn_id: tid,
                         session_id: sid.clone(),
                         ts,
-                        event: Event::AssistantText { text },
+                        // Codex rollouts carry no stop reason, so the turn-complete fact
+                        // is unknown here. Codex liveness is decided separately by
+                        // `codex_status_from_last_event`, which reads the rollout's own
+                        // shape, so `None` keeps that path exactly as it was.
+                        event: Event::AssistantText {
+                            text,
+                            turn_complete: None,
+                        },
                         raw_ref: raw,
                     });
                 }
@@ -1529,7 +1536,7 @@ mod tests {
         );
         let ev = &b.events[0];
         assert!(
-            matches!(&ev.event, Event::AssistantText { text } if text == "freshly appended"),
+            matches!(&ev.event, Event::AssistantText { text, .. } if text == "freshly appended"),
             "appended event must be the AssistantText we wrote"
         );
 
