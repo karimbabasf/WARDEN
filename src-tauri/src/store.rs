@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -201,6 +202,61 @@ impl Store {
             )
             .optional()
             .map(|o| o.flatten())
+            .map_err(Into::into)
+    }
+    /// Every Claude `Agent`/`Task` call in the store, as `call_id -> the session
+    /// that issued it`, in ONE statement.
+    ///
+    /// This is the map that resolves a subagent to its spawner. Building it by
+    /// asking [`Self::session_events`] once per session meant a join over the
+    /// whole events table per session, which is what made a relink cost seconds
+    /// on a store with a few thousand sessions. One filtered scan answers the
+    /// same question.
+    ///
+    /// The ORDER BY is load-bearing, not tidiness. 149 call ids in a real store
+    /// appear under more than one session (a resumed session re-ingests its
+    /// parent's `Task` line), so which session wins is decided by insertion
+    /// order. The caller's loop walked [`Self::sessions`] (`started_at DESC`)
+    /// and inside each session walked [`Self::session_events`] (`ts`, then the
+    /// byte offset, then id) letting the last write win. Both halves are
+    /// reproduced here, byte offset included: 2648 groups of tool calls in a
+    /// real store share a timestamp inside one session, so dropping that term
+    /// re-parents agents. This has to be a speedup, not a rewrite.
+    pub fn agent_task_call_parents(&self) -> Result<HashMap<String, String>> {
+        let c = self.conn();
+        let mut st = c.prepare(
+            "SELECT json_extract(e.payload_json,'$.call_id'), e.session_id \
+             FROM events e JOIN sessions s ON s.id=e.session_id \
+             WHERE e.kind='tool_call' AND s.harness='claude_code' \
+               AND json_extract(e.payload_json,'$.tool') IN ('Agent','Task') \
+             ORDER BY s.started_at DESC, s.rowid, e.ts, \
+                      CAST(json_extract(e.raw_ref,'$.offset') AS INTEGER), e.id",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (call_id, session_id) = row?;
+            if let Some(call_id) = call_id.filter(|c| !c.is_empty()) {
+                out.insert(call_id, session_id);
+            }
+        }
+        Ok(out)
+    }
+    /// Every session's parent link in ONE statement, `None` for a root.
+    ///
+    /// The radar needs the whole map on every recompute, and asking
+    /// [`Self::parent_of`] once per session made that 4k point queries against a
+    /// table the same recompute had already read in full. Same column, same
+    /// rows, one scan.
+    pub fn parent_links(&self) -> Result<HashMap<String, Option<String>>> {
+        let c = self.conn();
+        let mut st = c.prepare("SELECT id,parent_session_id FROM sessions")?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        rows.collect::<std::result::Result<HashMap<_, _>, _>>()
             .map_err(Into::into)
     }
     pub fn upsert_session_batch(

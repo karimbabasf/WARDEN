@@ -397,22 +397,15 @@ pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
         }
     }
 
-    // call_id → parent session id, scanned across every Claude session's events.
-    // Subagent sessions are scanned too: one that dispatches its own `Task` is a
-    // parent here exactly like a root, which is what lets the tree go deeper than 2.
-    let mut call_to_parent: HashMap<String, String> = HashMap::new();
-    for s in &sessions {
-        if !matches!(s.harness, Harness::ClaudeCode) {
-            continue;
-        }
-        for (_, e) in store.session_events(&s.id).unwrap_or_default() {
-            if let Event::ToolCall { tool, call_id, .. } = &e.event {
-                if tool == "Agent" || tool == "Task" {
-                    call_to_parent.insert(call_id.clone(), s.id.clone());
-                }
-            }
-        }
-    }
+    // call_id → parent session id, over every Claude session's events. Subagent
+    // sessions count too: one that dispatches its own `Task` is a parent here
+    // exactly like a root, which is what lets the tree go deeper than 2.
+    //
+    // ONE filtered scan, not one events join per session. This runs on every
+    // ingest that lands new bytes, and the per-session form was the whole reason
+    // a globe took seconds to bloom or implode on a large store.
+    let call_to_parent: HashMap<String, String> =
+        store.agent_task_call_parents().unwrap_or_default();
 
     let mut recorded = 0;
     for (s, sidecar) in candidates {

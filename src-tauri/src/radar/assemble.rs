@@ -72,12 +72,10 @@ pub fn assemble(
         live.into_iter().map(|(s, st)| (s.session_id, st)).collect();
 
     // parent link per session id (None = root). Built for every stored session so
-    // we can resolve a subagent's root before deciding membership.
-    let mut parent_of: HashMap<String, Option<String>> = HashMap::new();
-    for s in &sessions {
-        let parent = store.parent_of(&s.id).ok().flatten();
-        parent_of.insert(s.id.clone(), parent);
-    }
+    // we can resolve a subagent's root before deciding membership. ONE query, not
+    // one per session: this runs on every recompute, and the per-session form was
+    // most of what a recompute cost once the store held a few thousand sessions.
+    let parent_of: HashMap<String, Option<String>> = store.parent_links().unwrap_or_default();
 
     // The OPEN FOREST: include a session ONLY if it is currently open (spec §3 "the
     // set of agent trees currently open", §5 "the live forest"). A root is directly
