@@ -25,25 +25,13 @@ import type {
 } from '@/viz/shared/types/radarTypes';
 
 // reveal_path / preview_file / rename_session are real Tauri IPC calls; stub them
-// so a test never touches the filesystem.
-//
-// The mock DISPATCHES ON COMMAND NAME rather than returning one value for
-// everything. The panel mounts a CompactControl, which reads `compact_status` on
-// mount, and a blanket stub made that call resolve to `undefined`, which then
-// satisfied assertions meant for `rename_session` and made the rename tests fail
-// against a value they never asked for. Commands a test cares about are asserted
-// explicitly through `invoke`; everything else gets an inert, well-shaped reply.
+// so a test never touches the filesystem. Commands a test cares about are asserted
+// explicitly through `invoke`; everything else gets an inert reply.
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn((cmd: string) => {
-    if (cmd === 'compact_status') {
-      return Promise.resolve({ automation: 'unknown', automationRecoverableInSettings: false, armed: [] });
-    }
-    return Promise.resolve(undefined);
-  }),
+  invoke: vi.fn(() => Promise.resolve(undefined)),
 }));
 
-// CompactControl subscribes to the backend's `compact_status` push. There is no
-// Tauri event bus in jsdom, so hand it an unsubscribe and never fire.
+// No Tauri event bus in jsdom: hand any subscriber an unsubscribe and never fire.
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
 
 function agentFixture(over: Partial<RadarAgent> = {}): RadarAgent {
@@ -332,161 +320,6 @@ describe('RadarDetailPanel — children roster + identity/cost', () => {
   });
 });
 
-// ── current-action hero ─────────────────────────────────────────────────────────
-// The hero used to be CURRENT ACTION: the in-flight call and nothing else, which
-// left the panel's first section blank for every idle agent. It is AGENT SUMMARY
-// now: four labelled rows (Is / Done / Doing / Next). The live call is the DOING
-// row when there is one; the other rows hold still so the block reads at a glance
-// instead of rewriting itself every second.
-describe('RadarDetailPanel — agent summary hero', () => {
-  const HERO = '[data-section="agent-summary"]';
-  const action = (over: Partial<RadarCurrentAction> = {}): RadarCurrentAction => ({
-    kind: 'write',
-    tool: 'Edit',
-    label: 'Edit agent.rs',
-    target: '~/Developer/Apps/WARDEN/src-tauri/src/radar/agent.rs',
-    startedAt: '2026-06-23T22:00:00Z',
-    elapsedMs: 4_200,
-    ...over,
-  });
-
-  it('leads with the in-flight action, above the context window', () => {
-    const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
-    const hero = el.querySelector(HERO);
-    expect(hero).toBeTruthy();
-    expect(hero?.getAttribute('data-current-action')).toBe('active');
-    expect(hero?.getAttribute('data-kind')).toBe('write');
-    expect((hero?.textContent ?? '')).toContain('Editing agent.rs');
-    expect((hero?.textContent ?? '')).toContain('Edit');
-    // it sits before the context window in DOM order, i.e. it IS the first thing
-    // under the header.
-    const sections = Array.from(el.querySelectorAll('.wd-radar-section'));
-    expect(sections[0]).toBe(hero);
-    expect(sections[1]?.hasAttribute('data-context-window')).toBe(true);
-  });
-
-  // The whole point of the swap: with nothing in flight the section still answers
-  // "what has this agent been doing" instead of only "nothing right now".
-  it('says what the agent last did, and counts what it has done, when nothing is in flight', () => {
-    const recent: RadarActivity[] = [
-      { ts: '2026-06-23T22:00:00Z', kind: 'write', label: 'Edit agent.rs', target: '~/WARDEN/agent.rs' },
-      { ts: '2026-06-23T21:59:00Z', kind: 'read', label: 'Read radar.rs', target: '~/WARDEN/radar.rs' },
-      { ts: '2026-06-23T21:58:00Z', kind: 'read', label: 'Read store.rs', target: '~/WARDEN/store.rs' },
-    ];
-    const el = render(
-      <RadarDetailPanel agent={agentFixture({ currentAction: null, recentActivity: recent })} />,
-    );
-    const hero = el.querySelector(HERO);
-    expect(hero?.getAttribute('data-current-action')).toBe('idle');
-    expect((hero?.textContent ?? '')).toContain('Last edited agent.rs');
-    // Exact counts off the real feed, never a rounded or invented figure.
-    const tally = (hero?.querySelector('[data-summary-tally]')?.textContent ?? '');
-    expect(tally).toContain('2 files read');
-    expect(tally).toContain('1 edit');
-    // And which files, because a count on its own is half an answer.
-    const files = hero?.querySelector('[data-summary-files]')?.textContent ?? '';
-    expect(files).toContain('agent.rs');
-    expect(files).toContain('store.rs');
-  });
-
-  it('says the feed is empty rather than inventing a summary', () => {
-    const el = render(
-      <RadarDetailPanel agent={agentFixture({ currentAction: null, recentActivity: [] })} />,
-    );
-    const hero = el.querySelector(HERO);
-    expect((hero?.textContent ?? '')).toContain('recorded yet');
-    expect(hero?.querySelector('[data-summary-tally]')).toBeFalsy();
-    expect(hero?.querySelector('[data-summary-files]')).toBeFalsy();
-  });
-
-  // The hero offers TWO distinct verbs on a target, so each is asserted by its
-  // own accessible name rather than by "the first button in the section".
-  it('shows a clickable, accessibly-named Finder-reveal button when a target is present, and calls reveal_path with it', () => {
-    const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
-    const btn = el.querySelector(
-      `${HERO} button[aria-label="Reveal agent.rs in Finder"]`,
-    ) as HTMLButtonElement;
-    expect(btn).toBeTruthy();
-    act(() => btn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-    expect(invoke).toHaveBeenCalledWith('reveal_path', { path: '~/Developer/Apps/WARDEN/src-tauri/src/radar/agent.rs' });
-  });
-
-  it('offers an in-app view toggle for the in-flight target, separate from Finder', () => {
-    const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
-    const view = el.querySelector(`${HERO} .wd-summary-target`) as HTMLButtonElement;
-    expect(view).toBeTruthy();
-    expect(view.getAttribute('aria-expanded')).toBe('false');
-    // Shows the path with the FILENAME intact: the directory is the part allowed
-    // to truncate, because the filename is what you actually needed.
-    expect((view.textContent ?? '')).toContain('agent.rs');
-
-    act(() => view.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-
-    expect(view.getAttribute('aria-expanded')).toBe('true');
-    expect(el.querySelector('[data-file-preview]')).toBeTruthy();
-    expect(invoke).toHaveBeenCalledWith('preview_file', {
-      path: '~/Developer/Apps/WARDEN/src-tauri/src/radar/agent.rs',
-    });
-  });
-
-  it('renders no target controls when the action has no single-file target (e.g. a shell run)', () => {
-    const el = render(
-      <RadarDetailPanel
-        agent={agentFixture({
-          currentAction: action({ kind: 'run', tool: 'Bash', label: 'pnpm test', target: null }),
-          recentActivity: [],
-        })}
-      />,
-    );
-    const hero = el.querySelector(HERO);
-    expect(hero?.querySelector('.wd-summary-target')).toBeFalsy();
-    expect(hero?.querySelector('[aria-label^="Reveal"]')).toBeFalsy();
-    expect((hero?.textContent ?? '')).toContain('pnpm test');
-  });
-
-  it('ticks the elapsed clock live while an action is in flight', () => {
-    vi.useFakeTimers();
-    try {
-      const start = new Date('2026-06-23T22:00:00.000Z');
-      vi.setSystemTime(start);
-      const el = render(
-        <RadarDetailPanel agent={agentFixture({ currentAction: action({ startedAt: start.toISOString() }) })} />,
-      );
-      const value = () => el.querySelector('.wd-summary-clock-value')?.textContent;
-      expect(value()).toBe('0s');
-      act(() => {
-        vi.advanceTimersByTime(3_000);
-      });
-      expect(value()).toBe('3s');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('falls back to the backend elapsedMs when startedAt cannot be parsed', () => {
-    const el = render(
-      <RadarDetailPanel agent={agentFixture({ currentAction: action({ startedAt: 'not-a-date', elapsedMs: 42_000 }) })} />,
-    );
-    expect(el.querySelector('.wd-summary-clock-value')?.textContent).toBe('42s');
-  });
-
-  it('swallows a rejected reveal_path without throwing', async () => {
-    vi.mocked(invoke).mockRejectedValueOnce(new Error('no such path'));
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const el = render(<RadarDetailPanel agent={agentFixture({ currentAction: action() })} />);
-    const btn = el.querySelector(
-      `${HERO} button[aria-label="Reveal agent.rs in Finder"]`,
-    ) as HTMLButtonElement;
-    await act(async () => {
-      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(errSpy).toHaveBeenCalled();
-    errSpy.mockRestore();
-  });
-});
-
 // ── activity feed Finder reveal ──────────────────────────────────────────────────
 describe('RadarDetailPanel — activity feed Finder reveal', () => {
   // A feed row is a disclosure now: collapsed it is one skimmable line, expanded
@@ -587,7 +420,9 @@ describe('RadarDetailPanel — safe degradation without the new fields', () => {
     void currentAction;
     void team;
     const el = render(<RadarDetailPanel agent={bare as RadarAgent} />);
-    expect(el.querySelector('[data-current-action="idle"]')).toBeTruthy();
+    // The panel still stands up and still renders its first real section, rather
+    // than throwing on a field an older backend never sent.
+    expect(el.querySelector('[data-context-window]')).toBeTruthy();
     expect(el.querySelector('.wd-detail-session-name')).toBeFalsy();
     expect(el.querySelector('[data-id="team"]')).toBeFalsy();
   });
@@ -632,20 +467,14 @@ describe('RadarDetailPanel rename', () => {
 
   /**
    * Set what `rename_session` resolves (or rejects) with, leaving every other
-   * command on its default reply.
-   *
-   * `mockResolvedValueOnce` cannot be used here any more: the panel mounts a
-   * compaction control that reads `compact_status`, and that call would consume
-   * the one-shot before the rename ever ran. Dispatching by command name is
-   * order-independent, which is the property the test actually needs.
+   * command on its default reply. Dispatching by command name rather than with
+   * `mockResolvedValueOnce` keeps the stub order-independent, so another mount-time
+   * IPC call can never consume the reply this test set up.
    */
   function onRename(result: unknown, rejects = false) {
     vi.mocked(invoke).mockImplementation(((cmd: string) => {
       if (cmd === 'rename_session') {
         return rejects ? Promise.reject(result) : Promise.resolve(result);
-      }
-      if (cmd === 'compact_status') {
-        return Promise.resolve({ automation: 'unknown', automationRecoverableInSettings: false, armed: [] });
       }
       return Promise.resolve(undefined);
     }) as never);
@@ -702,8 +531,8 @@ describe('RadarDetailPanel rename', () => {
   });
 
   // Asserts specifically that no RENAME is sent. The panel legitimately makes other
-  // IPC calls on mount now (the compaction control reads its status), so a blanket
-  // "never called" would be asserting something this test never meant.
+  // IPC calls, so a blanket "never called" would be asserting something this test
+  // never meant.
   it('does not invoke a rename when the name is unchanged or blank', () => {
     const renames = () =>
       (invoke as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter(

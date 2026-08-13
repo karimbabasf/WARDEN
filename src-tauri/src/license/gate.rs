@@ -197,7 +197,6 @@ mod tests {
             "observe_start_sharing",
             "observe_create_grant",
             "observe_add_peer",
-            "compact_arm",
             // The default for anything invented later.
             "some_command_added_next_quarter",
         ] {
@@ -208,7 +207,7 @@ mod tests {
     #[test]
     fn an_activated_build_answers_everything() {
         let open = decide(true, Some(&a_valid_key()));
-        for c in ["get_radar_state", "compact_arm", "observe_start_sharing"] {
+        for c in ["get_radar_state", "rename_session", "observe_start_sharing"] {
             assert!(command_is_allowed(&open, c));
         }
     }

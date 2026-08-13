@@ -210,7 +210,6 @@ if (params.get('watch') === '1') {
           : PEER_ROW,
     ],
     observe_peer_state: peerMode === 'live' ? PEER_STATE : null,
-    compact_status: { automation: 'granted', automationRecoverableInSettings: false, armed: [] },
   };
   (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
     invoke: (cmd: string) =>

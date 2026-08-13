@@ -9,10 +9,11 @@
 // the radar actually knows and leaves a slot visibly empty otherwise; it never
 // substitutes a placeholder that reads like data.
 
-import { useMemo, type CSSProperties, type ReactNode } from 'react';
+import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import type { RadarAgent } from '@/viz/shared/types/radarTypes';
 import { formatTokens, shortModel } from '@/viz/shared/types/radarTypes';
 import { radarHarness } from '@/viz/modules/radar/radarTheme';
+import type { HiddenAgent } from './hiddenAgents';
 
 /**
  * Per-kind glyph. Colour is never the only signal (a11y).
@@ -83,11 +84,13 @@ function Strip({
   selected,
   childCount,
   onSelect,
+  onHide,
 }: {
   agent: RadarAgent;
   selected: boolean;
   childCount: number;
   onSelect: (id: string) => void;
+  onHide: (agent: RadarAgent) => void;
 }) {
   const theme = radarHarness(agent.harness);
   const action = agent.currentAction ?? null;
@@ -97,6 +100,11 @@ function Strip({
   // about to overflow is the one thing worth breaking colour discipline for.
   const hot = fill >= 0.85;
 
+  // The hide control is a SIBLING of the strip, not a child of it. The strip is
+  // itself a <button>, and a button inside a button is invalid HTML that browsers
+  // recover from by unnesting: the control would end up outside the row it belongs
+  // to. As a sibling it overlays the corner, takes its own click, and never has to
+  // stop the strip's select from firing.
   return (
     <li className="wd-strip-item">
       <button
@@ -151,7 +159,84 @@ function Strip({
           ) : null}
         </span>
       </button>
+
+      <button
+        type="button"
+        className="wd-strip-hide"
+        title={`Hide ${stripName(agent)} from the board`}
+        aria-label={`Hide ${stripName(agent)} from the board`}
+        onClick={() => onHide(agent)}
+      >
+        <span aria-hidden>×</span>
+      </button>
     </li>
+  );
+}
+
+/**
+ * The restore list. Present only when something is hidden, so a board with nothing
+ * muted carries no chrome for a feature it is not using.
+ *
+ * Closed by default and stating its own count, because the point of hiding was to
+ * get those rows off the screen: re-listing them open would undo the thing the user
+ * just asked for. A hidden session that has since ended keeps its row and stays
+ * restorable, marked "ended" rather than quietly implying it is still running.
+ */
+function HiddenSection({
+  hidden,
+  onRestore,
+  onRestoreAll,
+}: {
+  hidden: readonly (HiddenAgent & { live: boolean })[];
+  onRestore: (id: string) => void;
+  onRestoreAll: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (hidden.length === 0) return null;
+
+  return (
+    <div className="wd-hidden" data-hidden-count={hidden.length}>
+      <button
+        type="button"
+        className="wd-hidden-head"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="wd-hidden-glyph" aria-hidden>
+          {open ? '▾' : '▸'}
+        </span>
+        <span className="wd-hidden-label">Hidden</span>
+        <span className="wd-hidden-count">{hidden.length}</span>
+      </button>
+
+      {open ? (
+        <>
+          <ul className="wd-hidden-list">
+            {hidden.map((h) => (
+              <li key={h.id} className="wd-hidden-item" data-live={h.live ? 'yes' : 'no'}>
+                <span className="wd-hidden-name" title={h.name}>
+                  {h.name}
+                </span>
+                {h.live ? null : <span className="wd-hidden-gone">ended</span>}
+                <button
+                  type="button"
+                  className="wd-hidden-restore"
+                  aria-label={`Show ${h.name} on the board`}
+                  onClick={() => onRestore(h.id)}
+                >
+                  Show
+                </button>
+              </li>
+            ))}
+          </ul>
+          {hidden.length > 1 ? (
+            <button type="button" className="wd-hidden-all" onClick={onRestoreAll}>
+              Show all
+            </button>
+          ) : null}
+        </>
+      ) : null}
+    </div>
   );
 }
 
@@ -165,12 +250,18 @@ export function fleetSummary(sessions: number, working: number): string {
 }
 
 export type FleetRailProps = {
+  /** Already filtered: the hidden set never reaches the rail as a live strip. */
   agents: RadarAgent[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   /** Folded: the rack is off the board, down to a tab that brings it back. */
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  /** The mute list, newest first, each row flagged live or ended. */
+  hidden: readonly (HiddenAgent & { live: boolean })[];
+  onHide: (agent: RadarAgent) => void;
+  onRestore: (id: string) => void;
+  onRestoreAll: () => void;
   /** Rendered under the fleet: the observer dock (watch someone else's swarm). */
   footer?: ReactNode;
 };
@@ -190,6 +281,10 @@ export function FleetRail({
   onSelect,
   collapsed,
   onToggleCollapsed,
+  hidden,
+  onHide,
+  onRestore,
+  onRestoreAll,
   footer,
 }: FleetRailProps) {
   const roots = useMemo(
@@ -265,9 +360,18 @@ export function FleetRail({
         </div>
 
         {roots.length === 0 ? (
-          <p className="wd-fleet-empty">
-            No sessions yet. Open Claude Code or Codex and they appear here.
-          </p>
+          // An empty rack has two different causes and they need different words.
+          // "No sessions yet" in front of a user who just hid the last strip reads
+          // as a bug, and it hides the one control that undoes it.
+          hidden.length > 0 ? (
+            <p className="wd-fleet-empty">
+              Every session is hidden. Bring one back from the list below.
+            </p>
+          ) : (
+            <p className="wd-fleet-empty">
+              No sessions yet. Open Claude Code or Codex and they appear here.
+            </p>
+          )
         ) : (
           <ul className="wd-fleet-list">
             {roots.map((a) => (
@@ -277,10 +381,13 @@ export function FleetRail({
                 selected={a.id === selectedId}
                 childCount={childCounts.get(a.id) ?? 0}
                 onSelect={onSelect}
+                onHide={onHide}
               />
             ))}
           </ul>
         )}
+
+        <HiddenSection hidden={hidden} onRestore={onRestore} onRestoreAll={onRestoreAll} />
 
         {footer ? <div className="wd-fleet-footer">{footer}</div> : null}
       </div>

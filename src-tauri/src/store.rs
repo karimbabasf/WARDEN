@@ -128,36 +128,11 @@ impl Store {
         if !has_approved_col {
             c.execute_batch("ALTER TABLE observer_grants ADD COLUMN approved_at INTEGER;")?;
         }
-        // Armed compaction: one row per agent the user asked WARDEN to compact when
-        // it next goes idle. This table IS the feature's entire footprint on the
-        // machine. Arming writes here and touches nothing else, which is what makes
-        // cancelling free: the row disappears and no request was ever in flight.
-        //
-        // `agent_id` is the PRIMARY KEY so re-arming the same agent replaces rather
-        // than queues, and so the fire path can claim a record with a conditional
-        // UPDATE and lose that race to a cancel by design. `pid` is nullable because
-        // a Codex thread is observed through rollout files and has no process WARDEN
-        // can name. Every read and write of this table lives in `compact::arm`.
-        c.execute_batch(
-            r#"
-        CREATE TABLE IF NOT EXISTS compact_arms(
-            agent_id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            pid INTEGER,
-            harness TEXT NOT NULL,
-            mode TEXT NOT NULL,
-            mode_reason TEXT NOT NULL,
-            idle_source TEXT NOT NULL,
-            label TEXT NOT NULL,
-            baseline_status TEXT NOT NULL,
-            armed_at INTEGER NOT NULL,
-            state TEXT NOT NULL,
-            fired_at INTEGER,
-            detail TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_compact_arms_state ON compact_arms(state);
-        "#,
-        )?;
+        // Armed compaction is gone. `compact_arms` was that feature's entire
+        // footprint on the machine, so the migration DROPS it rather than leaving a
+        // dead table behind on every install that ever ran the old build. Nothing
+        // reads it any more, so there is nothing to preserve.
+        c.execute_batch("DROP TABLE IF EXISTS compact_arms;")?;
         Ok(())
     }
 

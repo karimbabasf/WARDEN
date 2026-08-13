@@ -22,6 +22,15 @@ import { ApprovalModal } from '@/viz/modules/observe/ApprovalModal';
 import { FilterBar } from './FilterBar';
 import { Breadcrumb } from './Breadcrumb';
 import { FleetRail } from './FleetRail';
+import {
+  addHidden,
+  hiddenRoster,
+  readHiddenAgents,
+  removeHidden,
+  visibleAgents,
+  writeHiddenAgents,
+  type HiddenAgent,
+} from './hiddenAgents';
 import { ConstellationSwitcher, type ConstellationTarget } from './ConstellationSwitcher';
 import { layoutRadarScene, isFlatAgent, type RadarLayout } from '@/viz/modules/radar/radarLayout';
 import { PeerConstellation } from '@/viz/modules/radar/PeerConstellation';
@@ -152,6 +161,11 @@ function writeFleetFolded(folded: boolean): void {
   } catch {
     /* no storage: the fold still toggles, it just does not survive a reload */
   }
+}
+
+/** The name to remember a hidden agent by: the same precedence the strip shows. */
+function hiddenNameFor(agent: RadarAgent): string {
+  return agent.title || agent.label || agent.nickname || agent.id;
 }
 
 /**
@@ -381,6 +395,16 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
     });
   }, []);
   const railInsets = useRailInsets(selectedId !== null, fleetFolded);
+
+  // The mute list. Persisted like the fold, and applied ONE level above the model
+  // (see `hiddenAgents.ts`), so the strip, the globe, the census, the camera bounds
+  // and the harness chips all drop the same agents without each being told.
+  const [hidden, setHidden] = useState<HiddenAgent[]>(readHiddenAgents);
+  const commitHidden = useCallback((next: HiddenAgent[]) => {
+    setHidden(next);
+    writeHiddenAgents(next);
+  }, []);
+
   // The peer board you are currently watching, lifted out of the observer dock.
   const [watched, setWatched] = useState<{ peer: { id: string; label: string }; state: ObservedState | null } | null>(
     null,
@@ -453,10 +477,45 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
   }, []);
 
   // Radar forest (live agents), empty until the backend emits `radar_state`.
-  const radarModel = useMemo<RadarSceneModel>(
+  const rawRadarModel = useMemo<RadarSceneModel>(
     () => scene.radarScene ?? { agents: [], generatedAt: '' },
     [scene.radarScene],
   );
+
+  // The board everything else reads. The mute list is applied exactly HERE, once, so
+  // the constellation, the layout, the camera bounds, the fleet census, the harness
+  // chips and the brand count cannot disagree about which agents exist. Filtering in
+  // the rail alone would leave the hidden globes on the scope.
+  const radarModel = useMemo<RadarSceneModel>(
+    () =>
+      hidden.length === 0
+        ? rawRadarModel
+        : { ...rawRadarModel, agents: visibleAgents(rawRadarModel.agents, hidden) },
+    [rawRadarModel, hidden],
+  );
+  const hiddenRows = useMemo(
+    () => hiddenRoster(rawRadarModel.agents, hidden),
+    [rawRadarModel, hidden],
+  );
+
+  const onHideAgent = useCallback(
+    (agent: RadarAgent) => {
+      const next = addHidden(hidden, { id: agent.id, name: hiddenNameFor(agent) });
+      // Drop the selection when it is inside what just went away, otherwise the right
+      // dock reserves its rail inset for a panel that no longer has an agent to read.
+      // Measured against the CLOSURE, not the clicked id: hiding a lead takes its
+      // subagents with it, and the selection may well be one of them.
+      const stillThere = new Set(visibleAgents(rawRadarModel.agents, next).map((a) => a.id));
+      setSelectedId((cur) => (cur !== null && !stillThere.has(cur) ? null : cur));
+      commitHidden(next);
+    },
+    [hidden, commitHidden, rawRadarModel],
+  );
+  const onRestoreAgent = useCallback(
+    (id: string) => commitHidden(removeHidden(hidden, id)),
+    [hidden, commitHidden],
+  );
+  const onRestoreAllAgents = useCallback(() => commitHidden([]), [commitHidden]);
   // Memoised radar layout, also the source of the `id -> {pos, radius}` map that
   // `subtreeBounds` frames against. Computed from the same deterministic layout the
   // forest renders, so the camera frames exactly what is on screen.
@@ -745,6 +804,10 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
         onSelect={onRadarJump}
         collapsed={fleetFolded}
         onToggleCollapsed={onToggleFleet}
+        hidden={hiddenRows}
+        onHide={onHideAgent}
+        onRestore={onRestoreAgent}
+        onRestoreAll={onRestoreAllAgents}
         footer={<PeersPanel onWatchedPeer={onWatchedPeer} />}
       />
 
@@ -781,8 +844,20 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
       {radarModel.agents.length === 0 ? (
         <div className="wd-radar-void" aria-live="polite">
           <span className="wd-radar-void-pulse" aria-hidden />
-          <span className="wd-radar-void-title">Watching for live agents</span>
-          <span className="wd-radar-void-sub">Open Claude Code or Codex and your sessions appear here.</span>
+          {/* An empty scope because everything is hidden is not the same state as an
+              empty scope because nothing is running, and telling a user to open Claude
+              Code when they already have it open is how a working board reads broken. */}
+          {rawRadarModel.agents.length > 0 ? (
+            <>
+              <span className="wd-radar-void-title">Every agent is hidden</span>
+              <span className="wd-radar-void-sub">Bring one back from Hidden in the fleet rail.</span>
+            </>
+          ) : (
+            <>
+              <span className="wd-radar-void-title">Watching for live agents</span>
+              <span className="wd-radar-void-sub">Open Claude Code or Codex and your sessions appear here.</span>
+            </>
+          )}
         </div>
       ) : null}
     </div>
