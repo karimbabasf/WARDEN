@@ -274,6 +274,55 @@ if (params.get('watch') === '1') {
   };
 }
 
+// `?goto=<case>` makes the "take me there" control reachable, for the same reason
+// `?watch=1` exists: the control asks the backend where the agent's window is
+// BEFORE it renders anything, so with no Tauri bridge it correctly draws nothing
+// and its layout could never be checked in a browser.
+//
+// Four cases, because the control has four looks and only the first is the happy
+// one: `ok` (a window it can raise), `sub` (the window belongs to the agent's
+// ROOT), `blocked` (a reason where the button would be), `denied` (the click was
+// refused and the only remedy is offered). Stubbed at `__TAURI_INTERNALS__` so the
+// component still runs its own untouched invoke path and only the answers are fake.
+const GOTO_CASES: Record<string, unknown> = {
+  ok: { reachable: true, app: 'Terminal', viaAgentId: null, viaLabel: null, reason: null },
+  sub: { reachable: true, app: 'iTerm2', viaAgentId: 'a-root-claude', viaLabel: 'WARDEN', reason: null },
+  blocked: {
+    reachable: false,
+    app: null,
+    viaAgentId: null,
+    viaLabel: null,
+    reason: 'no terminal window: it runs inside Visual Studio Code',
+  },
+  denied: { reachable: true, app: 'Terminal', viaAgentId: null, viaLabel: null, reason: null },
+};
+
+if (params.get('goto')) {
+  const which = params.get('goto') ?? 'ok';
+  const target = GOTO_CASES[which] ?? GOTO_CASES.ok;
+  const prior = (window as unknown as { __TAURI_INTERNALS__?: { invoke(c: string, a?: unknown): Promise<unknown> } })
+    .__TAURI_INTERNALS__;
+  (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
+    // Chained onto any stub already installed above, and REJECTING for everything
+    // else. A stub that resolved unknown commands would answer `get_radar_state`
+    // with undefined and wipe the mock forest, which is how this harness looked
+    // like an empty machine the first time it was tried.
+    invoke: (cmd: string, args?: unknown) => {
+      if (cmd === 'agent_terminal_target') return Promise.resolve(target);
+      if (cmd === 'focus_agent_terminal') {
+        return Promise.resolve(
+          which === 'denied'
+            ? { ok: false, denied: true, message: 'macOS has not allowed WARDEN to control your terminal' }
+            : { ok: true, denied: false, message: null },
+        );
+      }
+      if (cmd === 'open_automation_settings') return Promise.resolve(undefined);
+      return prior ? prior.invoke(cmd, args) : Promise.reject(new Error(`no stub for ${cmd}`));
+    },
+    transformCallback: (cb: unknown) => cb,
+  };
+}
+
 // `?solo=1` drops every non-Claude agent. A one-harness machine is the common case
 // and it is a DIFFERENT chrome (the filter dock does not render at all when there is
 // nothing to choose between), so it needs its own reachable state.
@@ -344,5 +393,13 @@ if (el) {
         }, 250);
       }
     }, 500);
+  }
+
+  // `?goto=denied` needs the CLICK as well as the stub: the refusal only exists
+  // after the act is attempted, and that is the tallest state the control has.
+  if (params.get('goto') === 'denied') {
+    window.setTimeout(() => {
+      document.querySelector<HTMLButtonElement>('[data-goto="button"]')?.click();
+    }, 700);
   }
 }
