@@ -1,7 +1,6 @@
 pub mod commands;
 pub mod ingest;
 pub mod ir;
-pub mod license;
 pub mod observe;
 pub mod platform;
 pub mod radar;
@@ -271,64 +270,32 @@ pub fn run() {
             summon_overlay(app.handle());
             Ok(())
         })
-        .invoke_handler({
-            // THE IPC GATE. Every WARDEN command passes through here, so an
-            // unactivated release build answers nothing but the activation
-            // surface: not the radar, not a file preview, not an observe grant.
-            // A frontend-only gate would be one devtools call away from the
-            // whole product, which is why the decision lives in Rust and the web
-            // side merely renders it.
-            //
-            // Tauri routes `plugin:*` commands (the event channel, the opener,
-            // the global shortcut) down a different path that never reaches this
-            // closure, so gating here cannot break the webview's own plumbing.
-            // In a debug build `license::gate::allows` is always true.
-            // Boxed because `generate_handler!` expands to a closure whose
-            // runtime parameter cannot be inferred through the wrapper below.
-            let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
-                Box::new(tauri::generate_handler![
-                    diag,
-                    hide_overlay,
-                    minimize_window,
-                    hide_window,
-                    get_radar_state,
-                    rename_session,
-                    reveal_path,
-                    agent_terminal_target,
-                    focus_agent_terminal,
-                    open_automation_settings,
-                    preview_file,
-                    preview_observed_state,
-                    observe_start_sharing,
-                    observe_stop_sharing,
-                    observe_sharing_status,
-                    observe_create_grant,
-                    observe_list_grants,
-                    observe_revoke_grant,
-                    observe_pending_approvals,
-                    observe_resolve_approval,
-                    observe_add_peer,
-                    observe_list_peers,
-                    observe_remove_peer,
-                    observe_peer_state,
-                    // Full path, not the `license::` re-export: `#[tauri::command]`
-                    // emits companion items next to the function, and only the
-                    // defining module has them.
-                    license::commands::license_status,
-                    license::commands::license_activate
-                ]);
-            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
-                // Read the verdict before touching `invoke.resolver`, which is
-                // moved by `reject`.
-                if license::gate::allows(invoke.message.command()) {
-                    return handler(invoke);
-                }
-                invoke
-                    .resolver
-                    .reject("WARDEN is not activated on this Mac.");
-                true
-            }
-        })
+        .invoke_handler(tauri::generate_handler![
+            diag,
+            hide_overlay,
+            minimize_window,
+            hide_window,
+            get_radar_state,
+            rename_session,
+            reveal_path,
+            agent_terminal_target,
+            focus_agent_terminal,
+            open_automation_settings,
+            preview_file,
+            preview_observed_state,
+            observe_start_sharing,
+            observe_stop_sharing,
+            observe_sharing_status,
+            observe_create_grant,
+            observe_list_grants,
+            observe_revoke_grant,
+            observe_pending_approvals,
+            observe_resolve_approval,
+            observe_add_peer,
+            observe_list_peers,
+            observe_remove_peer,
+            observe_peer_state
+        ])
         .on_window_event(|window, event| {
             // The red traffic-light button (and ⌘W) asks the window to CLOSE. WARDEN
             // is a daemon, so a close must not quit it: veto the request and hide the
