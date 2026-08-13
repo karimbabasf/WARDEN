@@ -120,6 +120,158 @@ function renameSession(agentId: string, name: string): Promise<string> {
   return invoke<string>('rename_session', { agentId, name });
 }
 
+/**
+ * Where an agent's terminal window is, as the backend resolved it.
+ * `reachable` is the only thing the button keys off; a false always carries a
+ * `reason` written for the operator.
+ */
+export type TerminalTarget = {
+  reachable: boolean;
+  app: string | null;
+  viaAgentId: string | null;
+  viaLabel: string | null;
+  reason: string | null;
+};
+
+function normalizeTarget(raw: any): TerminalTarget | null {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    reachable: raw.reachable === true,
+    app: typeof raw.app === 'string' ? raw.app : null,
+    viaAgentId: typeof raw.viaAgentId === 'string' ? raw.viaAgentId : null,
+    viaLabel: typeof raw.viaLabel === 'string' ? raw.viaLabel : null,
+    reason: typeof raw.reason === 'string' ? raw.reason : null,
+  };
+}
+
+/**
+ * "Take me there": raise the terminal window this agent is running in.
+ *
+ * The radar tells you which agent needs you; this is the step that was still
+ * manual, hunting the right tab across a dozen open windows.
+ *
+ * Three behaviours are load-bearing:
+ *
+ * 1. **The button never claims what the backend cannot do.** It renders only for
+ *    a target the backend already resolved as reachable. Every other case shows
+ *    the backend's own one-line reason instead, so an IDE-hosted session, a
+ *    closed window and an unsupported emulator read as three different facts
+ *    rather than as one dead button.
+ * 2. **The probe is silent when there is no backend.** The browser sandboxes
+ *    (`/radar-lab.html`) have no Tauri bridge, so a rejected probe renders
+ *    nothing at all rather than an error the harness cannot act on.
+ * 3. **A permission refusal offers the only thing that fixes it.** macOS records
+ *    the refusal and never asks again, so "try again" is a lie; the pane in
+ *    System Settings is the sole remedy. `denied` comes back as its own field so
+ *    this never depends on matching English in a message.
+ */
+function TakeMeThere({ agentId }: { agentId: string }) {
+  const [target, setTarget] = useState<TerminalTarget | null>(null);
+  const [failure, setFailure] = useState<{ message: string; denied: boolean } | null>(null);
+  const tokenRef = useRef(0);
+
+  useEffect(() => {
+    if (!agentId) return;
+    const token = ++tokenRef.current;
+    setFailure(null);
+    // Cleared rather than left showing the PREVIOUS agent's window for one round
+    // trip. A stale "Terminal" caption under a newly selected agent is the exact
+    // kind of small lie this panel does not tell.
+    setTarget(null);
+    invoke('agent_terminal_target', { agentId })
+      .then((raw) => {
+        if (tokenRef.current !== token) return;
+        setTarget(normalizeTarget(raw));
+      })
+      .catch(() => {
+        if (tokenRef.current !== token) return;
+        setTarget(null);
+      });
+  }, [agentId]);
+
+  if (!target) return null;
+
+  if (!target.reachable) {
+    return target.reason ? (
+      <p className="wd-detail-goto-blocked" data-goto="blocked">
+        {target.reason}
+      </p>
+    ) : null;
+  }
+
+  function go() {
+    const token = tokenRef.current;
+    setFailure(null);
+    invoke<{ ok?: boolean; denied?: boolean; message?: string | null }>('focus_agent_terminal', {
+      agentId,
+    })
+      .then((out) => {
+        if (tokenRef.current !== token) return;
+        if (out?.ok) return;
+        setFailure({
+          message: out?.message || 'WARDEN could not raise that window',
+          denied: out?.denied === true,
+        });
+      })
+      .catch((err: unknown) => {
+        if (tokenRef.current !== token) return;
+        setFailure({
+          message: typeof err === 'string' ? err : 'WARDEN could not raise that window',
+          denied: false,
+        });
+      });
+  }
+
+  // A subagent runs inside its root's process, so the window belongs to the
+  // root. Saying whose window it is beats silently jumping somewhere the
+  // operator did not select.
+  const via = target.viaLabel ?? (target.viaAgentId ? 'its parent' : null);
+
+  return (
+    <div className="wd-detail-goto">
+      <button
+        type="button"
+        className="wd-detail-goto-btn"
+        onClick={go}
+        data-goto="button"
+        // The visible label cannot say WHERE without getting long, and the caption
+        // beside it is not part of the button's accessible name.
+        aria-label={
+          via
+            ? `Take me there: the ${target.app} window running ${via}`
+            : `Take me there: the ${target.app} window`
+        }
+      >
+        <span className="wd-detail-goto-glyph" aria-hidden>
+          ↗
+        </span>
+        Take me there
+      </button>
+      <span className="wd-detail-goto-app">
+        {/* "in <root>" rather than a bare name: "Terminal · warden" reads as two
+            tags, and the point is that this raises somebody ELSE's window. */}
+        {via ? `${target.app} · in ${via}` : target.app}
+      </span>
+      {failure ? (
+        <p className="wd-detail-goto-error" role="alert">
+          {failure.message}
+          {failure.denied ? (
+            <button
+              type="button"
+              className="wd-detail-goto-settings"
+              onClick={() => {
+                invoke('open_automation_settings').catch(() => {});
+              }}
+            >
+              Open Settings
+            </button>
+          ) : null}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 /** Per-kind glyph + readable word (colour is never the only signal). */
 const ACTIVITY_KIND: Record<string, { glyph: string; label: string }> = {
   read: { glyph: '▤', label: 'Read' },
@@ -643,6 +795,10 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
         ) : null}
       </div>
 
+      {/* Above the callout and the gauge on purpose: when an agent is waiting on
+          you, going to it is the whole response, and the numbers cannot change
+          until you do. */}
+      <TakeMeThere agentId={agent.id} />
       <AwaitingCallout agent={agent} />
       <ContextSection agent={agent} />
       <ActivitySection agent={agent} />

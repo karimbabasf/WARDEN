@@ -7,6 +7,7 @@ pub mod platform;
 pub mod radar;
 pub mod scheduler;
 pub mod store;
+pub mod terminal;
 pub mod util;
 
 use commands::*;
@@ -293,6 +294,9 @@ pub fn run() {
                     get_radar_state,
                     rename_session,
                     reveal_path,
+                    agent_terminal_target,
+                    focus_agent_terminal,
+                    open_automation_settings,
                     preview_file,
                     preview_observed_state,
                     observe_start_sharing,

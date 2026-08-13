@@ -294,6 +294,125 @@ pub async fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), Stri
         .map_err(|e| format!("reveal: {e}"))
 }
 
+/// Resolve one agent, then hand both terminal commands the same answer.
+///
+/// Both the probe and the act go through here, so the button's claim and the
+/// click's behaviour can never disagree: they read different halves of one
+/// resolution rather than each deciding for themselves.
+fn locate_agent_terminal(state: &AppState, agent_id: &str) -> crate::terminal::Located {
+    let Some(radar) = state.cached_radar_state() else {
+        return crate::terminal::Located {
+            target: crate::terminal::TerminalTarget {
+                reachable: false,
+                app: None,
+                via_agent_id: None,
+                via_label: None,
+                reason: Some("the radar has not reported yet".into()),
+            },
+            focus: None,
+        };
+    };
+    let registry =
+        crate::radar::liveness::read_claude_registry(&crate::util::default_claude_sessions_dir());
+
+    crate::terminal::locate(
+        &radar.agents,
+        |id| state.store.session_by_id(id).ok().flatten(),
+        &registry,
+        agent_id,
+        crate::platform::process_alive,
+        crate::platform::controlling_tty,
+        crate::platform::terminal_host_for_pid,
+    )
+}
+
+/// "Take me there": can WARDEN raise the terminal window this agent is in?
+///
+/// Called when the panel opens an agent, NOT on every radar frame: it shells out
+/// to `ps` twice. It sends no Apple event, so it can never raise a permission
+/// dialog on its own; consent is asked for by the click, with the reason on
+/// screen.
+#[tauri::command]
+pub async fn agent_terminal_target(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+) -> Result<crate::terminal::TerminalTarget, String> {
+    Ok(locate_agent_terminal(&state, &agent_id).target)
+}
+
+/// Select the tab this agent is running in and bring its window to the front.
+///
+/// Read-and-raise only: see `platform/macos.rs`. Nothing is typed into the
+/// session, so this stays inside the read-only posture rather than reopening the
+/// exception the armed-compaction feature needed.
+///
+/// The resolution is redone here rather than trusted from the probe. A window
+/// can close between the panel opening and the click, and a stale tty would
+/// otherwise raise whichever tab inherited that device number.
+///
+/// A miss comes back as `ok: false` rather than as an `Err`, and `denied` is
+/// flagged as its own field. The one permanent failure (macOS recorded a refusal
+/// and will never ask again) needs a different offer from every other one, and
+/// the frontend must not have to recognise it by matching English in a message.
+#[tauri::command]
+pub async fn focus_agent_terminal(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+) -> Result<FocusOutcome, String> {
+    let located = locate_agent_terminal(&state, &agent_id);
+    let Some((app, tty)) = located.focus else {
+        return Ok(FocusOutcome::failed(
+            located
+                .target
+                .reason
+                .unwrap_or_else(|| "WARDEN cannot find that window".into()),
+            false,
+        ));
+    };
+    match crate::platform::focus_tty(app, &tty) {
+        Ok(()) => Ok(FocusOutcome {
+            ok: true,
+            denied: false,
+            message: None,
+        }),
+        Err(e) => {
+            let denied = matches!(e, crate::platform::AutomationError::NotPermitted);
+            Ok(FocusOutcome::failed(e.to_string(), denied))
+        }
+    }
+}
+
+/// What a "take me there" click did. `ok` is the only success signal; `denied`
+/// separates the sticky permission refusal from every other failure.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FocusOutcome {
+    pub ok: bool,
+    pub denied: bool,
+    pub message: Option<String>,
+}
+
+impl FocusOutcome {
+    fn failed(message: String, denied: bool) -> Self {
+        Self {
+            ok: false,
+            denied,
+            message: Some(message),
+        }
+    }
+}
+
+/// Open Privacy and Security, Automation.
+///
+/// A denial there is sticky and never re-prompts, so a "take me there" that was
+/// once refused can only be recovered from this pane. The panel offers it as the
+/// next step after that specific failure, never on its own.
+#[tauri::command]
+pub async fn open_automation_settings() -> Result<(), String> {
+    crate::platform::open_automation_settings();
+    Ok(())
+}
+
 /// A bounded peek at a file an agent is actually touching, for the detail panel's
 /// "show me what it is reading/writing" control.
 ///

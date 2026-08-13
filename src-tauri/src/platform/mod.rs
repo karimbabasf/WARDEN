@@ -36,6 +36,122 @@ pub fn apply_activation_policy(app: &mut tauri::App) {
     imp::apply_activation_policy(app);
 }
 
+// ---------------------------------------------------------------------------
+// Terminal LOCATION: finding the window an agent is running in, and raising it.
+//
+// This surface only READS the process tree and RAISES a window. It never types
+// into another program, which is what keeps the read-only invariant in CLAUDE.md
+// unconditional: bringing a window forward is the same class of act as
+// `reveal_path` opening Finder.
+// ---------------------------------------------------------------------------
+
+/// A terminal emulator WARDEN can address one tab of, by the tty attached to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalApp {
+    /// `Terminal.app`. Addressed per TAB (`tty of t`).
+    Apple,
+    /// `iTerm2`. Addressed per SESSION, so a split pane resolves exactly rather
+    /// than landing in whichever pane happens to be focused.
+    ITerm2,
+}
+
+impl TerminalApp {
+    /// The name AppleScript addresses the app by, and the label the UI shows.
+    pub fn app_name(&self) -> &'static str {
+        match self {
+            TerminalApp::Apple => "Terminal",
+            TerminalApp::ITerm2 => "iTerm2",
+        }
+    }
+}
+
+/// What is hosting a session's process, as far up the tree as WARDEN can see.
+///
+/// Three arms rather than `Option`, because "the app is Ghostty and WARDEN cannot
+/// address its tabs" and "there is no GUI app in the ancestry at all" are
+/// different answers and the panel says different things about them. Guessing an
+/// emulator would be worse than either: a blind AppleScript attempt against an
+/// app the session does not belong to raises a permission dialog for a program
+/// the user is not even running, and a refusal there is permanent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalHost {
+    /// An emulator WARDEN knows how to point at one tab of.
+    Scriptable(TerminalApp),
+    /// A GUI app in the ancestry that exposes no tty-to-tab lookup (Ghostty,
+    /// Warp, a VS Code integrated terminal). Carries its display name so the
+    /// panel can name it instead of shrugging.
+    Unscriptable(String),
+    /// Nothing GUI above this process: a daemon, an ssh login, a detached run.
+    None,
+}
+
+/// Why raising a window did not work.
+///
+/// `NotPermitted` is called out separately because it is the one failure that is
+/// PERMANENT: macOS records the refusal and never re-prompts, so the caller must
+/// point the user at System Settings instead of suggesting they try again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationError {
+    /// `errAEEventNotPermitted` (-1743). Sticky. Recoverable only in System Settings.
+    NotPermitted,
+    /// `procNotFound` (-600): the emulator is not running.
+    TargetNotRunning,
+    /// The emulator is scriptable and permitted, but no tab owns that tty. The
+    /// window was closed between the probe and the click.
+    NoMatchingTab,
+    /// Anything else, with the raw message kept for the UI's detail line.
+    Failed(String),
+    /// No Apple Events surface on this platform at all.
+    Unsupported,
+}
+
+impl std::fmt::Display for AutomationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Short on purpose: the panel pairs this with an Open Settings
+            // button, so the sentence does not have to carry the directions too.
+            AutomationError::NotPermitted => {
+                write!(f, "macOS has not allowed WARDEN to control your terminal")
+            }
+            AutomationError::TargetNotRunning => write!(f, "the terminal app is not running"),
+            AutomationError::NoMatchingTab => {
+                write!(f, "that window has closed since WARDEN last looked")
+            }
+            AutomationError::Failed(m) => write!(f, "{m}"),
+            AutomationError::Unsupported => {
+                write!(f, "this platform has no way to raise a terminal window")
+            }
+        }
+    }
+}
+
+/// The controlling terminal of `pid` as a device path (`/dev/ttys001`), or `None`
+/// when the process has no tty (an IDE-hosted or daemonised session).
+pub fn controlling_tty(pid: u32) -> Option<String> {
+    imp::controlling_tty(pid)
+}
+
+/// Which app is hosting `pid`, found by walking the parent chain until a GUI
+/// bundle appears. See [`TerminalHost`] for why the answer is three-valued.
+pub fn terminal_host_for_pid(pid: u32) -> TerminalHost {
+    imp::terminal_host_for_pid(pid)
+}
+
+/// Select the tab or session attached to `tty`, raise its window, and bring the
+/// emulator to the front.
+///
+/// Read-and-raise only. Nothing is typed, nothing is sent to the agent, and the
+/// terminal's buffer is not touched.
+pub fn focus_tty(app: TerminalApp, tty: &str) -> std::result::Result<(), AutomationError> {
+    imp::focus_tty(app, tty)
+}
+
+/// Deep-link into Privacy and Security, Automation. A denial is sticky and never
+/// re-prompts, so this pane is the only place the user can undo it.
+pub fn open_automation_settings() {
+    imp::open_automation_settings();
+}
+
 /// True if `event` is the OS "reopen" gesture (macOS Dock-icon click on a
 /// hidden window). The caller decides what to do with it (re-summon the
 /// overlay). Always false on platforms without such a gesture.

@@ -572,3 +572,143 @@ describe('RadarDetailPanel rename', () => {
     expect(el.querySelector('.wd-detail-title')?.textContent).toBe('warden');
   });
 });
+
+// ── "Take me there": raise the agent's terminal window ─────────────────────────
+//
+// The rule under test is the one the whole control exists for: the button renders
+// only for a window the backend already said it can raise. Every other case shows
+// the backend's own reason instead, because an IDE-hosted session, a closed window
+// and an unsupported emulator are three different facts, not one dead button.
+describe('RadarDetailPanel — take me there', () => {
+  type Target = {
+    reachable: boolean;
+    app: string | null;
+    viaAgentId: string | null;
+    viaLabel: string | null;
+    reason: string | null;
+  };
+
+  const reachable = (over: Partial<Target> = {}): Target => ({
+    reachable: true,
+    app: 'Terminal',
+    viaAgentId: null,
+    viaLabel: null,
+    reason: null,
+    ...over,
+  });
+
+  /** Route the two terminal commands by name; everything else keeps its default. */
+  function onTerminal(target: unknown, focus: unknown = { ok: true, denied: false, message: null }) {
+    vi.mocked(invoke).mockImplementation(((cmd: string) => {
+      if (cmd === 'agent_terminal_target') return Promise.resolve(target);
+      if (cmd === 'focus_agent_terminal') return Promise.resolve(focus);
+      return Promise.resolve(undefined);
+    }) as never);
+  }
+
+  async function mount(target: unknown, focus?: unknown) {
+    onTerminal(target, focus);
+    const el = render(<RadarDetailPanel agent={agentFixture({ id: 'a1' })} />);
+    await act(async () => {});
+    return el;
+  }
+
+  it('offers the button and names the app when the backend resolved a window', async () => {
+    const el = await mount(reachable());
+    const btn = el.querySelector<HTMLButtonElement>('[data-goto="button"]');
+    expect(btn?.textContent).toContain('Take me there');
+    expect(el.querySelector('.wd-detail-goto-app')?.textContent).toBe('Terminal');
+
+    await act(async () => {
+      btn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(invoke).toHaveBeenCalledWith('focus_agent_terminal', { agentId: 'a1' });
+  });
+
+  it('states the reason instead of a disabled button when there is no window to raise', async () => {
+    const el = await mount({
+      reachable: false,
+      app: null,
+      viaAgentId: null,
+      viaLabel: null,
+      reason: 'this session runs inside Visual Studio Code and has no terminal window',
+    });
+    expect(el.querySelector('[data-goto="button"]')).toBeFalsy();
+    expect(el.querySelector('[data-goto="blocked"]')?.textContent).toContain('Visual Studio Code');
+  });
+
+  it("names the root whose window it is about to raise, for a subagent", async () => {
+    // A subagent has no process of its own: the window belongs to its root, and
+    // jumping there silently would land the operator somewhere they did not select.
+    const el = await mount(reachable({ viaAgentId: 'root-1', viaLabel: 'warden' }));
+    expect(el.querySelector('.wd-detail-goto-app')?.textContent).toBe('Terminal · in warden');
+    expect(el.querySelector('[data-goto="button"]')?.getAttribute('aria-label')).toBe(
+      'Take me there: the Terminal window running warden',
+    );
+  });
+
+  it('offers System Settings only for the refusal that never re-prompts', async () => {
+    const el = await mount(reachable(), {
+      ok: false,
+      denied: true,
+      message: 'macOS blocked the request',
+    });
+    await act(async () => {
+      el.querySelector<HTMLButtonElement>('[data-goto="button"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const settings = el.querySelector<HTMLButtonElement>('.wd-detail-goto-settings');
+    expect(el.querySelector('.wd-detail-goto-error')?.textContent).toContain('macOS blocked');
+    await act(async () => {
+      settings!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(invoke).toHaveBeenCalledWith('open_automation_settings');
+  });
+
+  it('reports an ordinary failure without offering a settings pane that would not help', async () => {
+    const el = await mount(reachable(), {
+      ok: false,
+      denied: false,
+      message: 'that window has closed since WARDEN last looked',
+    });
+    await act(async () => {
+      el.querySelector<HTMLButtonElement>('[data-goto="button"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(el.querySelector('.wd-detail-goto-error')?.textContent).toContain('has closed');
+    expect(el.querySelector('.wd-detail-goto-settings')).toBeFalsy();
+  });
+
+  it('renders nothing at all when there is no backend to ask (the browser sandbox)', async () => {
+    vi.mocked(invoke).mockImplementation((() => Promise.reject('no tauri bridge')) as never);
+    const el = render(<RadarDetailPanel agent={agentFixture({ id: 'a1' })} />);
+    await act(async () => {});
+    expect(el.querySelector('[data-goto="button"]')).toBeFalsy();
+    expect(el.querySelector('[data-goto="blocked"]')).toBeFalsy();
+  });
+
+  it('re-probes on a new agent and ignores the previous agent\'s late answer', async () => {
+    // Clicking quickly through the board must never leave agent B showing A's window.
+    const replies: Array<(v: unknown) => void> = [];
+    vi.mocked(invoke).mockImplementation(((cmd: string) => {
+      if (cmd === 'agent_terminal_target') return new Promise((res) => replies.push(res));
+      return Promise.resolve(undefined);
+    }) as never);
+
+    const el = render(<RadarDetailPanel agent={agentFixture({ id: 'a1' })} />);
+    act(() => {
+      root!.render(<RadarDetailPanel agent={agentFixture({ id: 'a2' })} />);
+    });
+    expect(replies).toHaveLength(2);
+
+    // The SECOND agent answers first, then the first agent's stale reply lands.
+    await act(async () => {
+      replies[1](reachable({ app: 'iTerm2' }));
+    });
+    await act(async () => {
+      replies[0](reachable({ app: 'Terminal' }));
+    });
+    expect(el.querySelector('.wd-detail-goto-app')?.textContent).toBe('iTerm2');
+  });
+});

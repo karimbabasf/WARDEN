@@ -392,6 +392,94 @@ html, body {
 .wd-detail-session-name { margin: 3px 0 0; font-size: 12px; line-height: 1.35; color: var(--ink-soft); }
 .wd-detail-sub { margin: 4px 0 0; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
 
+/* "Take me there": raise the terminal window this agent runs in. Sits directly under
+   the head, above the awaiting callout, because going to a waiting agent IS the
+   response to it. The house physical stack again (tone step, hairline, inset lift, one
+   tight key shadow); the harness hue appears on the glyph only, so the control reads as
+   belonging to THIS agent without the chrome picking up a colour of its own.
+
+   The blocked line replaces the button rather than disabling it. A disabled control
+   still says "this is possible", and for an agent inside an IDE it is not. */
+.wd-detail-goto { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin: 11px 0 0; }
+.wd-detail-goto-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-control);
+  background: var(--surface-2);
+  box-shadow: var(--lift), var(--key);
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    background var(--t-micro) var(--ease-out),
+    border-color var(--t-micro) var(--ease-out),
+    color var(--t-micro) var(--ease-out),
+    transform var(--t-micro) var(--ease-out);
+}
+.wd-detail-goto-btn:hover { background: var(--surface-3); border-color: var(--hair-bright); color: var(--ink); }
+.wd-detail-goto-btn:active { transform: scale(0.97); box-shadow: none; }
+.wd-detail-goto-btn:focus-visible { outline: 2px solid var(--harness, var(--green)); outline-offset: 2px; }
+.wd-detail-goto-glyph { color: var(--harness, var(--green)); font-size: 11px; line-height: 1; }
+/* Which app, and whose window when it belongs to a parent. Mono so it column-aligns
+   with every other readout in the panel. */
+.wd-detail-goto-app {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+/* Both of these are <p> inside .wd-detail, which carries a prose rule (12px Technor,
+   --ink-soft) further down the file. Qualified with the panel class so they win it:
+   neither line is prose, and at 12px the blocked note read as a second subtitle. */
+.wd-detail .wd-detail-goto-blocked {
+  margin: 11px 0 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  color: var(--ink-faint);
+}
+/* Column, not a row: the rail is ~240px, and putting the button beside the message
+   squeezed one sentence into eight lines. */
+.wd-detail .wd-detail-goto-error {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  color: var(--red);
+}
+.wd-detail-goto-settings {
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-control);
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.wd-detail-goto-settings:hover { background: var(--surface-3); color: var(--ink); }
+.wd-detail-goto-settings:focus-visible { outline: 2px solid var(--harness, var(--green)); outline-offset: 2px; }
+
 /* The awaiting callout: what a blocked agent wants, above the numbers, because the
    numbers cannot change until the block clears. Depth is the house physical stack (tone
    step, hairline, inset lift) with the hairline taking the alert hue: no coloured glow,

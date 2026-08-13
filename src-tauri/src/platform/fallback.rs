@@ -14,3 +14,29 @@ pub fn is_reopen_event(event: &tauri::RunEvent) -> bool {
     false
 }
 
+/// No tty lookup yet. Reported as "no controlling terminal" rather than guessed,
+/// so the panel says it cannot find the window instead of raising the wrong one.
+pub fn controlling_tty(pid: u32) -> Option<String> {
+    let _ = pid;
+    None
+}
+
+/// No process-tree walk yet, so nothing is claimed about the hosting app.
+pub fn terminal_host_for_pid(pid: u32) -> super::TerminalHost {
+    let _ = pid;
+    super::TerminalHost::None
+}
+
+/// No window-raising surface on this platform. `Unsupported` is a distinct arm
+/// from a failure, so the UI can say "not on this OS" rather than "it broke".
+pub fn focus_tty(
+    app: super::TerminalApp,
+    tty: &str,
+) -> std::result::Result<(), super::AutomationError> {
+    let _ = (app, tty);
+    Err(super::AutomationError::Unsupported)
+}
+
+/// No per-app automation consent model to deep-link into.
+pub fn open_automation_settings() {}
+

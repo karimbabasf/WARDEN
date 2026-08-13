@@ -372,6 +372,20 @@ impl Store {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
+    /// One session by id, on the primary key.
+    ///
+    /// Split out from [`Self::sessions`] because the callers differ: a rename is
+    /// rare, but "which window is this agent in" runs every time the panel opens
+    /// an agent, and reading four thousand rows with their JSON blobs to find one
+    /// of them is not a lookup.
+    pub fn session_by_id(&self, id: &str) -> Result<Option<Session>> {
+        let c = self.conn();
+        let mut st = c.prepare(
+            "SELECT id,harness,external_id,project_json,model_ids_json,started_at,ended_at,source_path,raw_hash,ingested_at,meta_json FROM sessions WHERE id=?",
+        )?;
+        let mut rows = st.query_map([id], row_session)?;
+        rows.next().transpose().map_err(Into::into)
+    }
     pub fn session_events(&self, sid: &str) -> Result<Vec<(Turn, EventRecord)>> {
         let c = self.conn();
         let mut st=c.prepare("SELECT t.id,t.session_id,t.parent_id,t.role,t.idx,t.started_at,t.duration_ms,t.is_sidechain,e.id,e.ts,e.payload_json,e.raw_ref FROM events e JOIN turns t ON e.turn_id=t.id WHERE e.session_id=? ORDER BY e.ts, CAST(json_extract(e.raw_ref,'$.offset') AS INTEGER), e.id")?;
