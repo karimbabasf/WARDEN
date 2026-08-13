@@ -7,11 +7,12 @@ use super::agent::build_agent;
 use super::identity::{
     display_label, parent_completion_at, subagent_terminated_at, teammate_dispatch_call_id,
 };
+use super::awaiting::AwaitingReason;
 use super::liveness::{partition_claude, read_claude_registry, AgentStatus};
 use super::model::RadarState;
 use super::status::{
-    agent_status, claude_conversation_status, codex_subagent_completed_at,
-    transcript_mtime_secs_ago,
+    agent_status, agent_verdict, claude_conversation_status, codex_subagent_completed_at,
+    transcript_mtime_secs_ago, StatusVerdict,
 };
 use crate::ir::{Harness, Session};
 use crate::store::Store;
@@ -53,6 +54,20 @@ pub fn assemble(
         claude_conversation_status(store, &sessions, ext, now, stale_secs, &mtime_secs_ago)
     };
     let live = partition_claude(&registry, is_alive, &fallback_status);
+    // The registry's `waitingFor` reason, folded into the closed vocabulary AT THE EDGE:
+    // the raw harness string never travels past this line, so nothing downstream (and in
+    // particular nothing the observer projection can reach) holds free dialog text.
+    // A row with no `waitingFor` is deliberately absent rather than mapped to a default:
+    // that is either a fallback-derived Awaiting or a registry that stated no reason, and
+    // in both cases the transcript is a better source than a shrug.
+    let claude_awaiting: HashMap<String, AwaitingReason> = live
+        .iter()
+        .filter(|(_, st)| matches!(st, AgentStatus::Awaiting))
+        .filter_map(|(s, _)| {
+            let reason = AwaitingReason::from_registry(Some(s.waiting_for.as_deref()?));
+            Some((s.session_id.clone(), reason))
+        })
+        .collect();
     let claude_status: HashMap<String, AgentStatus> =
         live.into_iter().map(|(s, st)| (s.session_id, st)).collect();
 
@@ -206,9 +221,15 @@ pub fn assemble(
                 .entry(parent.clone())
                 .or_insert_with(|| store.session_events(parent).unwrap_or_default())
                 .as_slice();
+            // "Finished its own turn", not "has nothing to say". `agent_status` promotes a
+            // member that is mid-tool to Working, so anything quiet here closed its turn
+            // cleanly. Awaiting counts as quiet on purpose: a member that ended on a
+            // question is still done from the LEAD's point of view, and excluding it would
+            // pin a finished teammate to the board for as long as its last line had a
+            // question mark in it.
             let member_idle = matches!(
                 agent_status(store, child, &claude_status, &mtime_secs_ago, now),
-                AgentStatus::Idle
+                AgentStatus::Idle | AgentStatus::Awaiting
             );
             let member_name = child
                 .meta
@@ -341,10 +362,17 @@ pub fn assemble(
         }
         let parent_id = kept_parent.get(&s.id).cloned().flatten();
         let depth = depth_of(&s.id, &kept_parent);
-        let status = if terminated_now.contains(&s.id) {
-            AgentStatus::Terminated
+        let verdict = if terminated_now.contains(&s.id) {
+            StatusVerdict::terminated()
         } else {
-            agent_status(store, s, &claude_status, &mtime_secs_ago, now)
+            agent_verdict(
+                store,
+                s,
+                &claude_status,
+                &claude_awaiting,
+                &mtime_secs_ago,
+                now,
+            )
         };
         let mut agent = build_agent(
             store,
@@ -352,7 +380,7 @@ pub fn assemble(
             parent_id,
             depth,
             *child_count.get(&s.id).unwrap_or(&0),
-            status,
+            verdict,
         );
         // Team join. A subagent transcript is named `agent-<name>@session-<hex>.jsonl`,
         // so its own file stem carries the membership; a lead is matched by session id.
@@ -3405,5 +3433,243 @@ mod tests {
         assert_eq!(live.parent_id.as_deref(), Some("lead"));
         let lead = state.agents.iter().find(|a| a.id == "lead").unwrap();
         assert_eq!(lead.child_count, 1, "only the un-finished member remains a child");
+    }
+
+    // ── the third state: AWAITING (stopped on the operator) ──────────────────────
+    //
+    // End to end, because the value of this state is that it survives the WHOLE
+    // pipeline: registry read, status verdict, agent build, wire serialization. A unit
+    // test of the detector alone would still let a plumbing gap ship a globe that never
+    // turns red.
+
+    /// Seed a session whose transcript ENDS on the given events, after one operator
+    /// prompt. Timestamps increase so the store's ordering matches the write order.
+    fn seed_tail(store: &Store, id: &str, external: &str, harness: Harness, tail: Vec<Event>) {
+        let now = Utc::now();
+        let source_path = PathBuf::from(format!("/tmp/{id}.jsonl"));
+        let session = Session {
+            id: id.into(),
+            harness,
+            external_id: external.into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/work"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: source_path.clone(),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({}),
+        };
+        let tid = format!("{id}-t0");
+        let mut events = vec![Event::UserPrompt {
+            text: "do the thing".into(),
+            attachments: vec![],
+            is_meta: false,
+        }];
+        events.extend(tail);
+        let records: Vec<EventRecord> = events
+            .into_iter()
+            .enumerate()
+            .map(|(i, event)| EventRecord {
+                id: format!("{id}-e{i}"),
+                turn_id: tid.clone(),
+                session_id: id.into(),
+                ts: now + chrono::Duration::milliseconds(i as i64 * 10),
+                event,
+                raw_ref: RawRef {
+                    source_path: source_path.clone(),
+                    offset: i as u64,
+                    line: i as u32 + 1,
+                },
+            })
+            .collect();
+        let turn = Turn {
+            id: tid,
+            session_id: id.into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: now,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        store
+            .upsert_session_batch(&session, &[turn], &records, 0)
+            .unwrap();
+    }
+
+    fn done_text(t: &str) -> Event {
+        Event::AssistantText {
+            text: t.into(),
+            turn_complete: Some(true),
+        }
+    }
+
+    /// A registry with an explicit `status` and `waitingFor`, the pair newer Claude
+    /// writes while a prompt is on screen.
+    fn claude_registry_waiting(pid: u32, sid: &str, waiting_for: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(format!("{pid}.json")),
+            serde_json::json!({
+                "pid": pid, "sessionId": sid, "cwd": "/work",
+                "status": "waiting", "waitingFor": waiting_for,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// The harness's own verdict is the strongest signal there is: `status: "waiting"`
+    /// used to be swept into Idle by the `busy ⇒ Working, else Idle` rule, so a blocked
+    /// agent looked exactly like a finished one.
+    #[test]
+    fn registry_waiting_becomes_awaiting_with_its_reason() {
+        let store = Store::memory().unwrap();
+        seed_tail(
+            &store,
+            "root",
+            "sid-wait",
+            Harness::ClaudeCode,
+            vec![done_text("Ready when you are.")],
+        );
+        let reg = claude_registry_waiting(11, "sid-wait", "permission prompt");
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let a = state.agents.iter().find(|a| a.id == "root").unwrap();
+        assert_eq!(a.status, "awaiting");
+        assert_eq!(
+            a.awaiting_reason.as_deref(),
+            Some("approval"),
+            "a permission prompt wants a yes/no, not an answer"
+        );
+    }
+
+    /// The case the harness cannot see: the agent asked in plain prose and closed its
+    /// turn normally, so the registry honestly reports `idle` and only the transcript
+    /// knows better.
+    #[test]
+    fn a_question_in_the_output_becomes_awaiting_even_when_the_registry_says_idle() {
+        let store = Store::memory().unwrap();
+        seed_tail(
+            &store,
+            "asked",
+            "sid-asked",
+            Harness::ClaudeCode,
+            vec![done_text(
+                "I can go two ways here.\n\nWhich do you want?\n\n1. Patch it\n2. Rewrite it",
+            )],
+        );
+        seed_tail(
+            &store,
+            "reported",
+            "sid-reported",
+            Harness::ClaudeCode,
+            vec![done_text("Done. 214 tests pass, nothing left to decide.")],
+        );
+        let reg = claude_registry_status(&[(21, "sid-asked", "idle"), (22, "sid-reported", "idle")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let by = |id: &str| state.agents.iter().find(|a| a.id == id).unwrap();
+        assert_eq!(by("asked").status, "awaiting");
+        assert_eq!(by("asked").awaiting_reason.as_deref(), Some("question"));
+        assert_eq!(
+            by("reported").status,
+            "idle",
+            "a finished report is idle; only a question is awaiting"
+        );
+        assert_eq!(by("reported").awaiting_reason, None);
+    }
+
+    fn seed_open_question_tool(store: &Store, id: &str, external: &str) {
+        seed_tail(
+            store,
+            id,
+            external,
+            Harness::ClaudeCode,
+            vec![
+                Event::AssistantText {
+                    text: "Let me check with you.".into(),
+                    turn_complete: Some(false),
+                },
+                Event::ToolCall {
+                    tool: "AskUserQuestion".into(),
+                    input: serde_json::json!({
+                        "questions": [{ "question": "Ship the quick fix or rewrite it?" }]
+                    }),
+                    call_id: "c1".into(),
+                    kind: ToolKind::Builtin,
+                },
+            ],
+        );
+    }
+
+    /// An unresolved `AskUserQuestion` looks exactly like a slow tool from the outside
+    /// (newest event, no result), which is why it has to OUTRANK the Working verdict the
+    /// in-flight-call rule would otherwise produce, rather than being promoted from Idle.
+    /// This is the path for a Claude build whose registry entry carries no `status` at
+    /// all, which is most of the live sessions on this machine. The panel readout is the
+    /// question itself, not the tool name.
+    #[test]
+    fn an_open_question_tool_outranks_working_and_shows_what_it_asked() {
+        let store = Store::memory().unwrap();
+        seed_open_question_tool(&store, "prompting", "sid-prompt");
+        let reg = claude_registry(&[(31, "sid-prompt")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let a = state.agents.iter().find(|a| a.id == "prompting").unwrap();
+        assert_eq!(
+            a.status, "awaiting",
+            "a question on screen is not the same as a tool running"
+        );
+        assert_eq!(a.awaiting_reason.as_deref(), Some("question"));
+        let action = a
+            .current_action
+            .as_ref()
+            .expect("the open prompt is the action");
+        assert_eq!(action.kind, "ask");
+        assert_eq!(action.label, "Ship the quick fix or rewrite it?");
+    }
+
+    /// The precedence rule, stated as a test because it is a judgement call and not an
+    /// obvious one: a registry that says `busy` WINS over the same dangling question
+    /// tool. Newer Claude reports an open `AskUserQuestion` as `waiting` itself, so a
+    /// `busy` here means the harness believes it is generating and the transcript tail is
+    /// simply behind. Believing the live registry keeps a false red off the board, and a
+    /// false red is the one failure that teaches the operator to ignore the colour.
+    #[test]
+    fn a_busy_registry_outranks_a_dangling_question_tool() {
+        let store = Store::memory().unwrap();
+        seed_open_question_tool(&store, "prompting", "sid-prompt");
+        let reg = claude_registry_status(&[(31, "sid-prompt", "busy")]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let a = state.agents.iter().find(|a| a.id == "prompting").unwrap();
+        assert_eq!(a.status, "working");
+        assert_eq!(a.awaiting_reason, None);
+    }
+
+    /// Codex writes no approval or dialog record of any kind, so the trailing question is
+    /// its ONLY awaiting signal. It also reports no stop reason, which is exactly the
+    /// `turn_complete: None` path.
+    #[test]
+    fn codex_reaches_awaiting_through_its_trailing_question() {
+        let store = Store::memory().unwrap();
+        seed_tail(
+            &store,
+            "cx",
+            "sid-cx",
+            Harness::Codex,
+            vec![Event::AssistantText {
+                text: "Both migrations apply cleanly. Do you want me to run them now?".into(),
+                turn_complete: None,
+            }],
+        );
+        let reg = claude_registry(&[]);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let a = state.agents.iter().find(|a| a.id == "cx").unwrap();
+        assert_eq!(a.status, "awaiting");
+        assert_eq!(a.awaiting_reason.as_deref(), Some("question"));
     }
 }

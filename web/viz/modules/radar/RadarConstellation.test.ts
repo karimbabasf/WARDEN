@@ -6,6 +6,7 @@ import {
   radarModelWithoutGone,
   radarNodeColor,
 } from './RadarConstellation';
+import { ALERT_HEX } from './radarAlert';
 import type { RadarAgent } from '@/viz/shared/types/radarTypes';
 
 function luminance(hex: string): number {
@@ -86,6 +87,39 @@ describe('radarNodeColor', () => {
     });
 
     expect(working).toBeGreaterThan(idle * 5);
+  });
+
+  it('parks an awaiting agent BETWEEN idle and working, because the strobe swings around it', () => {
+    const glow = (status: RadarAgent['status']) =>
+      radarGlowTarget({
+        agent: agent({ id: status, harness: 'codex', fillPct: 0.45, status }),
+        isRoot: true,
+        emphasis: false,
+        selected: false,
+        hovered: false,
+      });
+
+    // Not a third brightness LEVEL: it is the midpoint the flash oscillates about, so
+    // `alertGlowMultiplier` can dip the trough under an idle globe and push the crest
+    // over a working one. Pinning it at or above `working` would flatten that sweep.
+    expect(glow('awaiting')).toBeGreaterThan(glow('idle'));
+    expect(glow('awaiting')).toBeLessThan(glow('working'));
+  });
+
+  it('paints an awaiting globe alert red, never its harness hue', () => {
+    const claude = radarNodeColor(agent({ id: 'c', harness: 'claude_code', fillPct: 0.3 }));
+    const codex = radarNodeColor(agent({ id: 'x', harness: 'codex', fillPct: 0.3 }));
+    // `radarNodeColor` stays identity-only by design; the alert hue is applied at the
+    // globe. What matters here is that ALERT_HEX is not mistakable for either harness.
+    const [ar, ag, ab] = channels(ALERT_HEX);
+    const [cr, cg] = channels(claude);
+    expect(ar).toBeGreaterThan(200);
+    expect(ag).toBeLessThan(80);
+    expect(ab).toBeLessThan(110);
+    // Claude's tangerine carries a lot of green; the alert must not.
+    expect(cg - ag).toBeGreaterThan(60);
+    expect(cr).toBeGreaterThan(200); // both are red-dominant, so green is the separator
+    expect(ALERT_HEX).not.toBe(codex);
   });
 
   it('keeps idle roots and subagents as quiet background embers', () => {

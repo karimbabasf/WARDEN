@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { RadarActivity, RadarAgent, RadarContextRow } from '@/viz/shared/types/radarTypes';
 import { radarSubtitle, formatTokens as tokens } from '@/viz/shared/types/radarTypes';
+import { awaitingLine } from '@/viz/shared/lib/awaitingCopy';
 import { FilePreview } from '@/viz/shared/ui/FilePreview';
 import { radarHarness } from './radarTheme';
 
@@ -31,6 +32,7 @@ function rowPct(p: number): string {
 
 const STATUS_LABEL: Record<RadarAgent['status'], string> = {
   working: 'Working',
+  awaiting: 'Waiting on you',
   idle: 'Idle',
   closed: 'Closed',
   terminated: 'Terminated',
@@ -641,11 +643,38 @@ export function RadarDetailPanel({ agent, children = [], onJumpTo, onClose }: Ra
         ) : null}
       </div>
 
+      <AwaitingCallout agent={agent} />
       <ContextSection agent={agent} />
       <ActivitySection agent={agent} />
       <RosterSection children={children} onJumpTo={onJumpTo} />
       <IdentitySection agent={agent} />
     </aside>
+  );
+}
+
+/**
+ * The one thing an operator opening a WAITING agent needs: what it is waiting for.
+ *
+ * Sits above the context gauge because it outranks it. A blocked agent's token count is
+ * not going to change until the block clears, so the numbers can wait their turn.
+ *
+ * When the block is an `AskUserQuestion`, the in-flight action already carries the
+ * question itself, so the callout quotes it rather than paraphrasing. Nothing is
+ * fabricated: with no action to read, it falls back to the closed-vocabulary line.
+ */
+function AwaitingCallout({ agent }: { agent: RadarAgent }) {
+  if (agent.status !== 'awaiting') return null;
+  const asked = agent.currentAction?.kind === 'ask' ? agent.currentAction.label : null;
+  return (
+    <section className="wd-detail-awaiting" role="status">
+      <span className="wd-detail-awaiting-glyph" aria-hidden>
+        ?
+      </span>
+      <div className="wd-detail-awaiting-body">
+        <div className="wd-detail-awaiting-head">{awaitingLine(agent.awaitingReason)}</div>
+        {asked ? <div className="wd-detail-awaiting-ask">{asked}</div> : null}
+      </div>
+    </section>
   );
 }
 

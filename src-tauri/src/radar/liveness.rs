@@ -16,12 +16,20 @@ use chrono::{DateTime, Utc};
 use std::path::Path;
 
 /// An agent's live status. `Working` = generating now (recent transcript write),
-/// `Idle` = open but quiet, `Closed` = gone (dead PID / archived) → imploded away,
-/// `Terminated` = a finished subagent (its parent logged the tool-result, or it fell
-/// silent past the backstop) → imploded once, never resurrected.
+/// `Awaiting` = STOPPED ON THE OPERATOR (it asked a question, or a prompt is open) and
+/// nothing moves until a human answers, `Idle` = open but quiet, `Closed` = gone (dead
+/// PID / archived) → imploded away, `Terminated` = a finished subagent (its parent
+/// logged the tool-result, or it fell silent past the backstop) → imploded once, never
+/// resurrected.
+///
+/// `Awaiting` is deliberately its OWN verdict rather than a flavour of `Idle`. Both are
+/// quiet, but they mean opposite things to the operator: an idle agent needs nothing, an
+/// awaiting one is stalled until they look at it. Collapsing the two is what made a
+/// blocked agent indistinguishable from a finished one on the board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
     Working,
+    Awaiting,
     Idle,
     Closed,
     Terminated,
@@ -32,6 +40,7 @@ impl AgentStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentStatus::Working => "working",
+            AgentStatus::Awaiting => "awaiting",
             AgentStatus::Idle => "idle",
             AgentStatus::Closed => "closed",
             AgentStatus::Terminated => "terminated",
@@ -47,6 +56,11 @@ pub struct LiveSession {
     pub pid: u32,
     pub cwd: String,
     pub model: Option<String>,
+    /// The registry's own `waitingFor` reason, present only alongside
+    /// `status: "waiting"`. Free text from the harness, so it is never carried further
+    /// than [`super::awaiting::AwaitingReason::from_registry`], which folds it into a
+    /// closed vocabulary before anything renders or serializes it.
+    pub waiting_for: Option<String>,
 }
 
 /// Partition Claude registry entries into the LIVE working/idle set (pure core).
@@ -54,11 +68,20 @@ pub struct LiveSession {
 /// For each `(pid, registry_json)`:
 /// * if `is_alive(pid)` is false the session is Closed and is DROPPED (a stale
 ///   `sessions/*.json` whose process crashed must not render as open);
-/// * otherwise status prefers the registry's own live-updated `status` field
-///   (`busy` ⇒ Working, anything else ⇒ Idle) when present (newer Claude — it is
-///   authoritative because it reflects the agent's real state even mid-generation
-///   or during a long tool run); when ABSENT (older Claude — 4 of 5 live sessions on
-///   this machine) it delegates to the injected `fallback_status(session_id)`.
+/// * otherwise status prefers the registry's own live-updated `status` field when
+///   present (newer Claude — it is authoritative because it reflects the agent's real
+///   state even mid-generation or during a long tool run); when ABSENT (older Claude —
+///   4 of 5 live sessions on this machine) it delegates to the injected
+///   `fallback_status(session_id)`.
+///
+///   The field's vocabulary is `busy | shell | idle | waiting` (read off the harness
+///   itself, v2.1.229). `waiting` is the harness stating outright that it has stopped on
+///   the operator — a permission prompt, an `AskUserQuestion` dialog, a plan to approve —
+///   and it ships a `waitingFor` reason with it. That is the single most authoritative
+///   awaiting signal WARDEN can get, and it used to be discarded: the old rule was
+///   `busy ⇒ Working, anything else ⇒ Idle`, so a blocked agent rendered exactly like a
+///   finished one. `shell` (the operator dropped to a shell) stays Idle: the agent is not
+///   waiting on an answer, the human simply stepped away from it.
 ///
 /// FAULT B: the fallback is now the caller's CONVERSATION-STATE decision
 /// (`status_from_last_event` over the store, then mtime), not a racy file-mtime
@@ -85,17 +108,29 @@ pub fn partition_claude(
             .unwrap_or_default()
             .to_string();
         let model = v.get("model").and_then(|s| s.as_str()).map(str::to_string);
-        let status = match v.get("status").and_then(|s| s.as_str()) {
+        let raw_status = v.get("status").and_then(|s| s.as_str());
+        let status = match raw_status {
             Some("busy") => AgentStatus::Working,
+            Some("waiting") => AgentStatus::Awaiting,
             Some(_) => AgentStatus::Idle,
             None => fallback_status(session_id),
         };
+        // Keyed off the RAW registry string, not the resolved status: the injected
+        // fallback can also return Awaiting (from the transcript), and that verdict has no
+        // registry reason behind it. Reporting `None` there is what lets the caller fall
+        // through to the transcript for the real reason instead of settling for a
+        // contentless "input needed".
+        let waiting_for = (raw_status == Some("waiting"))
+            .then(|| v.get("waitingFor").and_then(|s| s.as_str()))
+            .flatten()
+            .map(str::to_string);
         out.push((
             LiveSession {
                 session_id: session_id.to_string(),
                 pid: *pid,
                 cwd,
                 model,
+                waiting_for,
             },
             status,
         ));
@@ -399,6 +434,52 @@ mod tests {
             st("nostatus-fresh"),
             Some(AgentStatus::Working),
             "no status field falls back to the mtime heuristic"
+        );
+    }
+
+    /// `status: "waiting"` is the harness stating it has stopped on the operator, and it
+    /// ships the reason with it. Both must survive the partition: the status as the third
+    /// globe state, the reason so the readout can say what it is waiting for. `shell` is
+    /// the near-miss that must NOT become Awaiting: the human stepped out to a shell, the
+    /// agent is not asking them anything.
+    #[test]
+    fn partition_claude_reads_waiting_and_its_reason() {
+        let files = vec![
+            (
+                10u32,
+                json!({"sessionId":"asking","cwd":"/a","pid":10,"status":"waiting","waitingFor":"permission prompt"}),
+            ),
+            (
+                20u32,
+                json!({"sessionId":"bare-wait","cwd":"/b","pid":20,"status":"waiting"}),
+            ),
+            (
+                30u32,
+                json!({"sessionId":"shelled","cwd":"/c","pid":30,"status":"shell"}),
+            ),
+        ];
+        let live = partition_claude(&files, &|_| true, &|_| AgentStatus::Working);
+        let row = |sid: &str| {
+            live.iter()
+                .find(|(s, _)| s.session_id == sid)
+                .map(|(s, st)| (*st, s.waiting_for.clone()))
+        };
+        assert_eq!(
+            row("asking"),
+            Some((
+                AgentStatus::Awaiting,
+                Some("permission prompt".to_string())
+            ))
+        );
+        assert_eq!(
+            row("bare-wait"),
+            Some((AgentStatus::Awaiting, None)),
+            "waiting with no reason is still waiting"
+        );
+        assert_eq!(
+            row("shelled"),
+            Some((AgentStatus::Idle, None)),
+            "a shell-out is quiet, not blocked on an answer"
         );
     }
 

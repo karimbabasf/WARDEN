@@ -44,6 +44,12 @@ pub struct RadarAgent {
     /// Agent-team membership, when the harness groups agents into a named team.
     pub team: Option<RadarTeam>,
     pub status: String,
+    /// Why this agent is waiting on the operator, when `status == "awaiting"`.
+    ///
+    /// A CLOSED vocabulary (`question` / `approval` / `input`), never the harness's own
+    /// dialog text: see [`super::awaiting::AwaitingReason`] for why the raw string stops
+    /// there. `None` for every other status.
+    pub awaiting_reason: Option<String>,
     pub context_tokens: u64,
     pub max_tokens: u64,
     pub fill_pct: f64,

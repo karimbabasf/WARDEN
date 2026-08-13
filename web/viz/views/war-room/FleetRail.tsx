@@ -12,6 +12,7 @@
 import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import type { RadarAgent } from '@/viz/shared/types/radarTypes';
 import { formatTokens, shortModel } from '@/viz/shared/types/radarTypes';
+import { awaitingLine } from '@/viz/shared/lib/awaitingCopy';
 import { radarHarness } from '@/viz/modules/radar/radarTheme';
 import type { HiddenAgent } from './hiddenAgents';
 
@@ -31,10 +32,18 @@ const KIND_GLYPH: Record<string, string> = {
   tool: '◈',
   message: '≡',
   thinking: '◌',
+  // A prompt waiting on a human. Text-presentation, like the rest.
+  ask: '?',
 };
 
+/**
+ * The strip's status word. `Waiting` reads as a state the operator has to end, where
+ * `Idle` and `Done` read as states they can leave alone: the word is what carries the
+ * third state for anyone who cannot use the colour.
+ */
 const STATUS_WORD: Record<RadarAgent['status'], string> = {
   working: 'Working',
+  awaiting: 'Waiting',
   idle: 'Idle',
   closed: 'Closed',
   terminated: 'Done',
@@ -135,6 +144,16 @@ function Strip({
             </span>
             <span className="wd-strip-action-label">{action.label || action.tool}</span>
             <span className="wd-strip-action-clock">{shortElapsed(action.elapsedMs)}</span>
+          </span>
+        ) : agent.status === 'awaiting' ? (
+          // An agent that asked in plain prose has no tool call to show, and "No action
+          // in flight" is true but useless: it is the sentence for a session you can
+          // ignore, printed on the one session you cannot. Say what it wants instead.
+          <span className="wd-strip-action is-awaiting" data-kind="ask">
+            <span className="wd-strip-action-glyph" aria-hidden>
+              ?
+            </span>
+            <span className="wd-strip-action-label">{awaitingLine(agent.awaitingReason)}</span>
           </span>
         ) : (
           <span className="wd-strip-action is-idle">
@@ -243,10 +262,17 @@ function HiddenSection({
 /**
  * The rack's one-line census, shared by the open head and the folded tab so the
  * two can never disagree about how many sessions are live.
+ *
+ * `waiting` comes LAST because it is the only count that asks something of the reader,
+ * and the end of the line is where the eye stops. Folded, this string is the entire
+ * board, so an agent blocked on a question has to be countable from it.
  */
-export function fleetSummary(sessions: number, working: number): string {
+export function fleetSummary(sessions: number, working: number, waiting = 0): string {
   const head = `${sessions} session${sessions === 1 ? '' : 's'}`;
-  return working > 0 ? `${head} · ${working} working` : head;
+  const parts = [head];
+  if (working > 0) parts.push(`${working} working`);
+  if (waiting > 0) parts.push(`${waiting} waiting`);
+  return parts.join(' · ');
 }
 
 export type FleetRailProps = {
@@ -311,7 +337,8 @@ export function FleetRail({
   }, [agents]);
 
   const working = roots.filter((a) => a.status === 'working').length;
-  const summary = fleetSummary(roots.length, working);
+  const waiting = roots.filter((a) => a.status === 'awaiting').length;
+  const summary = fleetSummary(roots.length, working, waiting);
 
   // Folded, the rack is a tab and nothing else: a fixed-width pill in the exact
   // slot the head used to occupy, so unfolding does not make anything jump. The

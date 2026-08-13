@@ -60,7 +60,7 @@ Layered `ingest -> store -> radar -> commands/lib/scheduler`.
 - `ir.rs` the canonical IR (single source of truth; every adapter maps raw records to this).
 - `store.rs` rusqlite + FTS5 (sessions/turns/events/watermarks/radar_token_cache), byte-offset watermarks.
 - `ingest/` the `Adapter` trait + `AdapterRegistry` + `claude_code.rs` / `codex.rs`. Adding a harness is one adapter, zero downstream changes.
-- `radar.rs` + `radar/` the live agent forest: a façade over `model/assemble/agent/context/identity/live/status` + `composition/hierarchy/liveness` + `teams` (Claude agent-team rosters from `~/.claude/teams/*/config.json`, the source of real subagent names).
+- `radar.rs` + `radar/` the live agent forest: a façade over `model/assemble/agent/context/identity/live/status` + `awaiting` (the third globe state) + `composition/hierarchy/liveness` + `teams` (Claude agent-team rosters from `~/.claude/teams/*/config.json`, the source of real subagent names).
 - `observe.rs` + `observe/` remote read-only observation: `projection` (the redaction boundary; the ONLY producer of wire data), `grants` (token codec + single-use/expiry), `transport` (iroh QUIC, host side), `peers` (observer side). Holds no `AppHandle` and cannot name a radar type, both asserted by tests.
 - `scheduler.rs` + `scheduler/` the task drivers: `watch` (live-ingest) and `radar` (recompute + `RadarStateCache`). The recompute worker has TWO CPU guards and they do different jobs: serialization caps CONCURRENCY at one recompute, and `radar_min_interval()` (default 1s, `WARDEN_RADAR_MIN_INTERVAL_MS`) caps the RATE. Only the second one bounds a sustained stream: with the default zero debounce, an event landing while a recompute runs starts the next the instant it returns, so a live transcript tail used to pin a full core. The floor is leading-edge, so an isolated event still emits immediately.
 - `util.rs` env + path helpers; `platform/` the OS seam (port + `macos.rs` + `fallback.rs`).
@@ -79,9 +79,14 @@ middle, the selected target's readout on the right.
   chosen off a rendered specimen sheet at the app's real sizes, never from memory.
 - **Colour**: the chrome is entirely neutral cold steel (`--bg #070910`, a
   `--surface-1/2/3` ramp, `--ink`/`--ink-soft`/`--ink-faint`). The ONLY hues are the
-  two harness identities from `harnessColors.ts` and one red alert (`--danger`),
-  which is used in exactly one place: a context gauge past 85%. Keeping the chrome
-  colourless is what lets the constellation read as the hero.
+  two harness identities from `harnessColors.ts`, one red alert (`--danger`) used in
+  exactly one place (a context gauge past 85%), and the AWAITING crimson `--alert`.
+  Keeping the chrome colourless is what lets the constellation read as the hero.
+- **A globe has THREE states, not two** (see "The third state" below). Working blazes
+  and breathes; idle sits dim and steady; **awaiting strobes alert-red**. `--alert`
+  (`#ff2740`) and `--alert-period` (`1.55s`) mirror `ALERT_HEX` / `ALERT_PERIOD` in
+  `modules/radar/radarAlert.ts` by hand: the chip and the globe must flash on the same
+  beat or the board reads as two alarms disagreeing. Change one, change both.
 - **Depth is physical, never a glow**: a tone step, then a 1px border, then a 1px
   inset top highlight (`--lift`), then one tight key shadow (`--key` / `--key-lg`).
   There are no wide diffuse coloured glows and no `drop-shadow(0 0 Npx currentColor)`
@@ -128,6 +133,26 @@ rendering a palette the app has already moved off.
 - **Adapter contract**: adding a harness is one adapter, zero downstream changes. An unknown record degrades gracefully; schema drift never drops a session.
 - **Watermarks are byte-offset.** FSEvents coalesces rapid writes: on each event, seek to the saved offset and read to EOF; do not trust event counts.
 - **Honest viz**: every globe and flare maps to a REAL signal (session liveness, context-token weight, subagent hierarchy). Never fabricate a count or a link. A sidecar that reports `spawnDepth >= 2` or names a `parentAgentId` was spawned by another SUBAGENT, so it must never fall back onto the root: the root is its ancestor, not its parent, and an unparented globe beats a wrong edge.
+- **The third state: AWAITING (`radar/awaiting.rs`).** An agent stopped on the OPERATOR
+  is neither working nor finished, and collapsing it into idle meant a blocked agent
+  looked exactly like a done one. It is detected from three REAL signals, strongest
+  first, and never inferred from silence:
+  1. **The harness says so.** Claude's session registry vocabulary is
+     `busy | shell | idle | waiting`, and `waiting` ships a `waitingFor` reason. That
+     raw string stops at `AwaitingReason::from_registry`, which folds it into the closed
+     `question | approval | input` set: `RadarAgent` is what the observer projection
+     reads from, so free dialog text must not get that far. `shell` stays Idle (the human
+     stepped out, the agent is not asking them anything).
+  2. **A blocking tool is in flight.** `AskUserQuestion` / `ExitPlanMode` do not return
+     until a human answers, so an unresolved one BEATS a Working verdict rather than
+     being promoted from Idle. Scored at 126/126 recall on the local corpus
+     (`cargo run --example awaiting_scan`).
+  3. **A completed turn that ends on a question.** The only heuristic, and the only
+     signal Codex has at all: 195 real rollouts contain zero approval-request records.
+     It fires on 10% of completed turns locally, which is the rate agents genuinely end
+     on "Want me to...?". Re-run `awaiting_scan` after touching it.
+  Precedence is deliberate: a registry `busy` outranks a dangling question tool, because
+  a false red is the one failure that teaches the operator to ignore the colour.
 - **A trailing text block is NOT a finished turn.** The harness writes one transcript
   line per CONTENT BLOCK, so a mid-turn preamble ("Let me check the config.") and a final
   answer are both a lone text block and cannot be told apart by shape. 79% of text-only

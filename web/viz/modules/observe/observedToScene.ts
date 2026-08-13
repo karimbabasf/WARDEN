@@ -25,7 +25,16 @@ import type {
 } from '@/viz/shared/types/radarTypes';
 import type { ObservedAgent, ObservedState } from '@/viz/shared/types/observedTypes';
 
-const STATUSES: ReadonlySet<string> = new Set(['working', 'idle', 'closed', 'terminated']);
+// `awaiting` crosses the wire because it is structure, not detail: an observer watching
+// a shared board should see that a globe is blocked. The REASON does not cross, so a
+// peer's globe strobes red and says "Waiting" without saying on what.
+const STATUSES: ReadonlySet<string> = new Set([
+  'working',
+  'awaiting',
+  'idle',
+  'closed',
+  'terminated',
+]);
 
 function asStatus(v: string): RadarStatus {
   return STATUSES.has(v) ? (v as RadarStatus) : 'idle';

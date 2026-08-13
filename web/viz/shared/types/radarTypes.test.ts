@@ -327,4 +327,40 @@ describe('normalizeRadarState', () => {
     expect(model.agents[0].composition.exact).toEqual({ cacheRead: 5, fresh: 6, cacheWrite: 0, output: 7 });
     expect(model.agents[0].composition.estimated).toBeNull();
   });
+
+  it('carries the awaiting status and its reason through the seam', () => {
+    const model = normalizeRadarState({
+      agents: [
+        { id: 'a', harness: 'claude_code', status: 'awaiting', awaitingReason: 'approval' },
+        { id: 'b', harness: 'codex', status: 'awaiting', awaiting_reason: 'question' },
+      ],
+    });
+    expect(model.agents[0].status).toBe('awaiting');
+    expect(model.agents[0].awaitingReason).toBe('approval');
+    // snake_case from an older payload shape is accepted too, like every other field.
+    expect(model.agents[1].awaitingReason).toBe('question');
+  });
+
+  it('gates the reason on the status so a stale one cannot caption a resumed agent', () => {
+    const model = normalizeRadarState({
+      agents: [
+        { id: 'moved-on', harness: 'codex', status: 'working', awaitingReason: 'question' },
+        { id: 'finished', harness: 'codex', status: 'idle', awaitingReason: 'approval' },
+      ],
+    });
+    expect(model.agents[0].awaitingReason).toBeNull();
+    expect(model.agents[1].awaitingReason).toBeNull();
+  });
+
+  it('degrades an unknown or missing reason to "input" rather than dropping the state', () => {
+    const model = normalizeRadarState({
+      agents: [
+        { id: 'weird', harness: 'codex', status: 'awaiting', awaitingReason: 'elicitation' },
+        { id: 'bare', harness: 'codex', status: 'awaiting' },
+      ],
+    });
+    // Still awaiting: we know it is blocked even when we cannot say on what.
+    expect(model.agents.map((a) => a.status)).toEqual(['awaiting', 'awaiting']);
+    expect(model.agents.map((a) => a.awaitingReason)).toEqual(['input', 'input']);
+  });
 });

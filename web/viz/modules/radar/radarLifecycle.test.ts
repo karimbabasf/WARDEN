@@ -347,3 +347,26 @@ describe('crossfadeOverlay — outgoing-snapshot fade', () => {
     expect(crossfadeOverlay(Number.NaN).opacity).toBe(1); // defensive: never NaN opacity
   });
 });
+
+describe('awaiting is a LIVE state, never a leaving one', () => {
+  it('blooms an awaiting globe in and holds it at full scale', () => {
+    let map = reconcileLifecycle({}, [{ id: 'ask', status: 'awaiting' }], 0.5);
+    expect(map.ask.phase).toBe('spawning');
+    for (let i = 0; i < 12; i++) {
+      map = reconcileLifecycle(map, [{ id: 'ask', status: 'awaiting' }], 0.1);
+    }
+    expect(map.ask.phase).toBe('alive');
+    expect(map.ask.scale).toBe(1);
+  });
+
+  it('never implodes one, however long it waits', () => {
+    let map: LifecycleMap = { ask: { phase: 'alive', t: 900, scale: 1 } };
+    for (let i = 0; i < 60; i++) {
+      map = reconcileLifecycle(map, [{ id: 'ask', status: 'awaiting' }], 0.1);
+    }
+    // An agent blocked on a human for ten minutes is still on the board. Treating
+    // "quiet" as "leaving" is exactly the mistake this state exists to fix.
+    expect(map.ask.phase).toBe('alive');
+    expect(map.ask.scale).toBe(1);
+  });
+});

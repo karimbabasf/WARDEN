@@ -38,6 +38,7 @@ import {
   type LiveId,
 } from './radarLifecycle';
 import { globeSpinRate } from './radarMotion';
+import { ALERT_HEX, alertBlink, alertGlowMultiplier, alertWhiteMix } from './radarAlert';
 import { RadarHoverCard } from './RadarHoverCard';
 import { radarCanvasCamera } from '@/viz/shared/scene/useOrbCamera';
 import { useReducedMotion } from '@/viz/shared/scene/reducedMotion';
@@ -64,6 +65,11 @@ export function radarNodeColor(agent: RadarAgent): string {
  * threshold and the working ones are the only things that light the room. Fill is
  * intentionally absent: context is the SIZE channel, not the brightness channel.
  * Selection/hover/legend-emphasis add on top so the focused globe still pops.
+ *
+ * An AWAITING globe takes a lift of its own, between resting and working. It is the
+ * BASE the strobe then swings around (see `alertGlowMultiplier`), so the trough dips
+ * under an idle globe and the crest clears a working one: the flash sweeps through the
+ * whole board's range rather than sitting on top of it.
  */
 export function radarGlowTarget({
   agent,
@@ -79,10 +85,11 @@ export function radarGlowTarget({
   hovered: boolean;
 }): number {
   const working = agent.status === 'working';
+  const awaiting = agent.status === 'awaiting';
   // Dim resting floor (idle) vs a strong live blaze (working). The ~9× gap is what
   // makes a running agent unmistakable against the dulled-down rest of the forest.
   const restFloor = isRoot ? 0.22 : 0.16;
-  const liveLift = working ? 2.7 : 0;
+  const liveLift = working ? 2.7 : awaiting ? 1.5 : 0;
   return Math.max(
     0.05,
     restFloor +
@@ -236,8 +243,13 @@ function RadarGlobe({
   const isRoot = node.depth === 0;
   const working = agent.status === 'working';
   const terminated = agent.status === 'terminated';
+  // The THIRD state: stopped on the operator. It takes the globe's colour AND its
+  // waveform (see `radarAlert`), because a state that only changed brightness would read
+  // as a busier working globe and one that only changed colour would be invisible to a
+  // colour-blind operator.
+  const awaiting = agent.status === 'awaiting';
   // A finishing subagent flares verdict-amber as the lifecycle implodes its scale.
-  const baseHex = terminated ? '#ff5a37' : radarNodeColor(agent);
+  const baseHex = terminated ? '#ff5a37' : awaiting ? ALERT_HEX : radarNodeColor(agent);
   const seed = useMemo(() => seedOf(node.id), [node.id]);
 
   // Colour depends only on harness hue + fill heat (or the amber terminated flare);
@@ -316,6 +328,11 @@ function RadarGlobe({
     // idle keeps a slow, deep ambient breath; working swaps to the synced pulse.
     const idleBreath = Math.sin(t * 0.5 + seed * 6.28) * 0.045;
     const boost = selected ? 0.22 : hovered ? 0.07 : 0;
+    // The alert strobe. Deliberately NOT phased by `seed` the way the breath above is:
+    // every waiting globe flashes on the same beat, so a board with three of them reads
+    // as one alarm instead of three twitches.
+    const blink = awaiting ? alertBlink(t, reduced) : 0;
+    const alertGlow = awaiting ? alertGlowMultiplier(blink) : 1;
 
     // lifecycle scale (0..1) is the spawn-in / implode-out factor from the pure
     // reconciler — read live from the ref so a tween never triggers a re-render.
@@ -377,7 +394,14 @@ function RadarGlobe({
 
     // halo: comes alive with liveness, then breathes IN and OUT on the slow pulse —
     // the soft aura swelling and receding is the most visible "this is working" tell.
-    halo.current.scale.setScalar((isRoot ? 0.74 : 0.58) * (1 + liveK * 0.95 + pulse * 0.45));
+    // An awaiting globe overrides that with the strobe: the aura snaps out on each flash
+    // and collapses back between them, which is the beacon read at halo scale.
+    const haloBase = isRoot ? 0.74 : 0.58;
+    halo.current.scale.setScalar(
+      awaiting
+        ? haloBase * (1 + blink * 1.25)
+        : haloBase * (1 + liveK * 0.95 + pulse * 0.45),
+    );
 
     innerCage.current.rotation.y -= dt * 0.18;
     innerCage.current.rotation.x += dt * 0.1;
@@ -393,9 +417,14 @@ function RadarGlobe({
     // the SAME slow pulse swells the emissive + halo + nodes together, so the whole
     // globe brightens and dims as one calm breath of light (working only — `pulse` is
     // 0 when idle, so idle globes hold perfectly steady and the contrast is obvious).
-    const pulseGlow = 1 + pulse * 0.3;
+    // `alertGlow` is 1 for every other status, so the strobe rides the SAME three
+    // channels the breath does rather than adding a fourth one to reason about.
+    const pulseGlow = (1 + pulse * 0.3) * alertGlow;
     gemMat.current.emissiveIntensity = (0.3 + s.glow * 1.05) * dimK * litK * pulseGlow;
-    haloMat.current.opacity = Math.min(1, (0.05 + s.glow * 0.34) * dimK * litK * (1 + pulse * 0.45));
+    haloMat.current.opacity = Math.min(
+      1,
+      (0.05 + s.glow * 0.34) * dimK * litK * (awaiting ? alertGlow : 1 + pulse * 0.45),
+    );
     nodeMat.current.opacity = Math.min(1, (0.16 + s.glow * 0.32) * dimK * litK * pulseGlow);
 
     // ── colour: hue dulls when idle, blazes white-hot when working ───────────
@@ -404,9 +433,14 @@ function RadarGlobe({
     // floor is low so a filtered-out globe goes dark. Copy-first so nothing compounds.
     const shellScaleC = dimScale(s.colorDim, 0.08);
     const innerScaleC = dimScale(s.colorDim, 0.1);
-    const shellLit = 0.32 + liveK * 0.68; // idle lattices dim, working full
-    const colorQuiet = radarLivenessColorScale(liveK);
-    const whiteHot = liveK * 0.5 + pulse * 0.12; // working core, whitening a touch on each pulse peak
+    // An awaiting globe's LATTICE strobes too, not just its core: driving the shell from
+    // the blink is what makes the whole body flash rather than a bright dot inside a
+    // dark cage. It is the same expression as the working lattice, fed a different wave.
+    const shellLit = awaiting ? 0.34 + blink * 0.66 : 0.32 + liveK * 0.68;
+    const colorQuiet = awaiting ? 0.7 + blink * 0.3 : radarLivenessColorScale(liveK);
+    // working core, whitening a touch on each pulse peak. The alert stays RED at its
+    // crest (a small mix) so a flash never reads as a white-hot working core.
+    const whiteHot = awaiting ? alertWhiteMix(blink) : liveK * 0.5 + pulse * 0.12;
     if (!shellMat.current) shellMat.current = findWireframeMaterial(shellGroup.current);
     if (!cageMat.current) cageMat.current = findWireframeMaterial(innerGroup.current);
     if (shellMat.current) {

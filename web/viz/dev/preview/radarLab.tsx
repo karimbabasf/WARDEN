@@ -269,6 +269,74 @@ const RAW_FOREST = {
       estCostUsd: null,
     },
 
+    // ── 3b) AWAITING: the third state, both ways it is detected ────────────────
+    // Two of them, and deliberately one per harness, because the point of the state is
+    // that it flashes in LOCKSTEP: a board with two waiting agents has to read as one
+    // alarm. Keep them here whenever the alert is tuned, or the sync goes unchecked.
+    {
+      // Claude, blocked on a native AskUserQuestion. The open prompt IS the current
+      // action, so the strip and the panel quote the question itself.
+      id: 'cl-asking',
+      harness: 'claude_code',
+      origin: 'cli',
+      parentId: null,
+      depth: 0,
+      label: 'pakkr-ops',
+      nickname: null,
+      cwd: 'pakkr-ops',
+      role: null,
+      model: 'claude-opus-4-8',
+      status: 'awaiting',
+      awaitingReason: 'question',
+      title: 'Migrate the order pipeline',
+      currentAction: {
+        kind: 'ask',
+        tool: 'AskUserQuestion',
+        label: 'Cut over the order table now, or stage it behind a flag?',
+        target: null,
+        startedAt: iso(96),
+        elapsedMs: 96000,
+      },
+      contextTokens: 74000,
+      maxTokens: 200000,
+      fillPct: 0.37,
+      composition: {
+        exact: { cacheRead: 58000, fresh: 12000, output: 4000 },
+        estimated: { preamble: 21000, conversation: 39000, toolOutput: 12000, thinking: 2000 },
+      },
+      recentActivity: [{ ts: iso(96), kind: 'ask', label: 'AskUserQuestion' }],
+      childCount: 0,
+      startedAt: iso(1400),
+      estCostUsd: 0.83,
+    },
+    {
+      // Codex, blocked the only way Codex can be detected: it ended its turn on a
+      // question in ordinary prose. No tool call, so no action to quote.
+      id: 'cx-asking',
+      harness: 'codex',
+      origin: 'Codex Desktop',
+      parentId: null,
+      depth: 0,
+      label: 'ledger-svc',
+      nickname: null,
+      cwd: 'ledger-svc',
+      role: null,
+      model: 'gpt-5-codex',
+      status: 'awaiting',
+      awaitingReason: 'question',
+      contextTokens: 33000,
+      maxTokens: 258400,
+      fillPct: 0.13,
+      composition: {
+        exact: { cacheRead: 25000, fresh: 6000, output: 2000 },
+        estimated: null,
+      },
+      recentActivity: [{ ts: iso(140), kind: 'message', label: 'Both migrations apply cleanly.' }],
+      childCount: 0,
+      startedAt: iso(900),
+      estCostUsd: 0.29,
+    },
+
     // ── 4) Unknown-harness agent — neutral slate globe + glyph, NO brand hue ────
     {
       id: 'unknown-1',
@@ -296,10 +364,13 @@ const RAW_FOREST = {
 const FOREST = normalizeRadarState(RAW_FOREST);
 
 // A stable, sensible default selection: the Claude root (deepest, richest panel).
+// `?agent=<id>` overrides it, so a panel state that needs a specific agent (the awaiting
+// callout, say) is reachable in a static screenshot instead of only by clicking.
 const DEFAULT_SELECTED = 'cl-root';
+const REQUESTED = new URLSearchParams(window.location.search).get('agent');
 
 function RadarLab() {
-  const [selectedId, setSelectedId] = useState<string | null>(DEFAULT_SELECTED);
+  const [selectedId, setSelectedId] = useState<string | null>(REQUESTED || DEFAULT_SELECTED);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   const onHover = useCallback((n: LayoutNode) => setHoveredId(n.id), []);

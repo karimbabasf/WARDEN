@@ -14,15 +14,27 @@
 import type { CSSProperties } from 'react';
 import type { RadarAgent } from '@/viz/shared/types/radarTypes';
 import { radarSubtitle, formatTokens } from '@/viz/shared/types/radarTypes';
+import { awaitingShort } from '@/viz/shared/lib/awaitingCopy';
 import { radarHarness } from './radarTheme';
 
-/** Human status words (the `working|idle|closed|terminated` enum is terse; spell it for glance). */
+/** Human status words (the `working|awaiting|idle|closed|terminated` enum is terse; spell it for glance). */
 const STATUS_LABEL: Record<RadarAgent['status'], string> = {
   working: 'Working',
+  awaiting: 'Waiting on you',
   idle: 'Idle',
   closed: 'Closed',
   terminated: 'Terminated',
 };
+
+/**
+ * The status line for the card. A waiting agent says WHAT it wants right here, because
+ * the hover card is what the operator reads before deciding whether to open the session,
+ * and "Waiting on you" alone does not answer that.
+ */
+function statusLabel(agent: RadarAgent): string {
+  if (agent.status !== 'awaiting') return STATUS_LABEL[agent.status];
+  return awaitingShort(agent.awaitingReason);
+}
 
 function pct(fill: number): string {
   return `${Math.round(fill * 100)}%`;
@@ -74,7 +86,7 @@ export function RadarHoverCard({ agent }: { agent: RadarAgent }) {
         </div>
         <div>
           <dt>Status</dt>
-          <dd className={`wd-radar-status is-${agent.status}`}>{STATUS_LABEL[agent.status]}</dd>
+          <dd className={`wd-radar-status is-${agent.status}`}>{statusLabel(agent)}</dd>
         </div>
         {children ? (
           <div>

@@ -8,8 +8,20 @@
 // raw (possibly drifted) payload into a fully defaulted, safe model — schema drift
 // must never throw or drop the forest.
 
-/** Liveness of one agent. Mirrors Rust `AgentStatus`. */
-export type RadarStatus = 'working' | 'idle' | 'closed' | 'terminated';
+/**
+ * Liveness of one agent. Mirrors Rust `AgentStatus`.
+ *
+ * `awaiting` is the third state the board renders and the only one that is about the
+ * OPERATOR rather than the agent: it has stopped on a question or a prompt and cannot
+ * move until a human answers. Quiet like `idle`, urgent unlike it.
+ */
+export type RadarStatus = 'working' | 'awaiting' | 'idle' | 'closed' | 'terminated';
+
+/**
+ * Why an agent is awaiting, as a closed vocabulary. Mirrors Rust `AwaitingReason`; the
+ * harness's own dialog text never reaches the web. `null` for every other status.
+ */
+export type RadarAwaitingReason = 'question' | 'approval' | 'input';
 
 /** A single recent event tailing in an agent's context. */
 export type RadarActivity = {
@@ -134,6 +146,11 @@ export type RadarAgent = {
   /** Agent-team membership, when the harness groups agents into a named team. */
   team?: RadarTeam | null;
   status: RadarStatus;
+  /**
+   * Why it is waiting, when `status === 'awaiting'`. Optional key so an older payload
+   * still satisfies the type; the normalizer always fills it in as a value or `null`.
+   */
+  awaitingReason?: RadarAwaitingReason | null;
   contextTokens: number; // exact live occupancy
   maxTokens: number; // model window (0 if unknown)
   fillPct: number; // contextTokens/maxTokens clamped [0,1]; 0 if maxTokens==0
@@ -224,9 +241,27 @@ function clamp01(v: number): number {
   return v;
 }
 
-const STATUSES: ReadonlySet<string> = new Set(['working', 'idle', 'closed', 'terminated']);
+const STATUSES: ReadonlySet<string> = new Set([
+  'working',
+  'awaiting',
+  'idle',
+  'closed',
+  'terminated',
+]);
 function status(v: unknown): RadarStatus {
   return typeof v === 'string' && STATUSES.has(v) ? (v as RadarStatus) : 'idle';
+}
+
+const AWAITING_REASONS: ReadonlySet<string> = new Set(['question', 'approval', 'input']);
+/**
+ * The reason, but only on an agent that is actually awaiting. Gating on the status is
+ * what keeps a stale reason from a previous frame off an agent that has since resumed:
+ * the globe's alert copy is driven from this field, so a leftover value would caption a
+ * globe that is no longer asking anything.
+ */
+function awaitingReason(v: unknown, st: RadarStatus): RadarAwaitingReason | null {
+  if (st !== 'awaiting') return null;
+  return typeof v === 'string' && AWAITING_REASONS.has(v) ? (v as RadarAwaitingReason) : 'input';
 }
 
 function normalizeExact(v: any): RadarExactComposition {
@@ -320,6 +355,7 @@ function normalizeContextBreakdown(v: any): RadarContextBreakdown {
 
 function normalizeAgent(a: any): RadarAgent {
   const comp = a?.composition;
+  const st = status(a?.status);
   return {
     id: str(a?.id),
     harness: str(a?.harness, 'unknown'),
@@ -336,7 +372,8 @@ function normalizeAgent(a: any): RadarAgent {
     surface: strOrNull(a?.surface ?? a?.entrypoint),
     currentAction: normalizeCurrentAction(a?.currentAction ?? a?.current_action),
     team: normalizeTeam(a?.team),
-    status: status(a?.status),
+    status: st,
+    awaitingReason: awaitingReason(a?.awaitingReason ?? a?.awaiting_reason, st),
     contextTokens: num(a?.contextTokens ?? a?.context_tokens),
     maxTokens: num(a?.maxTokens ?? a?.max_tokens),
     fillPct: clamp01(num(a?.fillPct ?? a?.fill_pct)),

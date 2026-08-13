@@ -39,8 +39,9 @@ pub(crate) fn build_agent(
     parent_id: Option<String>,
     depth: u32,
     child_count: u32,
-    status: AgentStatus,
+    verdict: super::status::StatusVerdict,
 ) -> RadarAgent {
+    let status = verdict.status;
     let events = store.session_events(&s.id).unwrap_or_default();
 
     // Last TokenUsage drives live occupancy + exact composition.
@@ -130,6 +131,7 @@ pub(crate) fn build_agent(
         // recompute instead of once per agent.
         team: None,
         status: status.as_str().to_string(),
+        awaiting_reason: verdict.awaiting.map(|r| r.as_str().to_string()),
         context_tokens: size.context_tokens,
         max_tokens: size.max_tokens,
         fill_pct: size.fill_pct,
@@ -573,6 +575,10 @@ fn classify_named_tool(tool: &str, input: &serde_json::Value) -> (&'static str, 
         // nondescript tool call, so it gets its own kind. `Task` is the older spelling.
         "Agent" | "Task" => "spawn",
         "Skill" => "skill",
+        // A tool that does not return until a HUMAN answers it. Its own kind because it
+        // is the readout for the awaiting state: "what is it asking?" is the one thing
+        // the operator needs, and bucketing it as a generic tool buried it.
+        t if super::awaiting::is_blocking_tool(t) => "ask",
         _ => "tool",
     };
     (kind, named_tool_label(tool, input))
@@ -600,10 +606,32 @@ fn named_tool_label(tool: &str, input: &serde_json::Value) -> String {
         "WebFetch" => s("url"),
         _ => None,
     };
+    // A blocking prompt is labelled by WHAT IT ASKS, not by the tool that asked it. The
+    // question is already sitting in the call's input, so showing "Which backend?" costs
+    // nothing and is the whole point of surfacing the state.
+    if super::awaiting::is_blocking_tool(tool) {
+        return match first_question_text(input) {
+            Some(q) => crate::util::truncate_chars(&q, 72),
+            None => "Waiting on you".to_string(),
+        };
+    }
     match named {
         Some(t) => format!("{} {}", short_tool_name(tool), crate::util::truncate_chars(t, 64)),
         None => tool_target_label(tool, input),
     }
+}
+
+/// The first question an `AskUserQuestion` call carries, from its
+/// `questions[0].question` (falling back to the `header`). `None` for a prompt with no
+/// question array at all, such as `ExitPlanMode`.
+fn first_question_text(input: &serde_json::Value) -> Option<String> {
+    let first = input.get("questions")?.as_array()?.first()?;
+    ["question", "header"]
+        .iter()
+        .filter_map(|k| first.get(*k).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .find(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// A short label for a file-write snapshot: the edited file, plus a count when several

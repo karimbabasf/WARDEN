@@ -367,6 +367,10 @@ mod tests {
                 is_lead: false,
             }),
             status: "working".into(),
+            // The awaiting reason is a closed vocabulary, but it is still LOCAL detail:
+            // an observer learns THAT a globe is waiting (from `status`) and never on
+            // what. Carrying a canary here is what keeps that true as the struct grows.
+            awaiting_reason: Some("CANARY_AWAITING_REASON".into()),
             context_tokens: 1000,
             max_tokens: 4000,
             fill_pct: 25.0,

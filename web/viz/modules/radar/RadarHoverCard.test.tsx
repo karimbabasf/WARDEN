@@ -99,4 +99,26 @@ describe('RadarHoverCard — quick-glance fields', () => {
     const text = el.textContent ?? '';
     expect(text).toContain('144k tokens'); // honest occupancy even with no window to take a % of
   });
+
+  it('says WHAT a waiting agent wants, not just that it is waiting', () => {
+    // The card is what gets read before deciding whether to open the session, so
+    // "Waiting on you" alone does not answer the question the hover was asking.
+    const asked = render(
+      <RadarHoverCard agent={agentFixture({ status: 'awaiting', awaitingReason: 'question' })} />,
+    );
+    expect(asked.textContent).toContain('Asked a question');
+    expect(asked.querySelector('.wd-radar-status')?.className).toContain('is-awaiting');
+
+    const approve = render(
+      <RadarHoverCard agent={agentFixture({ status: 'awaiting', awaitingReason: 'approval' })} />,
+    );
+    expect(approve.textContent).toContain('Needs approval');
+  });
+
+  it('falls back to a plain waiting line when the reason did not survive', () => {
+    const el = render(
+      <RadarHoverCard agent={agentFixture({ status: 'awaiting', awaitingReason: null })} />,
+    );
+    expect(el.textContent).toContain('Needs input');
+  });
 });

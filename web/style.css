@@ -82,6 +82,14 @@
   --amber: #ff5f56;
   --danger: #ff5f56;
 
+  /* The AWAITING alert. A crimson, kept clear of `--danger`'s salmon and well clear of
+     Claude's tangerine, and matched byte-for-byte to `ALERT_HEX` in radarAlert.ts so the
+     chrome and the globe read as one signal. `--alert-period` is that module's
+     `ALERT_PERIOD`: the chip and the globe must strobe on the SAME beat or the board
+     looks like two alarms disagreeing. */
+  --alert: #ff2740;
+  --alert-period: 1.55s;
+
   --panel: rgba(15, 19, 28, 0.92);
   --panel-strong: rgba(10, 13, 21, 0.96);
   --hair: #232b3a;
@@ -383,6 +391,51 @@ html, body {
    above it. */
 .wd-detail-session-name { margin: 3px 0 0; font-size: 12px; line-height: 1.35; color: var(--ink-soft); }
 .wd-detail-sub { margin: 4px 0 0; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
+
+/* The awaiting callout: what a blocked agent wants, above the numbers, because the
+   numbers cannot change until the block clears. Depth is the house physical stack (tone
+   step, hairline, inset lift) with the hairline taking the alert hue: no coloured glow,
+   which is the look this design system deliberately left behind. */
+.wd-detail-awaiting {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--alert) 42%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--alert) 9%, var(--surface-2, transparent));
+  box-shadow: var(--lift);
+}
+.wd-detail-awaiting-glyph {
+  flex: none;
+  width: 18px; height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--alert) 55%, transparent);
+  border-radius: 50%;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--alert);
+  animation: wd-alert-blink var(--alert-period) linear infinite;
+}
+.wd-detail-awaiting-body { min-width: 0; }
+.wd-detail-awaiting-head {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--alert);
+}
+/* The question itself, quoted from the open prompt. Wraps: unlike a strip, this panel
+   has the room, and truncating the one sentence the operator has to answer is absurd. */
+.wd-detail-awaiting-ask {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink);
+}
 .wd-detail-close {
   flex: none;
   width: 26px; height: 26px;
@@ -460,6 +513,9 @@ html, body {
 .wd-radar-status.is-working { color: var(--acid); }
 .wd-radar-status.is-idle { color: var(--ink-faint); }
 .wd-radar-status.is-closed { color: var(--amber); }
+/* The third state. `--alert` is the SAME crimson the globe strobes (radarAlert.ts), so
+   the chip and the globe are visibly one signal rather than two reds that nearly match. */
+.wd-radar-status.is-awaiting { color: var(--alert); animation: wd-alert-blink var(--alert-period) steps(1, end) infinite; }
 
 /* ── radar detail panel (right dock; reuses the wd-detail glass) ─────────────*/
 /* The dock sits OUTSIDE .wd-chrome, so make the container itself pass-through
@@ -1748,6 +1804,14 @@ html, body {
 .wd-strip[data-status="idle"] .wd-strip-rule { opacity: 0.3; }
 .wd-strip[data-status="closed"] .wd-strip-rule,
 .wd-strip[data-status="terminated"] .wd-strip-rule { opacity: 0.16; }
+/* The rack's own alert: the strip's rule leaves the harness hue and strobes on the same
+   beat as its globe, so the rail and the scope point at the same session together. */
+.wd-strip[data-status="awaiting"] .wd-strip-rule {
+  width: 3px;
+  background: var(--alert);
+  opacity: 1;
+  animation: wd-alert-blink var(--alert-period) linear infinite;
+}
 
 .wd-strip-head { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 .wd-strip-glyph { flex: none; color: var(--harness, var(--green)); font-size: 11px; }
@@ -1771,6 +1835,26 @@ html, body {
   color: var(--ink-faint);
 }
 .wd-strip-status.is-working { color: var(--ink); }
+.wd-strip-status.is-awaiting {
+  color: var(--alert);
+  animation: wd-alert-blink var(--alert-period) linear infinite;
+}
+
+/* The alert waveform, in CSS. Two short flashes then a long rest, the same shape and the
+   same 1.55s period as `alertBlink` in radarAlert.ts. A single slow fade here would read
+   as a breath and pull against the globe it is supposed to agree with, so the stops are
+   placed to match that function's pulses (peaks near 6% and 23% of the cycle) rather
+   than being eyeballed. It never reaches zero: a chip that disappears is a chip the eye
+   stops tracking. */
+@keyframes wd-alert-blink {
+  0% { opacity: 0.42; }
+  6% { opacity: 1; }
+  13% { opacity: 0.42; }
+  17% { opacity: 0.42; }
+  23% { opacity: 1; }
+  30% { opacity: 0.42; }
+  100% { opacity: 0.42; }
+}
 
 .wd-strip-meta {
   font-family: var(--mono);
@@ -1791,6 +1875,13 @@ html, body {
   color: var(--ink-soft);
 }
 .wd-strip-action.is-idle { color: var(--ink-faint); }
+/* Keyed off the STRIP's status, not the action row's own class, because a waiting agent
+   reaches this row two different ways: quoting an open prompt (it has a currentAction)
+   or stating what it wants (it does not). Styling only the second left the two waiting
+   strips a different colour from each other, which read as two unrelated states.
+   Steady, not strobing: the rule and the status word already carry the cadence, and a
+   third blinking element on one strip is noise rather than emphasis. */
+.wd-strip[data-status="awaiting"] .wd-strip-action { color: var(--alert); }
 .wd-strip-action-glyph { flex: none; width: 11px; text-align: center; }
 .wd-strip-action-label {
   flex: 1 1 auto;

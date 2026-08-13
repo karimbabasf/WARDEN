@@ -29,8 +29,17 @@ export type LifecycleEntry = {
 
 export type LifecycleMap = Record<string, LifecycleEntry>;
 
-/** The live forest's id + status, as fed each frame from the radar model. */
-export type LiveId = { id: string; status: 'working' | 'idle' | 'closed' | 'terminated' };
+/**
+ * The live forest's id + status, as fed each frame from the radar model.
+ *
+ * `awaiting` is a LIVE state here, not a terminal one: an agent blocked on a question is
+ * very much still on the board, and the only thing the reconciler cares about is whether
+ * a globe is leaving.
+ */
+export type LiveId = {
+  id: string;
+  status: 'working' | 'awaiting' | 'idle' | 'closed' | 'terminated';
+};
 
 // Tween rates (per second, exp-damped → inherently dt-bounded, never overshoot).
 const SPAWN_LAMBDA = 7;
