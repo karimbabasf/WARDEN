@@ -18,125 +18,7 @@
    constellation the only colourful thing, which is correct: it is the hero.
    Colour is ALWAYS paired with a glyph + label (color-blind a11y).
    ───────────────────────────────────────────────────────────────────────── */
-
-/* Self-hosted, bundled with the app: WARDEN opens no socket at rest, so a
-   webfont CDN is not an option (it would also silently fall back to a serif
-   behind shield-style blockers). Technor is the display/UI face, a squared
-   geometric grotesk that reads like avionics signage and holds at 12px.
-   Commit Mono (SIL OFL 1.1, see fonts/LICENSE-CommitMono.txt) carries every
-   numeral, path and caps label, so readouts stay column-aligned. */
-@font-face {
-  font-family: Technor;
-  src: url("./fonts/technor-400.woff2") format("woff2");
-  font-weight: 400;
-  font-display: swap;
-}
-@font-face {
-  font-family: Technor;
-  src: url("./fonts/technor-500.woff2") format("woff2");
-  font-weight: 500;
-  font-display: swap;
-}
-@font-face {
-  font-family: Technor;
-  src: url("./fonts/technor-700.woff2") format("woff2");
-  font-weight: 700;
-  font-display: swap;
-}
-@font-face {
-  font-family: CommitMono;
-  src: url("./fonts/commit-mono-400.woff2") format("woff2");
-  font-weight: 400;
-  font-display: swap;
-}
-@font-face {
-  font-family: CommitMono;
-  src: url("./fonts/commit-mono-700.woff2") format("woff2");
-  font-weight: 700;
-  font-display: swap;
-}
-
-:root {
-  /* ── field: a cold slate near-black, never pure black ── */
-  --bg: #070910;
-  --field: #0a0d15;
-  --surface-1: #0f131c;
-  --surface-2: #151a25;
-  --surface-3: #1c2230;
-
-  /* Measured against the surfaces they actually sit on, not eyeballed. --ink-faint
-     was #6b7891, which lands at 4.43:1 on --bg and 4.17:1 on --surface-1: under
-     WCAG AA, and it carries the 10px caps labels where legibility matters most.
-     #7684a0 measures 5.3:1 on --bg and 4.98:1 on --surface-1. */
-  --ink: #e7ecf4;        /* primary readable text, 15:1+ */
-  --ink-soft: #a3aec2;   /* secondary text, 8.5:1 */
-  --ink-faint: #7684a0;  /* labels / captions, 4.98:1 minimum */
-
-  /* Legacy accent names, re-pointed to cold steel. Components that ask for
-     `--green` are asking for "the generic accent"; there is no phosphor left. */
-  --green: #c3d0e6;
-  --dim: #3a465c;
-  --acid: #c3d0e6;
-  --warn: #ffc94d;
-  --red: #ff5f56;
-  --amber: #ff5f56;
-  --danger: #ff5f56;
-
-  /* The AWAITING alert. A crimson, kept clear of `--danger`'s salmon and well clear of
-     Claude's tangerine, and matched byte-for-byte to `ALERT_HEX` in radarAlert.ts so the
-     chrome and the globe read as one signal. `--alert-period` is that module's
-     `ALERT_PERIOD`: the chip and the globe must strobe on the SAME beat or the board
-     looks like two alarms disagreeing. */
-  --alert: #ff2740;
-  --alert-period: 1.55s;
-
-  --panel: rgba(15, 19, 28, 0.92);
-  --panel-strong: rgba(10, 13, 21, 0.96);
-  --hair: #232b3a;
-  --hair-bright: #33405473;
-
-  /* Physical depth, layered. `--glow` is kept only because older rules still
-     reference it; it is now a tight key shadow, not a bloom. */
-  --lift: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  --key: 0 1px 2px rgba(0, 0, 0, 0.45);
-  --key-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
-  --glow: var(--key);
-
-  /* Three radii, and 50% for things that are genuinely circles. Instrument panels
-     are rectilinear, so the scale is tight on purpose: ad hoc 5/7/10/11/12px
-     values were the tell that there was no system. */
-  --r-dot: 2px;       /* swatches, tiny indicators */
-  --r-control: 3px;   /* buttons, inputs, chips */
-  --r-surface: 4px;   /* rails, panels, cards */
-
-  --sans: Technor, ui-sans-serif, system-ui, sans-serif;
-  --mono: CommitMono, ui-monospace, "SF Mono", Menlo, monospace;
-
-  /* ── motion tokens: duration scales with travel, easing is never a keyword ── */
-  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-  --t-micro: 120ms;
-  --t-base: 200ms;
-  --t-travel: 280ms;
-
-  /* ── layout tokens ── */
-  /* Clears the brand mark (top: 20px plus its own height). The rails start
-     below it so nothing in the top-left corner ever stacks. */
-  --top-safe: 84px;
-  --side-margin: 14px;
-  --rail-w: clamp(268px, 21vw, 340px);
-  --panel-w: var(--rail-w);   /* legacy alias: the right rail's width */
-  /* What the fleet rack shrinks to when folded. Fixed, not intrinsic, so
-     `--rail-left-occupied` can name the folded width exactly. */
-  --fleet-tab-w: 104px;
-
-  /* ── z-index scale ── */
-  --z-canvas: 0;
-  --z-chrome: 10;
-  --z-panel: 20;
-  --z-deck: 30;
-  --z-nav: 40;
-  --z-controls: 50;
-}
+@import "./tokens.css";  /* faces + design tokens; never restate one here */
 
 * { box-sizing: border-box; }
 
@@ -1843,22 +1725,6 @@ html, body {
 .wd-strip-status.is-awaiting {
   color: var(--alert);
   animation: wd-alert-blink var(--alert-period) linear infinite;
-}
-
-/* The alert waveform, in CSS. Two short flashes then a long rest, the same shape and the
-   same 1.55s period as `alertBlink` in radarAlert.ts. A single slow fade here would read
-   as a breath and pull against the globe it is supposed to agree with, so the stops are
-   placed to match that function's pulses (peaks near 6% and 23% of the cycle) rather
-   than being eyeballed. It never reaches zero: a chip that disappears is a chip the eye
-   stops tracking. */
-@keyframes wd-alert-blink {
-  0% { opacity: 0.42; }
-  6% { opacity: 1; }
-  13% { opacity: 0.42; }
-  17% { opacity: 0.42; }
-  23% { opacity: 1; }
-  30% { opacity: 0.42; }
-  100% { opacity: 0.42; }
 }
 
 .wd-strip-meta {
