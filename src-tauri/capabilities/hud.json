@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "hud",
+  "description": "The menu-bar HUD webview. Narrower than the overlay's capability on purpose: the HUD listens for radar pushes and its own summon/dismiss, and hides itself once the genie has finished playing. It registers no global shortcut, opens nothing, and never shows or moves a window (the tray owns that).",
+  "windows": [
+    "hud"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-hide"
+  ]
+}

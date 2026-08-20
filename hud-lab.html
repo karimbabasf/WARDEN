@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WARDEN · menu-bar studio (mock)</title>
+    <style>
+      /* Only the fake desktop and the dev controls are styled here. The panel pulls
+         its whole look from hud.css (imported by hudLab.tsx), and no token is
+         redefined in this block: a harness that restates a token is a harness that
+         keeps showing a palette the app has already moved off. */
+      html, body { height: 100%; margin: 0; overflow: hidden; }
+      /* A busy "desktop" so the panel's translucency and its shadow are actually
+         judgeable. It goes on a pseudo-element, NOT on body: hud.css (imported by
+         hudLab.tsx, so it lands later) sets a transparent body on purpose and would
+         win, which is exactly the bug that made the first pass of this harness show a
+         blank white desktop and hide the blur it exists to check. */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        background:
+          repeating-linear-gradient(115deg, rgba(255,255,255,0.03) 0 26px, transparent 26px 52px),
+          radial-gradient(120% 90% at 18% 0%, #4a5a80 0%, #171d2b 62%, #0b0e16 100%);
+      }
+      #hud-lab-root { position: fixed; inset: 0; }
+
+      .lab-menubar {
+        position: fixed; top: 0; left: 0; right: 0; height: 24px;
+        background: rgba(8, 10, 16, 0.6);
+        backdrop-filter: blur(18px) saturate(140%);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        display: flex; align-items: center; padding: 0 12px;
+        font: 11px/1 var(--mono); color: var(--ink-soft); letter-spacing: 0.08em;
+      }
+      .lab-tray {
+        position: absolute; top: 2px; width: 22px; height: 20px;
+        display: grid; place-items: center;
+        background: transparent; border: 0; cursor: pointer;
+        color: var(--ink-faint); font-size: 11px; border-radius: 3px;
+      }
+      .lab-tray.is-live { background: rgba(255, 255, 255, 0.12); color: var(--ink); }
+
+      .lab-window { position: fixed; }
+      .lab-window .wd-hud-root { position: absolute; }
+      body.show-bounds .lab-window { outline: 1px dashed rgba(255, 255, 255, 0.14); }
+
+      .lab-controls {
+        position: fixed; left: 18px; bottom: 18px; z-index: 9;
+        display: flex; flex-direction: column; gap: 8px;
+        padding: 12px 14px; border-radius: 4px;
+        background: var(--panel-strong); border: 1px solid var(--hair);
+        font: 11px/1.4 var(--mono); color: var(--ink-soft);
+      }
+      .lab-controls label { display: flex; align-items: center; gap: 8px; }
+      .lab-controls b { color: var(--ink); min-width: 18px; }
+      .lab-buttons { display: flex; gap: 6px; }
+      .lab-buttons button {
+        padding: 4px 10px; border-radius: 3px; cursor: pointer;
+        background: var(--surface-2); border: 1px solid var(--hair); color: var(--ink);
+        font: 11px var(--mono);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud-lab-root"></div>
+    <script type="module" src="/web/viz/dev/preview/hudLab.tsx"></script>
+  </body>
+</html>

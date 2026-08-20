@@ -696,6 +696,12 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
   // that globe (selectedId -> selectedNode -> focus) and re-points the panel.
   const onRadarJump = useCallback((id: string) => setSelectedId(id), []);
 
+  // The same jump, asked for from the menu-bar HUD. Keyed on the NONCE, not the id, so
+  // picking the same globe twice re-selects it instead of looking like a no-op.
+  useEffect(() => {
+    if (scene.focusAgentId) setSelectedId(scene.focusAgentId);
+  }, [scene.focusNonce, scene.focusAgentId]);
+
   // Live radar feed. The backend watcher already pushes `radar_state` on every
   // session-file change (main.ts -> bridge), so the forest is always-on. Two cases the
   // push model cannot cover: a working->idle flip happens when NOTHING changes (the

@@ -1,0 +1,222 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   WARDEN menu-bar HUD: the island that hangs off the tray icon.
+
+   Same instrument language as the war room (see style.css): neutral cold
+   steel chrome, harness hue only on the globes, depth built from a tone
+   step + a 1px border + a 1px inset top highlight + one tight shadow. It is
+   NOT a small war room: no rails, no camera, no controls beyond picking a
+   globe. A glance surface that grows a control is a window.
+
+   Every token comes from tokens.css. Nothing here may restate one: the HUD
+   and the war room are two webviews and a local override is exactly how
+   they would drift onto two palettes.
+   ───────────────────────────────────────────────────────────────────────── */
+@import "./tokens.css";
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  /* The window is transparent and mostly empty: only the panel paints. */
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--sans);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The whole webview. Everything outside the panel is dismiss territory: the
+   window is far bigger than the panel so the island can grow without a native
+   resize, and a click landing on that emptiness must not feel like a dead zone. */
+.wd-hud-root {
+  position: fixed;
+  inset: 0;
+}
+
+/* Shadow only. A drop-shadow FILTER traces its child's clipped silhouette, so it
+   follows the genie funnel; a box-shadow on the clipped element would be clipped
+   away with it. */
+.wd-hud-shade {
+  position: absolute;
+  top: 0;
+  left: 0;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.55)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+}
+
+/* Size, position and the clip polygon. Written from the animation loop, never
+   from CSS: this element is the one that morphs. */
+.wd-hud-clip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* The animation loop owns both. Starting at nothing means the one frame that can
+     exist before the loop has run paints nothing, rather than a full-size panel. */
+  width: 0;
+  height: 0;
+  will-change: clip-path, width, height, transform;
+}
+
+/* The material. Radius lives HERE and not on .wd-hud-clip, because a clip polygon
+   replaces the radius and would square the corners off the moment the genie arms. */
+.wd-hud-panel {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--panel-strong);
+  /* A menu-bar panel floats over whatever the user was reading. An opaque slab
+     reads as a hole punched in the desktop; the blur keeps it a surface. */
+  backdrop-filter: blur(22px) saturate(150%);
+  border: 1px solid var(--hair);
+  box-shadow: var(--lift);
+}
+
+/* Cut once at the largest panel the layout can ask for, then clipped by the panel.
+   Resizing a WebGL drawing buffer every frame of a spring reallocates it every frame. */
+.wd-hud-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+.wd-hud-content {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+/* ── header: the one line that answers "does anything need me" ───────────── */
+.wd-hud-head {
+  position: absolute;
+  top: 13px;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+/* Same crimson and the same beat as the globe it belongs to (radarAlert.ts), so
+   the two read as one signal rather than as two reds that nearly match. */
+.wd-hud-alert-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--alert);
+  animation: wd-alert-blink var(--alert-period) linear infinite;
+}
+
+/* ── one agent ───────────────────────────────────────────────────────────── */
+.wd-hud-cell {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  padding: 0 4px 8px;
+  margin: 0;
+  border: 0;
+  border-radius: var(--r-surface);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  pointer-events: none; /* the loop opens this once the cell has finished arriving */
+  opacity: 0;
+  will-change: transform, opacity;
+  transition: background-color var(--t-micro) var(--ease-out);
+}
+
+/* Two lines, clamped. The identity here is the session's task, and one 88px line of
+   it names nothing; the full string is on the cell's tooltip. */
+.wd-hud-cell-label {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  max-width: 100%;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 11px;
+  letter-spacing: 0.005em;
+  text-align: center;
+  color: var(--ink-soft);
+  /* `break-word`, not `anywhere`: wrap at spaces while the words fit, and only split
+     a word when it cannot fit a line on its own. `anywhere` broke ordinary titles
+     mid-word for no reason. */
+  overflow-wrap: break-word;
+}
+
+.wd-hud-cell-status {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.wd-hud-cell-glyph { font-style: normal; font-size: 8px; }
+.wd-hud-cell-kids { font-style: normal; opacity: 0.7; }
+
+.wd-hud-cell.is-working .wd-hud-cell-label { color: var(--ink); }
+.wd-hud-cell.is-awaiting .wd-hud-cell-status {
+  color: var(--alert);
+  animation: wd-alert-blink var(--alert-period) steps(1, end) infinite;
+}
+
+/* Touch fires a hover on tap, so the lift is gated to a real pointer. */
+@media (hover: hover) and (pointer: fine) {
+  .wd-hud-cell:hover { background: var(--surface-2); }
+  .wd-hud-cell:hover .wd-hud-cell-label { color: var(--ink); }
+}
+
+.wd-hud-cell:focus-visible {
+  outline: 1px solid var(--ink-faint);
+  outline-offset: -1px;
+}
+
+/* ── the fleet the grid could not fit ────────────────────────────────────── */
+/* Named, never silently dropped: a board that shows twelve of twenty agents and
+   says nothing is lying about the fleet. */
+.wd-hud-overflow {
+  position: absolute;
+  bottom: 13px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+}
+
+/* ── reduced motion ──────────────────────────────────────────────────────── */
+/* The size morph and the genie are already skipped in the loop (it snaps the
+   springs and holds the clip at the full rectangle, cross-fading instead). This
+   covers the two CSS-driven strobes: they hold at the steady level rather than
+   flashing, which is the same thing `alertBlink(t, reduced)` does in the scene. */
+@media (prefers-reduced-motion: reduce) {
+  .wd-hud-alert-dot,
+  .wd-hud-cell.is-awaiting .wd-hud-cell-status {
+    animation: none;
+    opacity: 0.88;
+  }
+  .wd-hud-cell { transition: none; }
+}

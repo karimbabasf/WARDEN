@@ -48,6 +48,11 @@ async function boot() {
 // normalizes it into SceneState.radarScene for the radar constellation.
 listen('radar_state', (e) => bridge.ingest('radar_scene_ready', e.payload));
 
+// The menu-bar HUD's one control: it raised this window and named the agent it wants
+// selected. Routed like every other event, through the reducer, so the view stays a
+// pure function of SceneState.
+listen('warden_focus_agent', (e) => bridge.ingest('warden_focus_agent', e.payload));
+
 listen('warden_hotkey', () => {
   // The packaged app shows the window with a native call that never fires the webview
   // Page Visibility API, so this explicit summon signal (not `visibilitychange`) is

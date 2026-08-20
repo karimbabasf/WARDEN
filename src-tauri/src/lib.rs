@@ -30,8 +30,8 @@ struct RadarWatcherGuard {
     radar_signal: scheduler::RadarDirtySignal,
 }
 
-use tauri::tray::TrayIconBuilder;
-use tauri::{Emitter, Manager};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, LogicalPosition, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 /// Reveal the persistent overlay window: show, focus, and signal the frontend to
@@ -55,6 +55,86 @@ fn summon_overlay(app: &tauri::AppHandle) {
 fn dismiss_overlay(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.hide();
+    }
+}
+
+/// Air between the menu bar and the HUD's top edge. The panel's own animation math
+/// treats its top as the icon's underside, so this gap lives HERE rather than as a CSS
+/// offset the genie would also have to know about.
+const HUD_GAP: f64 = 6.0;
+
+/// Show the menu-bar HUD under the tray icon and tell it where the icon is.
+///
+/// The window is a fixed, oversized, transparent rectangle: it is positioned once per
+/// summon and never resized, because the island morphs INSIDE it (a native resize
+/// cannot be springed and tears at 120Hz). What the frontend needs back is the icon's
+/// own geometry in WINDOW-LOCAL coordinates, that is the point the panel grows out of
+/// and the neck the genie funnels into, so it has to survive the edge clamp below.
+fn show_hud(app: &tauri::AppHandle, rect: tauri::Rect, point: tauri::PhysicalPosition<f64>) {
+    let Some(w) = app.get_webview_window("hud") else {
+        return;
+    };
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let icon_pos = rect.position.to_logical::<f64>(scale);
+    let icon_size = rect.size.to_logical::<f64>(scale);
+    let icon_centre = icon_pos.x + icon_size.width / 2.0;
+    let Ok(win) = w.outer_size() else { return };
+    let win = win.to_logical::<f64>(scale);
+
+    let mut x = icon_centre - win.width / 2.0;
+    // Clamp to the display the ICON is on, not the primary one: a tray icon on a second
+    // monitor would otherwise summon the panel onto the first. Three sources, in falling
+    // order of precision, because the FIRST one can legitimately answer `None` for a
+    // window that has never been shown, which is exactly the state this runs in.
+    let monitor = w
+        .monitor_from_point(point.x, point.y)
+        .ok()
+        .flatten()
+        .or_else(|| app.monitor_from_point(point.x, point.y).ok().flatten())
+        .or_else(|| w.primary_monitor().ok().flatten());
+    if let Some(mon) = monitor {
+        let mscale = mon.scale_factor();
+        let mp = mon.position().to_logical::<f64>(mscale);
+        let ms = mon.size().to_logical::<f64>(mscale);
+        let min = mp.x;
+        let max = mp.x + ms.width - win.width;
+        if max >= min {
+            x = x.clamp(min, max);
+        }
+    }
+    let y = icon_pos.y + icon_size.height + HUD_GAP;
+    tracing::debug!(
+        scale, icon_x = icon_pos.x, icon_y = icon_pos.y, icon_w = icon_size.width,
+        icon_h = icon_size.height, icon_centre, win_w = win.width, x, y,
+        "hud summon geometry"
+    );
+
+    let _ = w.set_position(LogicalPosition::new(x, y));
+    let _ = w.show();
+    // Focus is what lets a click anywhere else dismiss the panel: macOS reports that as
+    // a blur on this window, and there is no other signal for "the user looked away".
+    let _ = w.set_focus();
+    let _ = app.emit_to(
+        "hud",
+        "hud_summon",
+        serde_json::json!({ "centreX": icon_centre - x, "width": icon_size.width }),
+    );
+}
+
+/// Left-clicking the tray icon toggles the HUD.
+///
+/// The CLOSE half is asynchronous on purpose: the window may not be hidden until the
+/// genie has finished playing, so this only asks, and the frontend calls `hud_hide`
+/// when the animation is done. Asking twice is harmless, the view is already closing.
+fn toggle_hud(app: &tauri::AppHandle, rect: tauri::Rect, point: tauri::PhysicalPosition<f64>) {
+    let visible = app
+        .get_webview_window("hud")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if visible {
+        let _ = app.emit_to("hud", "hud_dismiss", ());
+    } else {
+        show_hud(app, rect, point);
     }
 }
 
@@ -223,12 +303,29 @@ pub fn run() {
             let mut tray = TrayIconBuilder::with_id("warden-tray")
                 .tooltip("WARDEN — the agent that watches your agents")
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                // LEFT click is now the HUD, so the menu moves to the right button.
+                // A text menu was the only thing the icon could do; the fleet itself is
+                // the thing worth showing there, and it is one click away either way.
+                .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "summon" => summon_overlay(app),
                     "status" => summon_overlay(app),
                     "quit" => app.exit(0),
                     _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // Act on button UP, not down: a press that drags off the icon is a
+                    // cancel, and macOS reports the pair so we can honour that.
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        rect,
+                        position,
+                        ..
+                    } = event
+                    {
+                        toggle_hud(tray.app_handle(), rect, position);
+                    }
                 });
             if let Some(icon) = app.default_window_icon().cloned() {
                 tray = tray.icon(icon);
@@ -276,6 +373,8 @@ pub fn run() {
             minimize_window,
             hide_window,
             get_radar_state,
+            hud_hide,
+            hud_focus_agent,
             rename_session,
             reveal_path,
             agent_terminal_target,

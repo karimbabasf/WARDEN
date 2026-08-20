@@ -30,6 +30,13 @@ export type SceneState = {
    *  `undefined` means no native signal has arrived yet (the browser dev harness),
    *  and the view falls back to the DOM focus listener. */
   focused?: boolean;
+  /** The agent the menu-bar HUD asked the war room to select, from
+   *  `warden_focus_agent`. Null until something asks. */
+  focusAgentId?: string | null;
+  /** Bumped on every focus request. The id alone is not enough: picking the SAME globe
+   *  in the HUD twice must re-select it in the war room, and a state field that did not
+   *  change would look to React like nothing happened. */
+  focusNonce?: number;
 };
 
 function emptyState(): SceneState {
@@ -65,6 +72,15 @@ export function reduce(state: SceneState, name: string, payload: any): SceneStat
 
     case 'warden_restored':
       return state.minimized ? { ...state, minimized: false } : state;
+
+    case 'warden_focus_agent': {
+      // The HUD hands over an agent id and the war room dives onto that globe. A
+      // malformed payload is ignored rather than clearing the current selection:
+      // schema drift must never move the camera.
+      const id = typeof payload?.agentId === 'string' && payload.agentId.length > 0 ? payload.agentId : null;
+      if (!id) return state;
+      return { ...state, focusAgentId: id, focusNonce: (state.focusNonce ?? 0) + 1 };
+    }
 
     case 'warden_focused':
       return state.focused === true ? state : { ...state, focused: true };

@@ -160,6 +160,42 @@ pub async fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Hide the menu-bar HUD.
+///
+/// Called by the HUD itself, and only once its collapse has finished playing: hiding
+/// the window is what ENDS the animation, so Rust must not do it on the click. The tray
+/// asks for a dismiss, the frontend runs the genie, and this is the last step.
+/// Best-effort: a missing window must not error the frontend.
+#[tauri::command]
+pub async fn hud_hide(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("hud") {
+        let _ = w.hide();
+    }
+    Ok(())
+}
+
+/// Take me to this agent: raise the war room and select the globe the HUD was showing.
+///
+/// The HUD's one and only control. It raises the window BEFORE the HUD finishes
+/// collapsing, deliberately, closing first would leave a beat of empty desktop between
+/// the click and the window it summoned.
+#[tauri::command]
+pub async fn hud_focus_agent(app: tauri::AppHandle, agent_id: String) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    let _ = app.emit_to(
+        "overlay",
+        "warden_focus_agent",
+        serde_json::json!({ "agentId": agent_id }),
+    );
+    Ok(())
+}
+
 /// RADAR: the live agent forest, contract-shaped (`radar_state`). Reads live
 /// transcript tails before returning so the frontend's visible-RADAR polling
 /// closes any missed filesystem-event gap, then caches the fresh forest for push

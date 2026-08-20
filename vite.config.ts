@@ -20,7 +20,18 @@ export default defineConfig({
   build: {
     target: 'es2022',
     minify: 'esbuild',
-    sourcemap: true
+    sourcemap: true,
+    rollupOptions: {
+      // TWO real entry points now. `index.html` is the war room; `hud.html` is the
+      // menu-bar island, a second webview with its own stylesheet and its own tiny
+      // bundle. Listing them replaces Vite's implicit index-only default, so both must
+      // be named. The `*-lab.html` sandboxes stay out on purpose: they are dev-server
+      // only and must never ship inside the app.
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        hud: fileURLToPath(new URL('./hud.html', import.meta.url))
+      }
+    }
   },
   test: {
     // The bridge + layout cores are pure logic; node is enough and keeps that
