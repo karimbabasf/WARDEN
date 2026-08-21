@@ -57,6 +57,23 @@ pub fn activate_self() {
     NSApplication::sharedApplication(mtm).activate();
 }
 
+#[cfg(test)]
+mod activation_tests {
+    /// `-[NSApplication activate]` arrived in macOS 14. Calling a selector the running
+    /// system does not have is not a failed activation, it is an unrecognized-selector
+    /// crash, which would be a far worse bug than the one `activate_self` fixes. This
+    /// asks the Objective-C runtime whether the method exists, which needs neither the
+    /// main thread nor a real NSApp, so it runs under `cargo test` like anything else.
+    #[test]
+    fn nsapplication_responds_to_activate() {
+        let cls = objc2::class!(NSApplication);
+        assert!(
+            cls.instance_method(objc2::sel!(activate)).is_some(),
+            "NSApplication has no -activate on this macOS; activate_self would crash"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Locating a session's window.
 // ---------------------------------------------------------------------------
