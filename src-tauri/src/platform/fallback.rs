@@ -14,6 +14,10 @@ pub fn is_reopen_event(event: &tauri::RunEvent) -> bool {
     false
 }
 
+/// No app-level activation concept; on other window managers raising the window
+/// already raises the app, so `set_focus` alone is the whole gesture.
+pub fn activate_self() {}
+
 /// No tty lookup yet. Reported as "no controlling terminal" rather than guessed,
 /// so the panel says it cannot find the window instead of raising the wrong one.
 pub fn controlling_tty(pid: u32) -> Option<String> {

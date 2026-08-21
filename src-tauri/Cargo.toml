@@ -55,6 +55,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2.5"
 zeroize = "1.9"
 
+# macOS app activation, used by `platform::activate_self`. Tauri's `set_focus` is the
+# only call in the stack that tries to bring the APPLICATION forward, and it does it
+# with `activateIgnoringOtherApps:`, which Apple deprecated in macOS 14 and no longer
+# honours reliably: the window became key inside a background app and stayed behind
+# whatever was in front. Both crates are already in Cargo.lock at these versions as
+# Tauri transitive dependencies, so taking them directly costs no extra compilation
+# and adds no supply-chain surface (same argument as ed25519-dalek above).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
+
 [dev-dependencies]
 tempfile = "3.23"
 

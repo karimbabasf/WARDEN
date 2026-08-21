@@ -182,12 +182,12 @@ pub async fn hud_hide(app: tauri::AppHandle) -> Result<(), String> {
 /// the click and the window it summoned.
 #[tauri::command]
 pub async fn hud_focus_agent(app: tauri::AppHandle, agent_id: String) -> Result<(), String> {
-    use tauri::{Emitter, Manager};
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
+    use tauri::Emitter;
+    // OPEN WARDEN, not just "show its window": on macOS those are two different acts
+    // and doing only the second one is what made this feel like a no-op. See
+    // `raise_overlay`. The event is emitted whether or not the window was there, so a
+    // war room that mounts a moment later still lands on the right globe.
+    crate::raise_overlay(&app);
     let _ = app.emit_to(
         "overlay",
         "warden_focus_agent",

@@ -20,13 +20,13 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { normalizeRadarState, type RadarAgent } from '@/viz/shared/types/radarTypes';
 import { HudPanel, type HudNeck, type HudPhase } from './HudPanel';
-import { hudAgents } from './hudSort';
+import { hudTree, type HudNode } from './hudSort';
 
 /** How long the open spring needs before the panel counts as arrived. */
 const SETTLE_MS = 420;
 
 export function HudRoot() {
-  const [agents, setAgents] = useState<RadarAgent[]>([]);
+  const [nodes, setNodes] = useState<HudNode[]>([]);
   const [phase, setPhase] = useState<HudPhase>('closed');
   const [neck, setNeck] = useState<HudNeck>({ centreX: 0, width: 24 });
   const [windowW, setWindowW] = useState(() => window.innerWidth);
@@ -42,7 +42,7 @@ export function HudRoot() {
   useEffect(() => {
     let alive = true;
     const apply = (payload: unknown) => {
-      if (alive) setAgents(hudAgents(normalizeRadarState(payload)));
+      if (alive) setNodes(hudTree(normalizeRadarState(payload)));
     };
     invoke('get_radar_state').then(apply).catch(() => {});
     const un = listen('radar_state', (e) => apply(e.payload));
@@ -102,8 +102,10 @@ export function HudRoot() {
     invoke('hud_hide').catch(() => {});
   }, []);
 
-  // Picking a globe is the HUD's one control: it hands the agent to the war room and
-  // gets out of the way. Closing first would race the window it is about to raise.
+  // Picking a globe is the HUD's one control: it OPENS WARDEN on that agent. The app
+  // is raised first and the panel genies away behind it, so the window is already
+  // arriving while the island funnels back into the tray. Closing first would race the
+  // window it is about to raise. Only roots reach here (see HudPanel).
   const onPick = useCallback(
     (agent: RadarAgent) => {
       invoke('hud_focus_agent', { agentId: agent.id }).catch(() => {});
@@ -122,7 +124,7 @@ export function HudRoot() {
       }}
     >
       <HudPanel
-        agents={agents}
+        nodes={nodes}
         phase={phase}
         neck={neck}
         windowW={windowW}

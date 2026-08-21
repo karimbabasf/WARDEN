@@ -5,6 +5,12 @@
 // to comes from HERE, so the spring in `HudPanel` and the genie in `hudGenie` are
 // both fed by one source of truth and can never disagree about where an edge is.
 //
+// The panel grows in BOTH directions and for two different reasons. Width and row
+// count follow how many sessions are running. Row HEIGHT follows how much work is
+// running inside them: a row carrying a session with six subagents is taller than a
+// row of bare sessions, because those moons need somewhere to sit. That is why a row
+// height is a number per row here and not one constant.
+//
 // Pure module: no React, no Three, no DOM. Unit-tested in hudLayout.test.ts.
 
 /** One agent cell: the globe, a two-line identity, and the status word, in CSS px.
@@ -23,6 +29,28 @@ export const HUD_MAX_COLS = 5;
 export const HUD_MAX_ROWS = 3;
 export const HUD_MAX_VISIBLE = HUD_MAX_COLS * HUD_MAX_ROWS;
 
+/** ── subagents ─────────────────────────────────────────────────────────────
+ *  A root's live subagents hang under its cell as a short strip of moons. They are
+ *  drawn, never offered: a subagent has no window to raise, so it gets no cell, no
+ *  hover and no click (see HudPanel). The strip is what makes the panel's height
+ *  dynamic. */
+/** Moons per line, and the line's height in px. Four and not five: at a 16px pitch
+ *  five of them fill an 88px cell edge to edge, and two neighbouring strips ran
+ *  together into one long row that read as a single session's work. */
+export const HUD_KIDS_PER_LINE = 4;
+export const HUD_KID_LINE_H = 18;
+/** Hard ceiling on lines, so one busy session cannot make the panel a column. */
+export const HUD_MAX_KID_LINES = 2;
+/** Horizontal spacing between moons on a line. */
+export const HUD_KID_PITCH = 16;
+/** Air under the last line of moons. Without it a strip sits an equal distance from
+ *  its own caption and from the NEXT row's globe, and stops reading as belonging to
+ *  either. The gap is what makes the grouping obvious. */
+export const HUD_KID_TAIL = 8;
+/** A moon's body radius in CSS px. Deliberately about a third of a root's, the same
+ *  ratio the war room's layout gives a subagent. */
+export const HUD_KID_RADIUS = 5.5;
+
 /** Idle shape: no agents means the island stays a pill, exactly like a resting one. */
 export const HUD_PILL_W = 196;
 export const HUD_PILL_H = 38;
@@ -35,6 +63,21 @@ export const HUD_MIN_W = 168;
  *  caption. Negative is up, matching the DOM's y axis. */
 export const HUD_GLOBE_OFFSET_Y = -18;
 
+/** Body radius in CSS px, read off context occupancy exactly as the radar does:
+ *  context is the SIZE channel on both screens. */
+export function hudGlobeRadius(fillPct: number): number {
+  const f = Number.isFinite(fillPct) ? Math.max(0, Math.min(1, fillPct)) : 0;
+  return 15 + f * 5;
+}
+
+/** Lines of moons one root needs. Zero kids means zero lines, so a fleet with no
+ *  subagents lays out exactly as it did before subagents were drawn at all. */
+export function hudKidLines(kidCount: number): number {
+  const n = Math.max(0, Math.floor(kidCount));
+  if (n === 0) return 0;
+  return Math.min(HUD_MAX_KID_LINES, Math.ceil(n / HUD_KIDS_PER_LINE));
+}
+
 export type HudGrid = {
   /** Columns in the globe grid; 0 when the panel is a pill. */
   cols: number;
@@ -45,6 +88,11 @@ export type HudGrid = {
   overflow: number;
   width: number;
   height: number;
+  /** Height of each grid row: the base cell, plus room for the tallest moon strip in
+   *  that row. One entry per row, so a quiet row stays short next to a busy one. */
+  rowHeights: number[];
+  /** Top edge of each row, in panel-local px. Cumulative over `rowHeights`. */
+  rowTops: number[];
 };
 
 /**
@@ -60,38 +108,112 @@ export function hudGridShape(n: number): { cols: number; rows: number } {
 }
 
 /**
- * The panel's target size for a fleet of `agentCount` root agents. An empty fleet
- * collapses to the pill; anything else is header + grid + optional overflow strip.
+ * The panel's target size for a fleet, given each root's live subagent count in
+ * board order. An empty fleet collapses to the pill; anything else is header + grid
+ * + optional overflow strip, where the grid's height is the sum of its rows.
+ *
+ * The argument is the KID COUNTS and not a total, because height cannot be derived
+ * from a count: five bare sessions and five sessions running four subagents each are
+ * the same number and two very different panels.
  */
-export function hudLayout(agentCount: number): HudGrid {
-  const total = Math.max(0, Math.floor(agentCount));
+export function hudLayout(kidCounts: number[]): HudGrid {
+  const total = kidCounts.length;
   if (total === 0) {
-    return { cols: 0, rows: 0, visible: 0, overflow: 0, width: HUD_PILL_W, height: HUD_PILL_H };
+    return {
+      cols: 0,
+      rows: 0,
+      visible: 0,
+      overflow: 0,
+      width: HUD_PILL_W,
+      height: HUD_PILL_H,
+      rowHeights: [],
+      rowTops: [],
+    };
   }
   const visible = Math.min(total, HUD_MAX_VISIBLE);
   const overflow = total - visible;
   const { cols, rows } = hudGridShape(visible);
   const width = Math.max(HUD_MIN_W, HUD_PAD * 2 + cols * HUD_CELL_W);
-  const height =
-    HUD_PAD * 2 + HUD_HEADER_H + rows * HUD_CELL_H + (overflow > 0 ? HUD_OVERFLOW_H : 0);
-  return { cols, rows, visible, overflow, width, height };
+
+  // A row is as tall as its most crowded cell: moons hang below the caption, so one
+  // busy session pushes its whole row down and leaves the rows above it alone.
+  const rowHeights: number[] = [];
+  const rowTops: number[] = [];
+  let y = HUD_PAD + HUD_HEADER_H;
+  for (let r = 0; r < rows; r++) {
+    let lines = 0;
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (i >= visible) break;
+      lines = Math.max(lines, hudKidLines(kidCounts[i]));
+    }
+    const h = HUD_CELL_H + (lines > 0 ? lines * HUD_KID_LINE_H + HUD_KID_TAIL : 0);
+    rowTops.push(y);
+    rowHeights.push(h);
+    y += h;
+  }
+  const height = y + (overflow > 0 ? HUD_OVERFLOW_H : 0) + HUD_PAD;
+  return { cols, rows, visible, overflow, width, height, rowHeights, rowTops };
 }
 
-/** Centre of cell `i` inside the panel's content box, in panel-local CSS px. */
+/** The tallest and widest panel `hudLayout` can ever ask for. The HUD's canvas is cut
+ *  once at this size (resizing a WebGL drawing buffer every frame of a spring would
+ *  reallocate it every frame), and the native window has to be bigger than it. */
+export const HUD_MAX_W = HUD_PAD * 2 + HUD_MAX_COLS * HUD_CELL_W;
+export const HUD_MAX_H =
+  HUD_PAD * 2 +
+  HUD_HEADER_H +
+  HUD_MAX_ROWS * (HUD_CELL_H + HUD_MAX_KID_LINES * HUD_KID_LINE_H + HUD_KID_TAIL) +
+  HUD_OVERFLOW_H;
+
+/** Which row cell `i` is on. */
+function rowOf(i: number, grid: HudGrid): number {
+  return grid.cols === 0 ? 0 : Math.floor(i / grid.cols);
+}
+
+/** Centre of cell `i` inside the panel's content box, in panel-local CSS px. The cell
+ *  is its BASE height only: a taller row hangs its extra space below, which is where
+ *  the moons go, so a busy session's globe and caption do not drift off the grid. */
 export function hudCellCentre(i: number, grid: HudGrid): { x: number; y: number } {
   if (grid.cols === 0) return { x: grid.width / 2, y: grid.height / 2 };
+  const row = rowOf(i, grid);
   const col = i % grid.cols;
-  const row = Math.floor(i / grid.cols);
   // The grid is centred in the panel: a short last row sits under the middle of the
   // rows above it rather than jamming left, which is what stops a 7-agent board
   // reading as a mistake.
   const inThisRow = Math.min(grid.cols, grid.visible - row * grid.cols);
   const rowW = inThisRow * HUD_CELL_W;
   const left = (grid.width - rowW) / 2;
-  const colInRow = col;
   return {
-    x: left + colInRow * HUD_CELL_W + HUD_CELL_W / 2,
-    y: HUD_PAD + HUD_HEADER_H + row * HUD_CELL_H + HUD_CELL_H / 2,
+    x: left + col * HUD_CELL_W + HUD_CELL_W / 2,
+    y: (grid.rowTops[row] ?? HUD_PAD + HUD_HEADER_H) + HUD_CELL_H / 2,
+  };
+}
+
+/**
+ * Centre of one moon under cell `i`, in panel-local CSS px.
+ *
+ * Lines fill from the top and each line is centred on the cell, so a strip of three
+ * sits under the middle of its session rather than hugging one edge. `kidCount` is
+ * how many moons are DRAWN (the cap is applied before this), because the last line
+ * has to know how wide it is to centre itself.
+ */
+export function hudKidCentre(
+  i: number,
+  kidIndex: number,
+  kidCount: number,
+  grid: HudGrid,
+): { x: number; y: number } {
+  const cell = hudCellCentre(i, grid);
+  const perLine = HUD_KIDS_PER_LINE;
+  const line = Math.floor(kidIndex / perLine);
+  const col = kidIndex % perLine;
+  const inThisLine = Math.min(perLine, kidCount - line * perLine);
+  const lineW = inThisLine * HUD_KID_PITCH;
+  const cellTop = cell.y - HUD_CELL_H / 2;
+  return {
+    x: cell.x - lineW / 2 + col * HUD_KID_PITCH + HUD_KID_PITCH / 2,
+    y: cellTop + HUD_CELL_H + line * HUD_KID_LINE_H + HUD_KID_LINE_H / 2,
   };
 }
 

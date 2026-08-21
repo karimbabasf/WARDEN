@@ -39,14 +39,44 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 /// window at its own size rather than force-maximizing.
 /// Idempotent — safe to call when already visible.
 fn summon_overlay(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.show();
-        let _ = w.set_focus();
+    if raise_overlay(app) {
         let _ = app.emit(
             "warden_hotkey",
             serde_json::json!({"hotkey":"cmd+option+control+m"}),
         );
     }
+}
+
+/// Put the overlay in front of the user, wherever it was: hidden, minimized, or just
+/// buried. Returns false only when there is no overlay window at all.
+///
+/// The ONE definition of "open WARDEN", because there are two callers (the hotkey/tray
+/// summon, and picking a globe in the menu-bar HUD) and they were drifting: showing a
+/// window is not the same act as bringing the app forward, and only one of the two used
+/// to do both. On macOS `set_focus` makes the window key INSIDE WARDEN and then tries
+/// to activate the app with an API Apple deprecated in 14, so a raise from the HUD left
+/// the window key behind a frontmost terminal and looked like nothing had happened.
+/// `platform::activate_self` is the half that actually moves the app.
+///
+/// Order matters. The window is shown first (activating an app with nothing to show
+/// raises an empty Dock icon), the app is activated second, and the window is re-keyed
+/// last, on the main thread, because a window keyed while its app was in the background
+/// does not reliably stay key once the app comes forward.
+pub(crate) fn raise_overlay(app: &tauri::AppHandle) -> bool {
+    let Some(w) = app.get_webview_window("overlay") else {
+        return false;
+    };
+    let _ = w.unminimize();
+    let _ = w.show();
+    let _ = w.set_focus();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        platform::activate_self();
+        if let Some(w) = handle.get_webview_window("overlay") {
+            let _ = w.set_focus();
+        }
+    });
+    true
 }
 
 /// Hide the overlay window. The daemon keeps running and the window is

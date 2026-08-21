@@ -17,35 +17,55 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { normalizeRadarState, type RadarStatus } from '@/viz/shared/types/radarTypes';
 import { HudPanel, type HudPhase } from '@/viz/views/hud/HudPanel';
-import { hudAgents } from '@/viz/views/hud/hudSort';
+import { hudTree } from '@/viz/views/hud/hudSort';
 import '@/hud.css';
 
 const HARNESSES = ['claude_code', 'codex', 'claude_code', 'codex', 'unknown'];
 const STATUSES: RadarStatus[] = ['working', 'awaiting', 'idle', 'working', 'idle'];
 const FOLDERS = ['WARDEN', 'pakkr', 'switchboard', 'phosphor-lp', 'doxa', 'frontier', 'the-board'];
 
-/** A deterministic fleet of `n` roots, shaped exactly like a real `radar_state`. */
-function mockFleet(n: number) {
+/** A deterministic fleet of `n` roots, shaped exactly like a real `radar_state`.
+ *
+ *  `kidSpread` is how many subagents the busiest root gets; the rest fan out under it
+ *  so one board carries a bare session, a lightly-loaded one and a crowded one at
+ *  once. That mix is the point: the panel's HEIGHT is what has to be judged here, and
+ *  a fleet where every row is equally busy would never show a row growing. */
+function mockFleet(n: number, kidSpread: number) {
+  const roots = Array.from({ length: n }, (_, i) => ({
+    id: `agent-${i}`,
+    harness: HARNESSES[i % HARNESSES.length],
+    depth: 0,
+    parentId: null,
+    label: `task ${i}`,
+    cwd: FOLDERS[i % FOLDERS.length],
+    model: i % 2 ? 'claude-opus-5' : 'gpt-5',
+    status: STATUSES[i % STATUSES.length],
+    awaitingReason: 'question',
+    contextTokens: 40_000 + i * 9_000,
+    maxTokens: 200_000,
+    fillPct: Math.min(1, 0.1 + (i % 7) * 0.15),
+    childCount: 0,
+    startedAt: `2026-08-20T09:${String(10 + i).padStart(2, '0')}:00Z`,
+    composition: { exact: { cacheRead: 1, fresh: 1, cacheWrite: 0, output: 1 }, estimated: null },
+    recentActivity: [],
+  }));
+  const kids = roots.flatMap((root, i) => {
+    const count = kidSpread === 0 ? 0 : (i * 3) % (kidSpread + 1);
+    return Array.from({ length: count }, (_, k) => ({
+      ...root,
+      id: `${root.id}-sub-${k}`,
+      // Every other strip is hung off a SUBAGENT rather than the root, so the
+      // ancestry walk in `hudTree` is exercised and not just the depth-1 case.
+      depth: k % 2 && k > 0 ? 2 : 1,
+      parentId: k % 2 && k > 0 ? `${root.id}-sub-${k - 1}` : root.id,
+      label: `sub ${k}`,
+      status: STATUSES[(i + k) % STATUSES.length],
+      childCount: 0,
+    }));
+  });
   return normalizeRadarState({
     generatedAt: '2026-08-20T12:00:00Z',
-    agents: Array.from({ length: n }, (_, i) => ({
-      id: `agent-${i}`,
-      harness: HARNESSES[i % HARNESSES.length],
-      depth: 0,
-      parentId: null,
-      label: `task ${i}`,
-      cwd: FOLDERS[i % FOLDERS.length],
-      model: i % 2 ? 'claude-opus-5' : 'gpt-5',
-      status: STATUSES[i % STATUSES.length],
-      awaitingReason: 'question',
-      contextTokens: 40_000 + i * 9_000,
-      maxTokens: 200_000,
-      fillPct: Math.min(1, 0.1 + (i % 7) * 0.15),
-      childCount: i % 3,
-      startedAt: `2026-08-20T09:${String(10 + i).padStart(2, '0')}:00Z`,
-      composition: { exact: { cacheRead: 1, fresh: 1, cacheWrite: 0, output: 1 }, estimated: null },
-      recentActivity: [],
-    })),
+    agents: [...roots, ...kids],
   });
 }
 
@@ -60,15 +80,16 @@ function query(key: string, fallback: number): number {
 
 function HudLab() {
   const [count, setCount] = useState(() => query('n', 7));
+  const [kids, setKids] = useState(() => query('kids', 6));
   const [phase, setPhase] = useState<HudPhase>('closed');
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const agents = useMemo(() => hudAgents(mockFleet(count)), [count]);
+  const nodes = useMemo(() => hudTree(mockFleet(count, kids)), [count, kids]);
 
-  // The REAL window, faithfully: 560x470 (tauri.conf.json), placed centred under the
+  // The REAL window, faithfully: 600x540 (tauri.conf.json), placed centred under the
   // icon and clamped to the screen. Faking it with the full browser width would put the
   // neck somewhere production never puts it, and the neck is what the genie aims at.
-  const WIN_W = 560;
-  const WIN_H = 470;
+  const WIN_W = 600;
+  const WIN_H = 540;
   const MENUBAR_H = 24;
   const iconCentre = Math.max(120, window.innerWidth - 168);
   const winX = Math.min(Math.max(iconCentre - WIN_W / 2, 0), window.innerWidth - WIN_W);
@@ -112,6 +133,17 @@ function HudLab() {
           />
           <b>{count}</b>
         </label>
+        <label>
+          subagents
+          <input
+            type="range"
+            min={0}
+            max={12}
+            value={kids}
+            onChange={(e) => setKids(Number(e.currentTarget.value))}
+          />
+          <b>{kids}</b>
+        </label>
         <div className="lab-buttons">
           <button type="button" onClick={open}>open</button>
           <button type="button" onClick={() => setPhase('closing')}>genie</button>
@@ -126,7 +158,7 @@ function HudLab() {
       >
         <div className="wd-hud-root">
           <HudPanel
-            agents={agents}
+            nodes={nodes}
             phase={phase}
             neck={{ centreX: iconCentre - winX, width: 22 }}
             windowW={WIN_W}

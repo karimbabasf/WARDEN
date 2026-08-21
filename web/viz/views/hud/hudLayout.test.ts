@@ -6,11 +6,22 @@ import {
   HUD_PAD,
   HUD_PILL_H,
   HUD_PILL_W,
+  HUD_KID_LINE_H,
+  HUD_KID_TAIL,
+  HUD_MAX_H,
+  HUD_MAX_KID_LINES,
+  HUD_MAX_W,
   hudCellCentre,
   hudGridShape,
+  hudKidCentre,
+  hudKidLines,
   hudLayout,
   hudPanelLeft,
 } from './hudLayout';
+
+/** A fleet of `n` roots, none of them running subagents: the shape every case below
+ *  was written against, before height started following the moons too. */
+const bare = (n: number) => new Array(n).fill(0);
 
 describe('hudGridShape', () => {
   it('keeps a small fleet on one row', () => {
@@ -43,41 +54,41 @@ describe('hudGridShape', () => {
 
 describe('hudLayout', () => {
   it('stays a pill with nothing running', () => {
-    const l = hudLayout(0);
+    const l = hudLayout(bare(0));
     expect(l).toMatchObject({ cols: 0, rows: 0, visible: 0, overflow: 0 });
     expect(l.width).toBe(HUD_PILL_W);
     expect(l.height).toBe(HUD_PILL_H);
   });
 
   it('grows with the fleet', () => {
-    const one = hudLayout(1);
-    const four = hudLayout(4);
-    const twelve = hudLayout(12);
+    const one = hudLayout(bare(1));
+    const four = hudLayout(bare(4));
+    const twelve = hudLayout(bare(12));
     expect(four.width).toBeGreaterThan(one.width);
     expect(twelve.height).toBeGreaterThan(four.height);
   });
 
   it('sizes width from the columns it actually draws', () => {
-    const l = hudLayout(4);
+    const l = hudLayout(bare(4));
     expect(l.width).toBe(HUD_PAD * 2 + 4 * HUD_CELL_W);
   });
 
   it('caps the grid and reports the remainder instead of hiding it', () => {
-    const l = hudLayout(23);
+    const l = hudLayout(bare(23));
     expect(l.visible).toBe(HUD_MAX_VISIBLE);
     expect(l.overflow).toBe(8);
     // the overflow strip costs real height, so it is in the number the panel springs to
-    expect(l.height).toBeGreaterThan(hudLayout(HUD_MAX_VISIBLE).height);
+    expect(l.height).toBeGreaterThan(hudLayout(bare(HUD_MAX_VISIBLE)).height);
   });
 
   it('never returns a width below the header minimum', () => {
-    expect(hudLayout(1).width).toBeGreaterThanOrEqual(168);
+    expect(hudLayout(bare(1)).width).toBeGreaterThanOrEqual(168);
   });
 });
 
 describe('hudCellCentre', () => {
   it('centres a full row across the panel', () => {
-    const grid = hudLayout(4);
+    const grid = hudLayout(bare(4));
     const first = hudCellCentre(0, grid);
     const last = hudCellCentre(3, grid);
     expect(first.x + last.x).toBeCloseTo(grid.width, 5);
@@ -85,7 +96,7 @@ describe('hudCellCentre', () => {
   });
 
   it('centres a SHORT last row under the rows above it', () => {
-    const grid = hudLayout(7); // 4x2, last row holds 3
+    const grid = hudLayout(bare(7)); // 4x2, last row holds 3
     const rowTwoFirst = hudCellCentre(4, grid);
     const rowTwoLast = hudCellCentre(6, grid);
     expect(rowTwoFirst.x + rowTwoLast.x).toBeCloseTo(grid.width, 5);
@@ -93,8 +104,67 @@ describe('hudCellCentre', () => {
   });
 
   it('steps down by exactly one cell height per row', () => {
-    const grid = hudLayout(8);
+    const grid = hudLayout(bare(8));
     expect(hudCellCentre(4, grid).y - hudCellCentre(0, grid).y).toBe(HUD_CELL_H);
+  });
+});
+
+describe('subagent strips drive the height', () => {
+  it('costs nothing when nothing is running inside a session', () => {
+    expect(hudKidLines(0)).toBe(0);
+    expect(hudLayout([0, 0, 0]).height).toBe(hudLayout(bare(3)).height);
+  });
+
+  it('grows the row that carries the moons, and only that row', () => {
+    // 8 roots is 4x2. Loading a subagent onto row TWO must not move row one's cells.
+    const quiet = hudLayout(bare(8));
+    const busy = hudLayout([0, 0, 0, 0, 6, 0, 0, 0]);
+    expect(busy.height).toBeGreaterThan(quiet.height);
+    expect(busy.rowHeights[0]).toBe(HUD_CELL_H);
+    expect(busy.rowHeights[1]).toBe(HUD_CELL_H + 2 * HUD_KID_LINE_H + HUD_KID_TAIL);
+    expect(hudCellCentre(0, busy)).toEqual(hudCellCentre(0, quiet));
+  });
+
+  it('is as tall as the busiest cell in the row, not the sum of them', () => {
+    const one = hudLayout([6, 0, 0, 0]);
+    const four = hudLayout([6, 6, 6, 6]);
+    expect(four.height).toBe(one.height);
+  });
+
+  it('caps the lines so one crowded session cannot make the panel a column', () => {
+    expect(hudKidLines(3)).toBe(1);
+    expect(hudKidLines(6)).toBe(2);
+    expect(hudKidLines(40)).toBe(HUD_MAX_KID_LINES);
+  });
+
+  it('never lets a panel exceed the canvas it is drawn on', () => {
+    const worst = hudLayout(new Array(HUD_MAX_VISIBLE).fill(99));
+    expect(worst.height).toBeLessThanOrEqual(HUD_MAX_H);
+    expect(worst.width).toBeLessThanOrEqual(HUD_MAX_W);
+  });
+});
+
+describe('hudKidCentre', () => {
+  it('hangs the moons BELOW their session, never over its caption', () => {
+    const grid = hudLayout([3]);
+    const cell = hudCellCentre(0, grid);
+    const moon = hudKidCentre(0, 0, 3, grid);
+    expect(moon.y).toBeGreaterThan(cell.y + HUD_CELL_H / 2 - 1);
+  });
+
+  it('centres a short line under the cell rather than jamming it left', () => {
+    const grid = hudLayout([3]);
+    const cell = hudCellCentre(0, grid);
+    const first = hudKidCentre(0, 0, 3, grid);
+    const last = hudKidCentre(0, 2, 3, grid);
+    expect((first.x + last.x) / 2).toBeCloseTo(cell.x, 5);
+  });
+
+  it('wraps onto a second line and drops it one line height', () => {
+    const grid = hudLayout([7]);
+    const sixth = hudKidCentre(0, 5, 7, grid);
+    const first = hudKidCentre(0, 0, 7, grid);
+    expect(sixth.y - first.y).toBe(HUD_KID_LINE_H);
   });
 });
 

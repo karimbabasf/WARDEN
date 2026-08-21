@@ -1,150 +1,122 @@
-// HudGlobe.tsx: one agent, as the same body the war room draws, at 40px.
+// HudGlobe.tsx: the war room's globe, at 40px, and the light it needs to look it.
 //
-// Deliberately the SAME family as the constellation: an additive line lattice with the
-// harness's own gyro cradle and brand heart at its centre (`AgentCore`, shared). A HUD
-// that invented a second visual language for the same object would make the two screens
-// read as two products.
+// There is no HUD globe any more. `RadarGlobeBody` is the one definition of an agent's
+// body and both screens mount it; what is left here is the two things that are
+// genuinely local to a menu-bar panel.
 //
-// The three signals are the constellation's three, unchanged, because they are the ones
-// that are honest here too:
-//   SIZE       context occupancy: a near-full agent is a bigger body
-//   BRIGHTNESS liveness: working blazes, idle sits dim
-//   ALERT      awaiting strobes crimson on `radarAlert`'s beat, so the HUD and the war
-//              room flash together rather than looking like two alarms disagreeing.
+// 1. SCALE. The HUD's camera is ORTHOGRAPHIC and its units are CSS pixels, so a globe
+//    is scaled to a pixel radius rather than a world one, and the lattice node dots
+//    have to be handed a pixel size (three.js skips point-size attenuation entirely
+//    under an ortho camera, so `size` stops meaning world units there).
+//
+// 2. LIGHT. The gem at a globe's heart is a `meshPhysicalMaterial` with transmission:
+//    it is lit, not emissive-only, so without a lamp and an environment probe it
+//    renders as a dark bead and the globe reads as a wire cage with a hole in it.
+//    `HudSceneRig` is the war room's lighting, restated at the same values. It is
+//    NOT a second look: the same numbers are what make the two screens match.
+//
+// Bloom is here for the same reason the lights are. A globe's core is emissive well
+// past 1.0 and it is the BLOOM that turns that overflow into the white-hot blaze; the
+// same globe drawn without it reads as a grey bead in a wire cage, which is exactly
+// how the HUD used to differ from the war room. The pass is kept narrow (no vignette,
+// which would darken a floating panel's corners, and a smaller mip radius, because the
+// panel is 380px wide and not a room).
 
-import { useEffect, useMemo, useRef } from 'react';
-import { useFrame } from '@react-three/fiber';
-import * as THREE from 'three';
-import { AgentCore } from '@/viz/shared/scene/AgentCore';
-import { radarHarness } from '@/viz/modules/radar/radarTheme';
-import { ALERT_HEX, alertBlink, alertWhiteMix } from '@/viz/modules/radar/radarAlert';
+import { EffectComposer, Bloom } from '@react-three/postprocessing';
+import { Environment, Lightformer } from '@react-three/drei';
+import { RadarGlobeBody } from '@/viz/modules/radar/RadarGlobeBody';
 import type { RadarStatus } from '@/viz/shared/types/radarTypes';
-import { hudGlowTexture } from './hudGlow';
 
-const WHITE = new THREE.Color('#ffffff');
-const ALERT = new THREE.Color(ALERT_HEX);
+/**
+ * Node-dot size for the HUD, in DEVICE PIXELS (see the note above about ortho
+ * cameras). Tuned against the war room's apparent dot size at its default framing:
+ * big enough to read as a lattice vertex, small enough not to become a bead.
+ */
+const HUD_NODE_PX = 2.4;
+/** A moon's lattice is denser relative to its size, so its dots go down with it. */
+const HUD_KID_NODE_PX = 1.6;
 
-/** Body radius in CSS px, read off context occupancy exactly as the radar does. */
-export function hudGlobeRadius(fillPct: number): number {
-  const f = Number.isFinite(fillPct) ? Math.max(0, Math.min(1, fillPct)) : 0;
-  return 15 + f * 5;
+/**
+ * The war room's lights and environment probe, restated for the HUD's canvas.
+ *
+ * Mount this ONCE per canvas, not once per globe: `Environment` builds a cube render
+ * target, and one per globe would build fifteen of them.
+ */
+export function HudSceneRig() {
+  return (
+    <>
+      {/* Lights sculpt only the crystal gem hearts (the cages/nodes are unlit
+          emissive); the Environment probe gives each facet its glint. */}
+      <ambientLight intensity={0.085} />
+      <directionalLight position={[5, 6, 4]} intensity={2.1} color="#fff3e9" />
+      <directionalLight position={[-6, -1, -2]} intensity={0.65} color="#bfe2ff" />
+      <Environment resolution={64}>
+        {/* one shared probe: Claude-tangerine, Codex-cyan, plus warm formers so every
+            gem glints in its own hue without the void changing. */}
+        <Lightformer form="rect" intensity={1.7} color="#ffcaa0" position={[-5, 3, -3]} scale={[7, 7, 1]} />
+        <Lightformer form="rect" intensity={1.4} color="#bfeaff" position={[5, 1, -4]} scale={[6, 6, 1]} />
+        <Lightformer form="rect" intensity={1.0} color="#ffd9b8" position={[0, -3, -4]} scale={[6, 4, 1]} />
+        <Lightformer form="ring" intensity={1.1} color="#ffffff" position={[2, 4, 2]} scale={[2, 2, 1]} />
+      </Environment>
+    </>
+  );
 }
 
-/** The eased liveness target: how hot this body burns. */
-export function hudLiveness(status: RadarStatus): number {
-  if (status === 'working') return 1;
-  if (status === 'awaiting') return 0.55;
-  return 0.16;
+/**
+ * The war room's bloom, at panel scale.
+ *
+ * Mounted as its own component and LAST in the canvas, because a composer renders the
+ * whole scene: everything that should bloom has to already be in the tree.
+ *
+ * `EffectComposer` owns the canvas once mounted, and this canvas has to stay
+ * transparent (the panel's own material and backdrop blur are behind it). That is
+ * what `renderPriority` and the composer's alpha-preserving default buffer give us;
+ * if the panel ever paints as a black rectangle, this pass is the first suspect.
+ */
+export function HudBloom() {
+  return (
+    <EffectComposer multisampling={4} renderPriority={1}>
+      <Bloom intensity={1.3} luminanceThreshold={0.22} luminanceSmoothing={0.9} mipmapBlur radius={0.6} />
+    </EffectComposer>
+  );
 }
 
+/**
+ * One agent's body, sized for the HUD.
+ *
+ * The caller positions it (see `HudGlobeSlot` in HudPanel); this only sets the pixel
+ * radius and hands the shared body the two numbers that do not survive the change of
+ * camera.
+ */
 export function HudGlobe({
+  id,
   harness,
   status,
-  fillPct,
-  hovered,
-  reduced,
+  radius,
+  isRoot,
+  hovered = false,
+  reduced = false,
 }: {
+  id: string;
   harness: string;
   status: RadarStatus;
-  fillPct: number;
-  hovered: boolean;
-  reduced: boolean;
+  /** Body radius in CSS px (see `hudGlobeRadius` / `HUD_KID_RADIUS`). */
+  radius: number;
+  isRoot: boolean;
+  hovered?: boolean;
+  reduced?: boolean;
 }) {
-  const body = useRef<THREE.Group>(null!);
-  const outerMat = useRef<THREE.LineBasicMaterial>(null!);
-  const innerMat = useRef<THREE.LineBasicMaterial>(null!);
-  const haloMat = useRef<THREE.SpriteMaterial>(null!);
-  const halo = useRef<THREE.Sprite>(null!);
-
-  const base = useMemo(() => new THREE.Color(radarHarness(harness).color), [harness]);
-  const outerGeo = useMemo(() => new THREE.WireframeGeometry(new THREE.IcosahedronGeometry(1, 1)), []);
-  const innerGeo = useMemo(() => new THREE.WireframeGeometry(new THREE.IcosahedronGeometry(0.55, 0)), []);
-  const glow = useMemo(() => hudGlowTexture(), []);
-  useEffect(() => () => { outerGeo.dispose(); innerGeo.dispose(); }, [outerGeo, innerGeo]);
-
-  // Live colour, recomputed per frame only when awaiting (the strobe is the one signal
-  // that changes between frames); everything else damps toward a fixed target.
-  const tint = useMemo(() => base.clone(), [base]);
-  const sim = useRef({ live: hudLiveness(status), lift: 0 });
-
-  useFrame((state, dtRaw) => {
-    const dt = Math.min(dtRaw, 0.05);
-    const t = state.clock.elapsedTime;
-    const s = sim.current;
-    const k = 1 - Math.exp(-6 * dt);
-    s.live = THREE.MathUtils.lerp(s.live, hudLiveness(status), k);
-    s.lift = THREE.MathUtils.lerp(s.lift, hovered ? 1 : 0, k);
-
-    if (!reduced) {
-      body.current.rotation.y += dt * (status === 'working' ? 0.42 : 0.16);
-      body.current.rotation.x += dt * 0.06;
-    }
-
-    const alerting = status === 'awaiting';
-    const blink = alerting ? alertBlink(t, reduced) : 0;
-    tint.copy(alerting ? ALERT : base).lerp(WHITE, alerting ? alertWhiteMix(blink) : s.live * 0.4);
-
-    // Working bodies breathe; the alert overrides that beat with its own.
-    const breath = status === 'working' && !reduced ? 1 + Math.sin(t * 2.2) * 0.05 : 1;
-    const heat = (alerting ? 0.4 + blink * 0.85 : 0.34 + s.live * 0.72) * (1 + s.lift * 0.3);
-
-    outerMat.current.color.copy(tint);
-    innerMat.current.color.copy(tint);
-    outerMat.current.opacity = Math.min(1, 0.5 * heat + 0.16);
-    innerMat.current.opacity = Math.min(1, 0.34 * heat + 0.08);
-    haloMat.current.color.copy(tint);
-    haloMat.current.opacity = Math.min(1, 0.2 + heat * 0.5);
-    halo.current.scale.setScalar(4.4 * breath * (1 + s.lift * 0.08));
-    body.current.scale.setScalar(breath * (1 + s.lift * 0.08));
-  });
-
-  const radius = hudGlobeRadius(fillPct);
-
   return (
     <group scale={radius}>
-      <sprite ref={halo} scale={4.4} renderOrder={-1}>
-        <spriteMaterial
-          ref={haloMat}
-          map={glow}
-          color={base}
-          transparent
-          opacity={0.4}
-          depthWrite={false}
-          blending={THREE.AdditiveBlending}
-          toneMapped={false}
-        />
-      </sprite>
-      <group ref={body}>
-        <lineSegments geometry={outerGeo}>
-          <lineBasicMaterial
-            ref={outerMat}
-            color={base}
-            transparent
-            opacity={0.6}
-            depthWrite={false}
-            blending={THREE.AdditiveBlending}
-            toneMapped={false}
-          />
-        </lineSegments>
-        <lineSegments geometry={innerGeo}>
-          <lineBasicMaterial
-            ref={innerMat}
-            color={base}
-            transparent
-            opacity={0.35}
-            depthWrite={false}
-            blending={THREE.AdditiveBlending}
-            toneMapped={false}
-          />
-        </lineSegments>
-        <AgentCore
-          harness={harness}
-          color={base}
-          dimmed={status === 'idle'}
-          active={hovered}
-          working={status === 'working'}
-        />
-      </group>
+      <RadarGlobeBody
+        id={id}
+        harness={harness}
+        status={status}
+        isRoot={isRoot}
+        hovered={hovered}
+        reduced={reduced}
+        nodeSize={isRoot ? HUD_NODE_PX : HUD_KID_NODE_PX}
+      />
     </group>
   );
 }

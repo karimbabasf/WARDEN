@@ -36,6 +36,16 @@ pub fn apply_activation_policy(app: &mut tauri::App) {
     imp::apply_activation_policy(app);
 }
 
+/// Bring WARDEN itself in front of every other app.
+///
+/// Distinct from focusing a window: on macOS a window can be key inside an app that
+/// is still behind the one the user is looking at, and Tauri's `set_focus` cannot
+/// fix that on its own (see the macOS adapter). Anything that means "open WARDEN"
+/// has to call this too. MUST run on the main thread.
+pub fn activate_self() {
+    imp::activate_self();
+}
+
 // ---------------------------------------------------------------------------
 // Terminal LOCATION: finding the window an agent is running in, and raising it.
 //

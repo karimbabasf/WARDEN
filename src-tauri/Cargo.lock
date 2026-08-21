@@ -6416,6 +6416,8 @@ dependencies = [
  "iroh",
  "libc",
  "notify",
+ "objc2",
+ "objc2-app-kit",
  "once_cell",
  "rand 0.10.2",
  "regex",

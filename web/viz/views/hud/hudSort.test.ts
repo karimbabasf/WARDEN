@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hudAgents, hudCellLabel, hudCellTooltip, hudSummary, hudSummaryLabel } from './hudSort';
+import { HUD_MAX_KIDS, hudAgents, hudCellLabel, hudCellTooltip, hudKidCount, hudSummary, hudSummaryLabel, hudTree } from './hudSort';
 import { normalizeRadarState } from '@/viz/shared/types/radarTypes';
 
 function agent(over: Record<string, unknown>) {
@@ -95,10 +95,82 @@ describe('hudCellLabel', () => {
   });
 });
 
+describe('hudTree', () => {
+  it('hangs live subagents under the session they belong to', () => {
+    const m = model(
+      { id: 'r1', depth: 0, status: 'working', startedAt: '1' },
+      { id: 'r2', depth: 0, status: 'working', startedAt: '2' },
+      { id: 's1', depth: 1, parentId: 'r1', status: 'working', startedAt: '3' },
+      { id: 's2', depth: 1, parentId: 'r2', status: 'idle', startedAt: '4' },
+    );
+    const t = hudTree(m);
+    expect(t.map((n) => n.agent.id)).toEqual(['r1', 'r2']);
+    expect(t[0].kids.map((k) => k.id)).toEqual(['s1']);
+    expect(t[1].kids.map((k) => k.id)).toEqual(['s2']);
+  });
+
+  it('walks a deep chain up to the ROOT, never to the nearest parent', () => {
+    // A depth-2 agent's parent is another subagent. Attaching it to that subagent
+    // would put it nowhere, since only roots get a cell.
+    const m = model(
+      { id: 'root', depth: 0, status: 'working', startedAt: '1' },
+      { id: 'mid', depth: 1, parentId: 'root', status: 'working', startedAt: '2' },
+      { id: 'deep', depth: 2, parentId: 'mid', status: 'working', startedAt: '3' },
+    );
+    expect(hudTree(m)[0].kids.map((k) => k.id)).toEqual(['mid', 'deep']);
+  });
+
+  it('drops an orphan rather than hanging it off the wrong session', () => {
+    const m = model(
+      { id: 'root', depth: 0, status: 'working', startedAt: '1' },
+      { id: 'lost', depth: 1, parentId: 'vanished', status: 'working', startedAt: '2' },
+    );
+    expect(hudTree(m)[0].kids).toEqual([]);
+  });
+
+  it('survives a parent chain that loops', () => {
+    const m = model(
+      { id: 'root', depth: 0, status: 'working', startedAt: '1' },
+      { id: 'a', depth: 1, parentId: 'b', status: 'working', startedAt: '2' },
+      { id: 'b', depth: 1, parentId: 'a', status: 'working', startedAt: '3' },
+    );
+    expect(hudTree(m)[0].kids).toEqual([]);
+  });
+
+  it('drops dead subagents, exactly as it drops dead sessions', () => {
+    const m = model(
+      { id: 'root', depth: 0, status: 'working', startedAt: '1' },
+      { id: 'done', depth: 1, parentId: 'root', status: 'closed', startedAt: '2' },
+      { id: 'live', depth: 1, parentId: 'root', status: 'working', startedAt: '3' },
+    );
+    expect(hudTree(m)[0].kids.map((k) => k.id)).toEqual(['live']);
+  });
+
+  it('orders the moons need-first, like the sessions above them', () => {
+    const m = model(
+      { id: 'root', depth: 0, status: 'working', startedAt: '1' },
+      { id: 'i', depth: 1, parentId: 'root', status: 'idle', startedAt: '2' },
+      { id: 'a', depth: 1, parentId: 'root', status: 'awaiting', startedAt: '3' },
+      { id: 'w', depth: 1, parentId: 'root', status: 'working', startedAt: '4' },
+    );
+    expect(hudTree(m)[0].kids.map((k) => k.id)).toEqual(['a', 'w', 'i']);
+  });
+
+  it('caps the strip and counts the rest instead of losing them', () => {
+    const kids = Array.from({ length: HUD_MAX_KIDS + 4 }, (_, i) => ({
+      id: `s${i}`, depth: 1, parentId: 'root', status: 'working', startedAt: `${100 + i}`,
+    }));
+    const t = hudTree(model({ id: 'root', depth: 0, status: 'working', startedAt: '1' }, ...kids));
+    expect(t[0].kids).toHaveLength(HUD_MAX_KIDS);
+    expect(t[0].hiddenKids).toBe(4);
+    expect(hudKidCount(t[0])).toBe(HUD_MAX_KIDS + 4);
+  });
+});
+
 describe('hudCellTooltip', () => {
   it('carries what the cell had to truncate', () => {
-    const a = agent({ label: 'rebuild the quote builder', cwd: 'Pakkr', repo: 'pakkr-main', model: 'claude-opus-5', status: 'working', childCount: 2 });
-    expect(hudCellTooltip(a, 'Claude')).toBe(
+    const a = agent({ label: 'rebuild the quote builder', cwd: 'Pakkr', repo: 'pakkr-main', model: 'claude-opus-5', status: 'working' });
+    expect(hudCellTooltip(a, 'Claude', 2)).toBe(
       'rebuild the quote builder · Claude · pakkr-main/Pakkr · claude-opus-5 · working · 2 subagents',
     );
   });

@@ -31,6 +31,32 @@ pub fn is_reopen_event(event: &tauri::RunEvent) -> bool {
     matches!(event, tauri::RunEvent::Reopen { .. })
 }
 
+/// Bring WARDEN itself to the front, as the ACTIVE application.
+///
+/// This is not the same act as focusing a window, and the difference is the whole
+/// reason the function exists. `WebviewWindow::set_focus` ends in tao's
+/// `makeKeyAndOrderFront` plus `activateIgnoringOtherApps:`. The first half orders the
+/// window front WITHIN WARDEN; the second half is what is supposed to put WARDEN in
+/// front of everything else, and Apple deprecated it in macOS 14 in favour of a
+/// cooperative model that a background app cannot force. On macOS 14 and later it is
+/// effectively ignored, so a window raised from the menu-bar HUD became key inside an
+/// app that was still behind the user's terminal: the panel closed and the terminal
+/// was simply revealed, which read as "it took me to the terminal instead".
+///
+/// `NSApplication.activate` is the supported replacement. Must run on the main thread
+/// (callers use `AppHandle::run_on_main_thread`); off it, `MainThreadMarker::new`
+/// returns `None` and this is a no-op rather than a crash.
+pub fn activate_self() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        tracing::warn!("activate_self called off the main thread; ignoring");
+        return;
+    };
+    NSApplication::sharedApplication(mtm).activate();
+}
+
 // ---------------------------------------------------------------------------
 // Locating a session's window.
 // ---------------------------------------------------------------------------
