@@ -62,7 +62,7 @@ Layered `ingest -> store -> radar -> commands/lib/scheduler`.
 - `ingest/` the `Adapter` trait + `AdapterRegistry` + `claude_code.rs` / `codex.rs`. Adding a harness is one adapter, zero downstream changes.
 - `radar.rs` + `radar/` the live agent forest: a façade over `model/assemble/agent/context/identity/live/status` + `awaiting` (the third globe state) + `composition/hierarchy/liveness` + `teams` (Claude agent-team rosters from `~/.claude/teams/*/config.json`, the source of real subagent names).
 - `observe.rs` + `observe/` remote read-only observation: `projection` (the redaction boundary; the ONLY producer of wire data), `grants` (token codec + single-use/expiry), `transport` (iroh QUIC, host side), `peers` (observer side). Holds no `AppHandle` and cannot name a radar type, both asserted by tests.
-- `scheduler.rs` + `scheduler/` the task drivers: `watch` (live-ingest) and `radar` (recompute + `RadarStateCache`). The recompute worker has TWO CPU guards and they do different jobs: serialization caps CONCURRENCY at one recompute, and `radar_min_interval()` (default 1s, `WARDEN_RADAR_MIN_INTERVAL_MS`) caps the RATE. Only the second one bounds a sustained stream: with the default zero debounce, an event landing while a recompute runs starts the next the instant it returns, so a live transcript tail used to pin a full core. The floor is leading-edge, so an isolated event still emits immediately.
+- `scheduler.rs` + `scheduler/` the task drivers: `watch` (live-ingest) and `radar` (recompute + `RadarStateCache`). The recompute worker has TWO CPU guards and they do different jobs: serialization caps CONCURRENCY at one recompute, and `radar_min_interval()` (default 1s, `WARDEN_RADAR_MIN_INTERVAL_MS`) caps the RATE. Only the second one bounds a sustained stream: with the default zero debounce, an event landing while a recompute runs starts the next the instant it returns, so a live transcript tail used to pin a full core. The floor is leading-edge, so an isolated event still emits immediately. URGENT signals (a globe ARRIVING or LEAVING) pay `urgent_min_interval` instead, one eighth of the floor. Both halves of a lifecycle are urgent, which they were not: only `new_sessions` used to be, so a subagent SPAWNING jumped the floor while the same subagent FINISHING waited a full second behind it. A subagent or an in-process teammate has no PID and no registry entry, so `LiveIngest::lifecycle` (a `turn_complete: Some(true)`, or a `SubagentSpawn`) is the only signal it ever finishes by. Keep `is_lifecycle_event` NARROW: the floor only caps CPU while lifecycle stays rare.
 - `terminal.rs` "take me there": resolves one agent to the terminal window it is running in (`agent id -> store session -> registry pid -> controlling tty -> the emulator tab owning that tty`), so the detail panel can raise it. A subagent has no process of its own, so the walk goes UP to its root and the answer names that root. Every hop can fail for a different real reason and the panel states which one, because a button that claims a window it cannot raise is worse than no button. READ-AND-RAISE ONLY: the AppleScript selects a tab and brings a window forward, and a test asserts the generated script contains no `do script` / `write text` / `keystroke`. That is what keeps "WARDEN writes into no other process" unconditional; do not reopen it.
 - `util.rs` env + path helpers; `platform/` the OS seam (port + `macos.rs` + `fallback.rs`).
 - `lib.rs` the Tauri builder / `setup()` (visible window on launch, tray, hotkey, startup backfill, watchers); `commands.rs` the `#[tauri::command]`s.
@@ -70,6 +70,8 @@ Layered `ingest -> store -> radar -> commands/lib/scheduler`.
 **Frontend `web/`**: an FSD-lite island; imports point DOWN only (`app -> views -> modules -> shared`, enforced by `pnpm check:arch`); the `@/` alias maps to `web/`.
 - `index.html` (the `#war-room-root` mount); `main.ts` the Tauri event router; `style.css` the instrument tokens (see Design system below).
 - `web/viz/`: `app/` (mount); `views/war-room/` (WarRoom + FleetRail + FilterBar + Breadcrumb); `modules/radar/` (the constellation, layout, detail panel, hover card, theme, peer constellation); `modules/observe/` (peers, grants UI, `observedToScene` adapter); `shared/{state,types,theme,scene,lib,ui}` (`bridge.ts` is the pure reducer in `state/`); `dev/preview/` (sandboxes).
+- `modules/radar/RadarGlobeBody.tsx` is the ONE definition of an agent's body, mounted by both the war room and the menu-bar HUD (`views/hud/`). It draws and animates a globe at UNIT scale; the caller owns where the globe is (layout + lifecycle in the constellation, a px grid in the HUD) and its overall scale. Two things do not survive the change of camera and are therefore props: the gem heart is a lit `meshPhysicalMaterial`, so a canvas mounting it needs lights and an Environment probe or it renders as a dark bead, and three.js SKIPS point-size attenuation under an ORTHOGRAPHIC camera, so `nodeSize` means world units in the war room and device pixels in the HUD.
+- `shared/scene/CameraRig.tsx` + `cameraPose.ts` the camera. `cameraPose` is the pure motion core (a pose is target + direction + distance, sprung, distance in LOG space); the rig owns the aim. See "The camera has ONE writer" below.
 - `web/fonts/` self-hosted WOFF2. The app opens no socket at rest, so a webfont CDN is not an option.
 
 ## Design system
@@ -95,7 +97,29 @@ middle, the selected target's readout on the right.
 - **Motion**: easing tokens only (`--ease-out`, `--t-micro`/`--t-base`/`--t-travel`);
   never a bare CSS keyword and never one global duration. Animate transform and
   opacity. `prefers-reduced-motion` is honoured globally in CSS and per-component in
-  the R3F scene.
+  the R3F scene. THE CAMERA IS THE EXCEPTION and it is deliberate: it springs
+  (`cameraPose.ts`), because it is the one thing here that gets re-aimed while it is
+  already moving.
+- **The camera has ONE writer.** `CameraRig` used to interpolate on a fixed
+  `easeInOutExpo` clock, aimed by five effects that each rewrote the goal and
+  restarted the clock. An expo ease has ZERO VELOCITY at t=0, so every restart was a
+  dead stop, and one click produced three of them: the selection pose, then
+  `focusBounds` a commit later asking for a different distance, then the rail insets a
+  frame after that. Measured on the rack-fold interrupt, the old speed profile went
+  78% of peak, 0%, crawl for 240ms, 0% again, then finally moved at 600ms. Three rules
+  keep that from coming back:
+  1. **Effects set an AIM, never a pose.** `resolveAim` is the only producer of a pose.
+  2. **The pose resolves PER FRAME**, against the live fit, insets and channel aspect.
+     None of those is a dependency of anything, so a rail opening mid-dive bends the
+     path instead of restarting it, and the auto-refit effect deleted itself.
+  3. **One distance law.** The select pose and the subtree fit used to disagree by
+     ~1.7 world units on a leaf, which is what "arrived, stopped, backed out again"
+     was. `resolveAim` takes the max of the cosy dive, the overflow guard and the
+     subtree fit, so both old behaviours survive at their extremes and neither can
+     contradict the other. Feeding the LIVE `camera.fov` back into that fit is a loop
+     (closer narrows the lens, a narrower lens asks to back off): use a fixed fov.
+  A dev-only `window.__wardenCam` trace (stripped from prod by `import.meta.env.DEV`)
+  makes this measurable: a good move is one speed peak with a monotone decay.
 - **Render rate has THREE states, not two** (`frameloopFor`): minimized is `never`,
   focused is `always`, and visible-but-blurred is `demand` paced by
   `BackgroundFrameTick` at `BACKGROUND_FPS` (30). Blurred is WARDEN's NORMAL state (it
