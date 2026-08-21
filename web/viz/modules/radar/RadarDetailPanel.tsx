@@ -168,28 +168,50 @@ function normalizeTarget(raw: any): TerminalTarget | null {
 function TakeMeThere({ agentId }: { agentId: string }) {
   const [target, setTarget] = useState<TerminalTarget | null>(null);
   const [failure, setFailure] = useState<{ message: string; denied: boolean } | null>(null);
+  const [probing, setProbing] = useState(false);
+  const [raising, setRaising] = useState(false);
   const tokenRef = useRef(0);
+  // Did the LAST agent have a row here? The probe is a round trip, so between two
+  // agents this control is empty for a frame or two, and everything below it in the
+  // panel (the context gauge, activity, the roster) jumped 37px each time. Holding
+  // the height while the next answer arrives is what stops that, and it is only worth
+  // holding when a row is actually likely, which is exactly what this remembers.
+  const hadRow = useRef(false);
 
   useEffect(() => {
     if (!agentId) return;
     const token = ++tokenRef.current;
     setFailure(null);
+    setRaising(false);
+    setProbing(true);
     // Cleared rather than left showing the PREVIOUS agent's window for one round
     // trip. A stale "Terminal" caption under a newly selected agent is the exact
-    // kind of small lie this panel does not tell.
+    // kind of small lie this panel does not tell. The SPACE it occupied is held (see
+    // `hadRow`); the claim it made is not.
     setTarget(null);
     invoke('agent_terminal_target', { agentId })
       .then((raw) => {
         if (tokenRef.current !== token) return;
-        setTarget(normalizeTarget(raw));
+        const next = normalizeTarget(raw);
+        hadRow.current = next !== null && (next.reachable || next.reason !== null);
+        setTarget(next);
+        setProbing(false);
       })
       .catch(() => {
         if (tokenRef.current !== token) return;
+        // No backend at all (the browser sandboxes). Render nothing, ever, and stop
+        // reserving room for something that is never coming.
+        hadRow.current = false;
         setTarget(null);
+        setProbing(false);
       });
   }, [agentId]);
 
-  if (!target) return null;
+  if (!target) {
+    return probing && hadRow.current ? (
+      <div className="wd-detail-goto wd-detail-goto-held" aria-hidden />
+    ) : null;
+  }
 
   if (!target.reachable) {
     return target.reason ? (
@@ -200,12 +222,23 @@ function TakeMeThere({ agentId }: { agentId: string }) {
   }
 
   function go() {
+    // Raising a window is an AppleScript round trip through another process, so it is
+    // not instant and it can be slow when the target is on another Space. Without a
+    // pending state the only feedback is the 160ms press scale, and a raise that takes
+    // 300ms reads as a dead button and gets clicked again. The guard is the same fact
+    // stated for the backend: two raises in flight is one wasted.
+    if (raising) return;
     const token = tokenRef.current;
     setFailure(null);
+    setRaising(true);
+    const done = () => {
+      if (tokenRef.current === token) setRaising(false);
+    };
     invoke<{ ok?: boolean; denied?: boolean; message?: string | null }>('focus_agent_terminal', {
       agentId,
     })
       .then((out) => {
+        done();
         if (tokenRef.current !== token) return;
         if (out?.ok) return;
         setFailure({
@@ -214,6 +247,7 @@ function TakeMeThere({ agentId }: { agentId: string }) {
         });
       })
       .catch((err: unknown) => {
+        done();
         if (tokenRef.current !== token) return;
         setFailure({
           message: typeof err === 'string' ? err : 'WARDEN could not raise that window',
@@ -234,6 +268,7 @@ function TakeMeThere({ agentId }: { agentId: string }) {
         className="wd-detail-goto-btn"
         onClick={go}
         data-goto="button"
+        aria-busy={raising || undefined}
         // The visible label cannot say WHERE without getting long, and the caption
         // beside it is not part of the button's accessible name.
         aria-label={
@@ -247,7 +282,14 @@ function TakeMeThere({ agentId }: { agentId: string }) {
         </span>
         Take me there
       </button>
-      <span className="wd-detail-goto-app">
+      <span
+        className="wd-detail-goto-app"
+        // The rail is ~300px and the button eats ~128 of it, so a root with a real
+        // project name overflows. It truncates rather than wrapping the row onto a
+        // second line: a caption that reflows moves everything below it in the panel,
+        // and the app name (the part that matters) is at the FRONT of the string.
+        title={via ? `${target.app} · in ${via}` : target.app ?? undefined}
+      >
         {/* "in <root>" rather than a bare name: "Terminal · warden" reads as two
             tags, and the point is that this raises somebody ELSE's window. */}
         {via ? `${target.app} · in ${via}` : target.app}

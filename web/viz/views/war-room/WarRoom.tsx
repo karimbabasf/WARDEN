@@ -196,6 +196,50 @@ export function useSettledFocus(rawFocused: boolean, settleMs = BLUR_SETTLE_MS):
   return settled;
 }
 
+/**
+ * The globe you were zoomed in on has ended. Should the camera let go of it?
+ *
+ * An agent finishing while it is selected used to leave the board in a state that
+ * matched nothing: `boardAgents` drops a terminal agent the frame it goes terminal, so
+ * the globe imploded and the camera started backing out, but `selectedId` stayed set,
+ * so the inspector rail stayed open over an agent that was gone. Five seconds later
+ * the backend dropped it from the forest, the rail closed, and the camera re-framed a
+ * SECOND time for the channel that had just widened. One ending, two moves and a
+ * five-second lie in between.
+ *
+ * Two conditions, and the second one is the interesting half:
+ *
+ * * The agent has ended, either reporting a terminal status or having left the forest.
+ * * It was ALIVE at some point while selected (`everLiveId`). Picking a finished agent
+ *   off the fleet rack is a deliberate look at a dead globe, and yanking the camera
+ *   off it the same frame would make that impossible.
+ */
+export function shouldReleaseSelection({
+  selectedId,
+  agent,
+  everLiveId,
+}: {
+  selectedId: string | null;
+  agent: RadarAgent | null;
+  /** The last selected id that was observed alive. */
+  everLiveId: string | null;
+}): boolean {
+  if (selectedId === null) return false;
+  if (everLiveId !== selectedId) return false;
+  return agent === null || agent.status === 'closed' || agent.status === 'terminated';
+}
+
+/**
+ * How long to hold a finished selection before backing out, in ms.
+ *
+ * The implode is an exponential damp at lambda 16 that stops being visible below scale
+ * 0.025, so it is over in ln(40)/16 = 230ms. Waiting it out means the operator watches
+ * the globe collapse and THEN the board comes back, rather than the camera pulling away
+ * from something still shrinking. Backing out instantly would also read as an error,
+ * which is the one thing an agent finishing normally is not.
+ */
+export const RELEASE_SELECTION_MS = 260;
+
 export function isDiscoveryHomeDoubleClickAllowed({
   selectedId,
   focusDepth,
@@ -560,6 +604,31 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
         : [],
     [selectedRadarAgent, radarModel],
   );
+
+  // Backing out of an agent that ended under the camera. See `shouldReleaseSelection`.
+  // `everLive` is a ref rather than state because it must not itself cause a render:
+  // it is a fact ABOUT the selection, observed as the feed goes past.
+  const everLive = useRef<string | null>(null);
+  const selectionEnded = useMemo(() => {
+    if (!selectedId) return false;
+    const agent = radarModel.agents.find((a) => a.id === selectedId) ?? null;
+    if (agent && agent.status !== 'closed' && agent.status !== 'terminated') {
+      everLive.current = selectedId;
+    }
+    return shouldReleaseSelection({ selectedId, agent, everLiveId: everLive.current });
+  }, [selectedId, radarModel]);
+
+  useEffect(() => {
+    if (!selectedId || !selectionEnded) return;
+    // Keyed on the BOOLEAN, never on `radarModel`. The feed re-emits about once a
+    // second and can burst faster than this hold under a structural change, so an
+    // effect that re-ran per emit would clear its own timer forever and the back-out
+    // would never happen.
+    const t = window.setTimeout(() => {
+      setSelectedId((cur) => (cur === selectedId ? null : cur));
+    }, RELEASE_SELECTION_MS);
+    return () => window.clearTimeout(t);
+  }, [selectedId, selectionEnded]);
 
   const onHover = useCallback((node: LayoutNode) => setHoveredId(node.id), []);
   const onLeave = useCallback((node: LayoutNode) => setHoveredId((cur) => (cur === node.id ? null : cur)), []);

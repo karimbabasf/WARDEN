@@ -69,6 +69,25 @@ fn radar_min_interval() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// The floor an URGENT recompute pays, derived from the append floor.
+///
+/// Urgent used to be exempt outright, and that was safe while the only urgent events
+/// were a file being created or removed: rare by construction, so no floor was needed.
+/// A COMPLETED TURN is now urgent too (`LiveIngest::lifecycle`), because it is the only
+/// signal a subagent or teammate ever finishes by, and turns are commoner than files.
+/// One eighth of the append floor, so 125ms at the 1s default:
+///
+/// * imperceptible on a globe arriving or leaving (well under one animation frame of
+///   the 260ms implode), so the latency this whole change exists to remove stays gone;
+/// * enough that a pathological fleet completing turns faster than the worker can
+///   serve them degrades to a bounded rate instead of the old unbounded exemption.
+///
+/// Derived rather than given its own env var so `WARDEN_RADAR_MIN_INTERVAL_MS=0` still
+/// means one thing: no floor anywhere.
+pub(crate) fn urgent_min_interval(min_interval: Duration) -> Duration {
+    min_interval / 8
+}
+
 fn kick_radar_after_watch_event(signal: &RadarDirtySignal) {
     signal.mark_dirty_with_live_refresh();
 }
@@ -274,13 +293,19 @@ where
             // the window. Anything that arrives during the wait folds into this same
             // recompute rather than queueing another.
             //
-            // An URGENT signal is exempt. See `mark_dirty_urgent`: those events are
-            // rare by construction, so exempting them cannot reintroduce the pinned
-            // core, and they are the ones a monitor is judged on.
+            // An URGENT signal pays a far shorter floor. See `mark_dirty_urgent`:
+            // those are the events a monitor is judged on, so they must not sit behind
+            // a throttle built for token counts. See `urgent_min_interval` for why the
+            // exemption is no longer total.
+            let floor = if urgent {
+                urgent_min_interval(min_interval)
+            } else {
+                min_interval
+            };
             if let Some(prev) = last_start {
                 let since = prev.elapsed();
-                if !urgent && since < min_interval {
-                    tokio::time::sleep(min_interval - since).await;
+                if since < floor {
+                    tokio::time::sleep(floor - since).await;
                     signal.inner.dirty.store(false, Ordering::SeqCst);
                 }
             }
@@ -767,16 +792,39 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(runs.load(Ordering::SeqCst), 2, "and then it runs");
 
-        // An URGENT follow-up inside the window does not wait.
+        // An URGENT follow-up inside the window pays only the urgent floor (400/8 =
+        // 50ms here), not the 400ms append floor.
         signal.mark_dirty_urgent();
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        tokio::time::sleep(Duration::from_millis(160)).await;
         assert_eq!(
             runs.load(Ordering::SeqCst),
             3,
-            "a globe arriving must not sit behind the append throttle"
+            "a globe arriving or leaving must not sit behind the append throttle"
         );
 
         worker.abort();
+    }
+
+    /// The urgent floor exists, and it is far enough under the append floor to be
+    /// invisible on a globe arriving or leaving.
+    ///
+    /// Urgent used to be exempt outright, which was safe while the only urgent events
+    /// were files appearing and vanishing. A COMPLETED TURN is urgent now (it is the
+    /// only signal a subagent or teammate finishes by), and turns are commoner than
+    /// files, so the exemption needed a bound. Both halves are asserted: too high and
+    /// the latency fix is undone, too low and there is no bound at all.
+    #[test]
+    fn urgent_pays_a_floor_but_a_far_shorter_one() {
+        let append = Duration::from_millis(1000); // the shipped default
+        let urgent = urgent_min_interval(append);
+        assert!(urgent < append / 4, "urgent must not inherit the append floor");
+        assert!(
+            urgent <= Duration::from_millis(150),
+            "a globe arriving must still land inside one implode ({urgent:?})"
+        );
+        assert!(!urgent.is_zero(), "an unbounded exemption is what this replaced");
+        // Disabling the floor disables it everywhere: one knob, one meaning.
+        assert!(urgent_min_interval(Duration::ZERO).is_zero());
     }
 
     #[test]

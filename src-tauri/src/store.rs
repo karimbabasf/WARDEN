@@ -442,6 +442,20 @@ impl Store {
         let mut rows = st.query_map([id], row_session)?;
         rows.next().transpose().map_err(Into::into)
     }
+    /// Does a session with this id exist? A primary-key probe, nothing more.
+    ///
+    /// Split out for the LIVE INGEST hot path, which needs exactly this and used to
+    /// get it by pulling [`Self::sessions`] and building a `HashSet` of every id on
+    /// the machine. That is a full table scan plus a `String` allocation per row, and
+    /// it ran on every FSEvent of every transcript, so the cost grew with how long
+    /// WARDEN had been watching rather than with what had just changed. It sits
+    /// directly between a subagent writing a line and its globe moving, which is the
+    /// latency the radar is judged on.
+    pub fn session_exists(&self, id: &str) -> Result<bool> {
+        let c = self.conn();
+        let mut st = c.prepare("SELECT 1 FROM sessions WHERE id=? LIMIT 1")?;
+        Ok(st.exists([id])?)
+    }
     pub fn session_events(&self, sid: &str) -> Result<Vec<(Turn, EventRecord)>> {
         let c = self.conn();
         let mut st=c.prepare("SELECT t.id,t.session_id,t.parent_id,t.role,t.idx,t.started_at,t.duration_ms,t.is_sidechain,e.id,e.ts,e.payload_json,e.raw_ref FROM events e JOIN turns t ON e.turn_id=t.id WHERE e.session_id=? ORDER BY e.ts, CAST(json_extract(e.raw_ref,'$.offset') AS INTEGER), e.id")?;

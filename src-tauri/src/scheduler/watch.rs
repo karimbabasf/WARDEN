@@ -22,7 +22,7 @@ use crate::ir::Harness;
 use crate::store::Store;
 use crate::util::hash64;
 use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -85,17 +85,58 @@ fn complete_jsonl_prefix(slice: &[u8], start_offset: u64) -> (&[u8], u64) {
 
 /// What one live-ingest pass actually did.
 ///
-/// `activity` is the number the watcher has always reported. `new_sessions` is
-/// split out because the two mean very different things to the radar: an append is
-/// a globe growing, while a NEW session is a globe arriving, and only the second
-/// one is allowed to skip the recompute rate floor (see
-/// `RadarDirtySignal::mark_dirty_urgent`).
+/// `activity` is the number the watcher has always reported. The other two are split
+/// out because they mean very different things to the radar: an append is a globe
+/// growing, and only a globe ARRIVING or LEAVING is allowed to skip the recompute rate
+/// floor (see `RadarDirtySignal::mark_dirty_urgent`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LiveIngest {
     /// Parsed events plus newly persisted sessions that have no events yet.
     pub activity: usize,
-    /// Sessions persisted for the first time by this pass.
+    /// Sessions persisted for the first time by this pass. A globe ARRIVING.
     pub new_sessions: usize,
+    /// Events that can flip a globe's liveness verdict this instant. A globe LEAVING.
+    ///
+    /// This half was missing, and its absence is what "subagent tracking is slow"
+    /// actually was. Only `new_sessions` took the urgent path, so a subagent SPAWNING
+    /// jumped the rate floor while the same subagent FINISHING sat behind up to a full
+    /// second of throttle built for token counts, or up to the 2s heartbeat when the
+    /// worker was busy. The module doc has always claimed both halves were urgent.
+    ///
+    /// A root has a PID and a live registry entry whose status is authoritative, and
+    /// the registry file is watched separately (a `Create`/`Remove` there is already
+    /// structural). A SUBAGENT or an in-process TEAMMATE has neither, so a completed
+    /// turn on its own transcript is the only signal it ever finishes by. That makes
+    /// this counter the one thing standing between a teammate going quiet and the
+    /// board showing it.
+    ///
+    /// Rare by construction, which is what keeps the exemption safe: a turn writes
+    /// dozens of events and exactly one of them carries `stop_reason: end_turn`, and a
+    /// turn lasts seconds. See `is_lifecycle_event`.
+    pub lifecycle: usize,
+}
+
+/// Does this event change a globe's LIVENESS the moment it lands?
+///
+/// Deliberately narrow. Every event is activity; almost none of it is lifecycle, and
+/// the rate floor only stays effective while that is true.
+///
+/// * `AssistantText { turn_complete: Some(true) }` is a turn genuinely ending. It is
+///   the ONLY judge a subagent or teammate has (no PID, no registry entry), so it is
+///   the whole point of this function. `Some(false)` is a mid-turn preamble with a
+///   tool call coming, and 79% of text-only assistant lines are that; `None` carries
+///   no information at all. Neither is urgent.
+/// * `SubagentSpawn` is a globe arriving named by an EXISTING session's transcript,
+///   which `new_sessions` misses whenever the child's own file has not appeared yet.
+fn is_lifecycle_event(event: &crate::ir::Event) -> bool {
+    use crate::ir::Event;
+    matches!(
+        event,
+        Event::AssistantText {
+            turn_complete: Some(true),
+            ..
+        } | Event::SubagentSpawn { .. }
+    )
 }
 
 /// Ingest the new bytes of a single transcript file, advancing its watermark.
@@ -172,12 +213,19 @@ pub fn ingest_file_once_reporting(
         .parse_range(path, slice, off, hash)
         .with_context(|| format!("parse_range {} @ {off}", path.display()))?;
 
-    let existing_session_ids: HashSet<String> =
-        store.sessions()?.into_iter().map(|s| s.id).collect();
     let mut report = LiveIngest::default();
     for b in &batches {
         report.activity += b.events.len();
-        if !existing_session_ids.contains(&b.session.id) {
+        report.lifecycle += b
+            .events
+            .iter()
+            .filter(|e| is_lifecycle_event(&e.event))
+            .count();
+        // A primary-key probe per batch, not a scan of every session on the machine.
+        // A pass touches one or two sessions; the old `sessions()` + `HashSet` built
+        // the whole table on every FSEvent, so the cost of noticing a new subagent
+        // grew with how long WARDEN had been running. See `Store::session_exists`.
+        if !store.session_exists(&b.session.id)? {
             report.activity += 1;
             report.new_sessions += 1;
         }
@@ -309,15 +357,17 @@ pub fn spawn_watchers(
 /// Wake the radar after a live ingest.
 ///
 /// A pass that persisted a NEW session is a globe arriving (a subagent spawning is
-/// exactly this), so it takes the urgent path and skips the recompute rate floor.
-/// A pass that only appended events to sessions the store already had is a globe
-/// growing, and waits its turn like every other append.
+/// exactly this) and a pass that ingested a completed turn is a globe leaving (the
+/// only signal a subagent or teammate has). Both take the urgent path and skip the
+/// recompute rate floor. A pass that only grew a transcript is a globe growing, and
+/// waits its turn like every other append: a token count that lands a second late is
+/// invisible, and that is what the floor was built for.
 fn kick_radar_after_live_ingest(report: LiveIngest, radar_signal: Option<&RadarDirtySignal>) {
     if report.activity == 0 {
         return;
     }
     if let Some(signal) = radar_signal {
-        if report.new_sessions > 0 {
+        if report.new_sessions > 0 || report.lifecycle > 0 {
             signal.mark_dirty_urgent();
         } else {
             signal.mark_dirty();
@@ -366,6 +416,7 @@ mod tests {
             LiveIngest {
                 activity: 3,
                 new_sessions: 0,
+                lifecycle: 0,
             },
             Some(&signal),
         );
@@ -389,6 +440,7 @@ mod tests {
             LiveIngest {
                 activity: 1,
                 new_sessions: 1,
+                lifecycle: 0,
             },
             Some(&signal),
         );
@@ -398,6 +450,73 @@ mod tests {
             signal.inner.urgent.load(Ordering::SeqCst),
             "a globe arriving must skip the rate floor"
         );
+    }
+
+    /// The other half of the subagent-latency fix, and the half that was missing.
+    ///
+    /// A subagent or an in-process TEAMMATE has no PID and no live registry entry, so
+    /// a completed turn on its own transcript is the only signal it ever finishes by.
+    /// Only ARRIVING used to be urgent, so a teammate going quiet sat behind the 1s
+    /// append floor, or the 2s heartbeat when the worker was busy.
+    #[test]
+    fn a_completed_turn_wakes_the_radar_urgently() {
+        let signal = RadarDirtySignal::new();
+        kick_radar_after_live_ingest(
+            LiveIngest {
+                activity: 4,
+                new_sessions: 0,
+                lifecycle: 1,
+            },
+            Some(&signal),
+        );
+
+        assert!(signal.inner.dirty.load(Ordering::SeqCst));
+        assert!(
+            signal.inner.urgent.load(Ordering::SeqCst),
+            "a teammate finishing must skip the rate floor, exactly as one spawning does"
+        );
+    }
+
+    /// The guard rail. The floor only keeps capping CPU while lifecycle stays RARE, so
+    /// the classifier has to stay narrow: a mid-turn preamble and an unknown stop
+    /// reason are not a globe leaving, and 79% of text-only assistant lines are the
+    /// first of those.
+    #[test]
+    fn only_a_genuinely_completed_turn_counts_as_lifecycle() {
+        assert!(is_lifecycle_event(&Event::AssistantText {
+            text: "Done.".into(),
+            turn_complete: Some(true),
+        }));
+        assert!(is_lifecycle_event(&Event::SubagentSpawn {
+            source_assistant_uuid: "u1".into(),
+            child_session: None,
+        }));
+
+        // A preamble with a tool call coming: the turn CONTINUES.
+        assert!(!is_lifecycle_event(&Event::AssistantText {
+            text: "Let me check the config.".into(),
+            turn_complete: Some(false),
+        }));
+        // No information (an old row, or Codex, which reports no stop reason). Keep
+        // the old assumption rather than promoting a guess to urgent.
+        assert!(!is_lifecycle_event(&Event::AssistantText {
+            text: "Done.".into(),
+            turn_complete: None,
+        }));
+        // The bulk of a transcript. If any of these counted, the rate floor would be
+        // gone and the pinned-core bug would be back.
+        assert!(!is_lifecycle_event(&Event::Thinking { tokens: 40 }));
+        assert!(!is_lifecycle_event(&Event::ToolResult {
+            call_id: "c1".into(),
+            status: ToolStatus::Ok,
+            bytes: 12,
+            summary: None,
+        }));
+        assert!(!is_lifecycle_event(&Event::UserPrompt {
+            text: "go".into(),
+            attachments: vec![],
+            is_meta: false,
+        }));
     }
 
     #[test]

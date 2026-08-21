@@ -711,4 +711,85 @@ describe('RadarDetailPanel — take me there', () => {
     });
     expect(el.querySelector('.wd-detail-goto-app')?.textContent).toBe('iTerm2');
   });
+
+  // ── the panel that stopped jumping ───────────────────────────────────────────
+  //
+  // The probe is a round trip, so between two agents this control was empty for a
+  // frame or two and everything below it (the context gauge, the activity list, the
+  // roster) hopped 37px each time. The claim is still cleared the instant the panel
+  // re-points; only the SPACE is held, and only when a row was actually there before.
+
+  it('holds its height while re-probing, so the readouts below do not hop', async () => {
+    const replies: Array<(v: unknown) => void> = [];
+    vi.mocked(invoke).mockImplementation(((cmd: string) => {
+      if (cmd === 'agent_terminal_target') return new Promise((res) => replies.push(res));
+      return Promise.resolve(undefined);
+    }) as never);
+
+    const el = render(<RadarDetailPanel agent={agentFixture({ id: 'a1' })} />);
+    await act(async () => {
+      replies[0](reachable({ app: 'Terminal' }));
+    });
+    expect(el.querySelector('[data-goto="button"]')).toBeTruthy();
+
+    // Re-point at another agent. The answer has not come back yet.
+    act(() => {
+      root!.render(<RadarDetailPanel agent={agentFixture({ id: 'a2' })} />);
+    });
+    // The stale claim is gone...
+    expect(el.querySelector('[data-goto="button"]')).toBeFalsy();
+    expect(el.querySelector('.wd-detail-goto-app')).toBeFalsy();
+    // ...and the row it lived in is still occupying its place.
+    const held = el.querySelector('.wd-detail-goto-held');
+    expect(held).toBeTruthy();
+    expect(held?.getAttribute('aria-hidden')).toBe('true');
+
+    await act(async () => {
+      replies[1](reachable({ app: 'iTerm2' }));
+    });
+    expect(el.querySelector('.wd-detail-goto-held')).toBeFalsy();
+    expect(el.querySelector('.wd-detail-goto-app')?.textContent).toBe('iTerm2');
+  });
+
+  it('reserves nothing for an agent that never had a row', async () => {
+    // Holding space for something that is never coming is its own layout bug, and in
+    // the browser sandboxes (no bridge at all) it would be permanent.
+    vi.mocked(invoke).mockImplementation((() => Promise.reject('no tauri bridge')) as never);
+    const el = render(<RadarDetailPanel agent={agentFixture({ id: 'a1' })} />);
+    await act(async () => {});
+    act(() => {
+      root!.render(<RadarDetailPanel agent={agentFixture({ id: 'a2' })} />);
+    });
+    expect(el.querySelector('.wd-detail-goto-held')).toBeFalsy();
+  });
+
+  it('marks the button busy while the raise is in flight and swallows a second click', async () => {
+    // Raising a window is an AppleScript round trip through another process. Without
+    // a pending state a slow raise reads as a dead button and gets clicked again.
+    const raises: Array<(v: unknown) => void> = [];
+    vi.mocked(invoke).mockImplementation(((cmd: string) => {
+      if (cmd === 'agent_terminal_target') return Promise.resolve(reachable());
+      if (cmd === 'focus_agent_terminal') return new Promise((res) => raises.push(res));
+      return Promise.resolve(undefined);
+    }) as never);
+
+    const el = render(<RadarDetailPanel agent={agentFixture({ id: 'a1' })} />);
+    await act(async () => {});
+    const btn = el.querySelector<HTMLButtonElement>('[data-goto="button"]')!;
+
+    await act(async () => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(btn.getAttribute('aria-busy')).toBe('true');
+
+    await act(async () => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(raises).toHaveLength(1);
+
+    await act(async () => {
+      raises[0]({ ok: true, denied: false, message: null });
+    });
+    expect(el.querySelector('[data-goto="button"]')?.getAttribute('aria-busy')).toBeNull();
+  });
 });

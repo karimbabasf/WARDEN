@@ -272,9 +272,17 @@ html, body {
 
    The blocked line replaces the button rather than disabling it. A disabled control
    still says "this is possible", and for an agent inside an IDE it is not. */
-.wd-detail-goto { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin: 11px 0 0; }
+/* Row height is FIXED at the button's, never `auto`. The caption used to be allowed to
+   wrap (`flex-wrap`), and at a 302px rail the button eats 128px, so any root with a
+   real project name pushed it onto a second line and shoved the context gauge, the
+   activity list and the roster down 20px with it. It truncates instead. */
+.wd-detail-goto { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin: 11px 0 0; min-height: 26px; }
+/* The same row with nothing in it: held for one probe while the panel re-points at a
+   new agent, so the readouts below do not jump a round trip's worth. */
+.wd-detail-goto-held { min-height: 26px; }
 .wd-detail-goto-btn {
   appearance: none;
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -294,17 +302,44 @@ html, body {
     background var(--t-micro) var(--ease-out),
     border-color var(--t-micro) var(--ease-out),
     color var(--t-micro) var(--ease-out),
+    opacity var(--t-micro) var(--ease-out),
     transform var(--t-micro) var(--ease-out);
 }
 .wd-detail-goto-btn:hover { background: var(--surface-3); border-color: var(--hair-bright); color: var(--ink); }
 .wd-detail-goto-btn:active { transform: scale(0.97); box-shadow: none; }
 .wd-detail-goto-btn:focus-visible { outline: 2px solid var(--harness, var(--green)); outline-offset: 2px; }
-.wd-detail-goto-glyph { color: var(--harness, var(--green)); font-size: 11px; line-height: 1; }
+/* Raising a window is an AppleScript round trip through another process. Without this
+   the only feedback is the 160ms press scale, and a slow raise reads as a dead button.
+   Held down rather than dimmed away: the press is still what it is acknowledging. */
+.wd-detail-goto-btn[aria-busy='true'] {
+  transform: scale(0.97);
+  box-shadow: none;
+  opacity: 0.62;
+  cursor: default;
+}
+/* No `line-height: 1`. That gave the glyph an 11px box inside a 13px line box, and
+   `align-items: center` then centred two different boxes: the arrow sat ~1.5px above
+   the cap-height of the label beside it. Matching the label's size and leading makes
+   the two boxes identical, so the font's own idea of where an arrow sits against caps
+   is what you get. */
+.wd-detail-goto-glyph { color: var(--harness, var(--green)); font-size: 10.5px; }
 /* Which app, and whose window when it belongs to a parent. Mono so it column-aligns
-   with every other readout in the panel. */
+   with every other readout in the panel. `line-height` matches the button's height so
+   the two baselines land on each other: centred boxes of different heights left them
+   a pixel apart, which at 10px reads as a wobble rather than as a row. */
 .wd-detail-goto-app {
+  /* Basis 0, not `auto`. Wrapping stays ON for the error message below (it takes a
+     whole line of its own), and a flex line breaks on HYPOTHETICAL sizes before it
+     shrinks anything, so a content-sized caption would still have jumped to line two
+     before agreeing to truncate. At basis 0 it can only ever grow into what is left. */
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   font-family: var(--mono);
   font-size: 10px;
+  line-height: 26px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--ink-faint);

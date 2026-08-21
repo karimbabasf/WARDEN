@@ -7,7 +7,9 @@ import {
   activeFor,
   isDiscoveryHomeDoubleClickAllowed,
   railInsetsFrom,
+  shouldReleaseSelection,
   RADAR_VISIBLE_PULL_MS,
+  RELEASE_SELECTION_MS,
   useSettledFocus,
 } from './WarRoom';
 import { frameloopFor, BLUR_SETTLE_MS } from '@/viz/shared/scene/frameloop';
@@ -165,5 +167,70 @@ describe('useSettledFocus', () => {
   it('settles fast enough to stay a rounding error against a blurred session', () => {
     expect(BLUR_SETTLE_MS).toBeGreaterThanOrEqual(150);
     expect(BLUR_SETTLE_MS).toBeLessThanOrEqual(1000);
+  });
+});
+
+// ── the agent that ended under the camera ─────────────────────────────────────
+//
+// One ending used to produce two camera moves and a five-second lie: the globe
+// imploded and the camera started back out (the layout drops a terminal agent at
+// once), but the selection stayed set, so the inspector rail stayed open over a dead
+// agent until the backend finally dropped it and the channel widened again.
+
+describe('shouldReleaseSelection', () => {
+  const agent = (over: Partial<{ id: string; status: string }> = {}) => {
+    const { id = 'a1', status = 'working' } = over;
+    return { id, status } as any;
+  };
+
+  it('holds on to a live selection', () => {
+    expect(
+      shouldReleaseSelection({ selectedId: 'a1', agent: agent(), everLiveId: 'a1' }),
+    ).toBe(false);
+    expect(
+      shouldReleaseSelection({ selectedId: 'a1', agent: agent({ status: 'awaiting' }), everLiveId: 'a1' }),
+    ).toBe(false);
+    expect(
+      shouldReleaseSelection({ selectedId: 'a1', agent: agent({ status: 'idle' }), everLiveId: 'a1' }),
+    ).toBe(false);
+  });
+
+  it('releases a selection that ends while you are watching it', () => {
+    for (const status of ['terminated', 'closed']) {
+      expect(
+        shouldReleaseSelection({ selectedId: 'a1', agent: agent({ status }), everLiveId: 'a1' }),
+      ).toBe(true);
+    }
+  });
+
+  it('releases a selection the backend drops from the forest entirely', () => {
+    // A root whose process is gone stops being emitted at all; there is no terminal
+    // status to read, only an absence.
+    expect(shouldReleaseSelection({ selectedId: 'a1', agent: null, everLiveId: 'a1' })).toBe(true);
+  });
+
+  it('never releases an agent that was already finished when it was picked', () => {
+    // Selecting a dead globe off the fleet rack is a deliberate look at it. Yanking the
+    // camera away the same frame would make reading a finished agent impossible.
+    expect(
+      shouldReleaseSelection({ selectedId: 'a1', agent: agent({ status: 'terminated' }), everLiveId: null }),
+    ).toBe(false);
+    // ...and a DIFFERENT agent having been alive earlier does not count for this one.
+    expect(
+      shouldReleaseSelection({ selectedId: 'a1', agent: agent({ status: 'terminated' }), everLiveId: 'a2' }),
+    ).toBe(false);
+  });
+
+  it('is inert with nothing selected', () => {
+    expect(shouldReleaseSelection({ selectedId: null, agent: null, everLiveId: null })).toBe(false);
+  });
+
+  it('holds long enough for the implode to finish, and no longer', () => {
+    // The implode is an exponential damp at lambda 16 and stops being visible below
+    // scale 0.025, so it is over in ln(40)/16 = 230ms. Shorter and the camera pulls
+    // away from something still shrinking; much longer and the board feels stuck.
+    const implodeMs = (Math.log(1 / 0.025) / 16) * 1000;
+    expect(RELEASE_SELECTION_MS).toBeGreaterThanOrEqual(implodeMs);
+    expect(RELEASE_SELECTION_MS).toBeLessThanOrEqual(implodeMs + 200);
   });
 });
