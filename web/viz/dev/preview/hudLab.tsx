@@ -82,8 +82,18 @@ function HudLab() {
   const [count, setCount] = useState(() => query('n', 7));
   const [kids, setKids] = useState(() => query('kids', 6));
   const [phase, setPhase] = useState<HudPhase>('closed');
+  // `?hover=<n>` pins the nth cell hovered, so the hover PLATE (which lives under the
+  // canvas, see HudPanel) is reachable in a static screenshot. The war room lab's
+  // `?select=` exists for the same reason: a state you can only reach with a live
+  // pointer is a state nobody checks.
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const nodes = useMemo(() => hudTree(mockFleet(count, kids)), [count, kids]);
+  const pinnedHover = new URLSearchParams(window.location.search).get('hover');
+  useEffect(() => {
+    if (pinnedHover === null) return;
+    const n = nodes[Number(pinnedHover)];
+    if (n) setHoveredId(n.agent.id);
+  }, [pinnedHover, nodes]);
 
   // The REAL window, faithfully: 600x540 (tauri.conf.json), placed centred under the
   // icon and clamped to the screen. Faking it with the full browser width would put the

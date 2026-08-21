@@ -63,20 +63,31 @@ export function HudSceneRig() {
 }
 
 /**
- * The war room's bloom, at panel scale.
+ * The war room's bloom, at panel scale, and DELIBERATELY not at its settings.
+ *
+ * The war room is a black room 40px of globe wide on a 900px canvas: a wide, hot
+ * bloom is the only light in it and it has somewhere to fall off into. The HUD is a
+ * 380px translucent panel floating over the user's desktop, with globes packed four
+ * to a row. The same numbers there (intensity 1.3, threshold 0.22) washed the whole
+ * panel orange and blew the gaps between neighbouring globes shut. So:
+ *   threshold 0.22 -> 0.45  only the gem core and the hottest lattice segments bloom,
+ *                           instead of every mid-brightness line on the shell
+ *   intensity 1.3 -> 0.7    the core still blazes; the spill stops being the subject
+ *   radius 0.85 -> 0.4      the falloff has 40px to happen in here, not 400
+ * The globe's own additive halo sprite is untouched, so the two screens still agree
+ * on how bright an agent IS. What changes is how far that brightness spreads.
  *
  * Mounted as its own component and LAST in the canvas, because a composer renders the
  * whole scene: everything that should bloom has to already be in the tree.
  *
  * `EffectComposer` owns the canvas once mounted, and this canvas has to stay
- * transparent (the panel's own material and backdrop blur are behind it). That is
- * what `renderPriority` and the composer's alpha-preserving default buffer give us;
- * if the panel ever paints as a black rectangle, this pass is the first suspect.
+ * transparent (the panel's own material and backdrop blur are behind it). If the panel
+ * ever paints as a black rectangle, this pass is the first suspect.
  */
 export function HudBloom() {
   return (
     <EffectComposer multisampling={4} renderPriority={1}>
-      <Bloom intensity={1.3} luminanceThreshold={0.22} luminanceSmoothing={0.9} mipmapBlur radius={0.6} />
+      <Bloom intensity={0.7} luminanceThreshold={0.45} luminanceSmoothing={0.85} mipmapBlur radius={0.4} />
     </EffectComposer>
   );
 }

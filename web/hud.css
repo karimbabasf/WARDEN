@@ -81,6 +81,30 @@ html, body {
   pointer-events: none;
 }
 
+/* ── the hover plate, UNDER the globes ───────────────────────────────────── */
+/* The tone step that says "this cell is under the cursor". It has to be its own
+   layer beneath the canvas: as a background on the cell button (which sits ABOVE
+   the canvas) it painted an opaque rectangle over the very globe being pointed at.
+   Under the canvas the globe sits ON it, so hover brightens rather than hides. */
+.wd-hud-plates {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.wd-hud-plate {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: var(--r-surface);
+  background: transparent;
+  opacity: 0;
+  will-change: transform, opacity;
+  transition: background-color var(--t-micro) var(--ease-out);
+}
+
+.wd-hud-plate.is-hovered { background: var(--surface-2); }
+
 .wd-hud-content {
   position: absolute;
   inset: 0;
@@ -181,10 +205,12 @@ html, body {
   animation: wd-alert-blink var(--alert-period) steps(1, end) infinite;
 }
 
-/* Touch fires a hover on tap, so the lift is gated to a real pointer. */
+/* Touch fires a hover on tap, so the lift is gated to a real pointer. The plate is
+   what carries the tone step (see .wd-hud-plate); the cell itself only brightens its
+   own text, because anything it paints lands on top of the globe. */
 @media (hover: hover) and (pointer: fine) {
-  .wd-hud-cell:hover { background: var(--surface-2); }
   .wd-hud-cell:hover .wd-hud-cell-label { color: var(--ink); }
+  .wd-hud-cell:hover .wd-hud-cell-status { color: var(--ink-soft); }
 }
 
 .wd-hud-cell:focus-visible {
@@ -218,5 +244,6 @@ html, body {
     animation: none;
     opacity: 0.88;
   }
-  .wd-hud-cell { transition: none; }
+  .wd-hud-cell,
+  .wd-hud-plate { transition: none; }
 }

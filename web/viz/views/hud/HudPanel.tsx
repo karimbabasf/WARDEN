@@ -103,6 +103,7 @@ export function HudPanel({
   const panelRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const cellRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const plateRefs = useRef<Array<HTMLDivElement | null>>([]);
 
   // Height depends on the moons, not just the session count, so the layout is fed the
   // per-root kid counts rather than a total (see hudLayout).
@@ -123,6 +124,25 @@ export function HudPanel({
     <div className="wd-hud-shade">
       <div ref={clipRef} className="wd-hud-clip">
         <div ref={panelRef} className={`wd-hud-panel${grid.visible === 0 ? ' is-pill' : ''}`}>
+          {/* The hover plate, and it is BEFORE the canvas on purpose. It used to be a
+              background on the cell button itself, which lives above the canvas, so
+              hovering a session painted an opaque rectangle over its own globe: the one
+              thing you were pointing at was the one thing that disappeared. Behind the
+              canvas, the globe sits ON the plate and hover reads as the cell lighting up
+              under it, which is also the direction a hover should go. */}
+          <div className="wd-hud-plates" aria-hidden>
+            {visible.map((n, i) => (
+              <div
+                key={n.agent.id}
+                ref={(el) => {
+                  plateRefs.current[i] = el;
+                }}
+                className={`wd-hud-plate${hoveredId === n.agent.id ? ' is-hovered' : ''}`}
+                style={{ width: HUD_CELL_W, height: HUD_CELL_H }}
+              />
+            ))}
+          </div>
+
           <Canvas
             className="wd-hud-canvas"
             style={{ width: HUD_MAX_W, height: HUD_MAX_H }}
@@ -150,6 +170,7 @@ export function HudPanel({
               panelRef={panelRef}
               contentRef={contentRef}
               cellRefs={cellRefs}
+              plateRefs={plateRefs}
               onClosed={onClosed}
             />
             {visible.map((n, i) => (
@@ -260,6 +281,7 @@ function HudDriver({
   panelRef,
   contentRef,
   cellRefs,
+  plateRefs,
   onClosed,
 }: {
   phase: HudPhase;
@@ -274,6 +296,8 @@ function HudDriver({
   panelRef: RefObject<HTMLDivElement | null>;
   contentRef: RefObject<HTMLDivElement | null>;
   cellRefs: RefObject<Array<HTMLButtonElement | null>>;
+  /** The hover plates, drawn behind the canvas and moved with their cells. */
+  plateRefs: RefObject<Array<HTMLDivElement | null>>;
   onClosed: () => void;
 }) {
   const w = useRef<Spring>(spring(neck.width));
@@ -370,14 +394,22 @@ function HudDriver({
     for (let i = 0; i < count; i++) {
       const e = reduced || closing || shut ? 1 : smootherstep((sinceOpen - i * STAGGER_MS) / CELL_IN_MS);
       const centre = hudCellCentre(i, live);
+      // One transform, two elements: the plate lives in a different stacking layer from
+      // the cell (it has to, to sit under the globes) but must never drift from it.
+      const transform =
+        `translate3d(${Math.round(centre.x - HUD_CELL_W / 2)}px, ` +
+        `${Math.round(centre.y - HUD_CELL_H / 2 + (1 - e) * 7)}px, 0) ` +
+        `scale(${(0.94 + e * 0.06).toFixed(3)})`;
       const el = cellRefs.current[i];
       if (el) {
-        el.style.transform =
-          `translate3d(${Math.round(centre.x - HUD_CELL_W / 2)}px, ` +
-          `${Math.round(centre.y - HUD_CELL_H / 2 + (1 - e) * 7)}px, 0) ` +
-          `scale(${(0.94 + e * 0.06).toFixed(3)})`;
+        el.style.transform = transform;
         el.style.opacity = e.toFixed(3);
         el.style.pointerEvents = e > 0.9 && !closing && !shut ? 'auto' : 'none';
+      }
+      const plate = plateRefs.current[i];
+      if (plate) {
+        plate.style.transform = transform;
+        plate.style.opacity = e.toFixed(3);
       }
       // The globe sits above its own caption, so it is offset off the cell centre.
       cells[i] = { x: centre.x, y: centre.y + HUD_GLOBE_OFFSET_Y, opacity: e };
