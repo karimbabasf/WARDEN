@@ -36,12 +36,8 @@ status.sh
 # Browser-audit output (screenshots + audit.json) from the UI verification pass.
 /.design/
 
-# landing verification artifacts (look.mjs)
-landing/.design/
-
-# Local env and Vercel link state. `.env*` already covers `.env` and `.env.local`,
-# so they are not listed twice. The tracked template is the one file it must NOT
-# swallow: without the negation a fresh copy of it is silently unstageable.
+# Local env. `.env*` already covers `.env` and `.env.local`, so they are not
+# listed twice. The tracked template is the one file it must NOT swallow: without
+# the negation a fresh copy of it is silently unstageable.
 .env*
 !.env.example
-.vercel

@@ -48,10 +48,11 @@ It does not yet run on Intel Macs. To check which one you have, click the
 Apple menu, choose **About This Mac**, and look at the chip listed. If it
 starts with "Apple," you're set.
 
-## 4. Activating your license
+## 4. No key, no account
 
-The first time WARDEN opens, it will ask for your license key. Paste the key
-from your receipt page or confirmation email (it starts with `WRDN-`) into
-the activation screen and continue. WARDEN checks the key on your Mac, right
-then, with no internet connection involved and nothing sent anywhere. You
-only need to do this once.
+WARDEN is MIT licensed and free. It opens straight to the radar: there is no
+license key, no activation screen, and no sign-in. It makes no network calls
+and reads only the agent transcripts already on your disk.
+
+You can also skip the `.dmg` and build it yourself. See the Quickstart in
+[`../README.md`](../README.md).

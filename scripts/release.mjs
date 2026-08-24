@@ -191,7 +191,7 @@ function defaultNotes({ PRODUCT_NAME, VERSION, SIGNED, NOTARIZE, sha256 }) {
     ? 'Signed with a Developer ID and notarized by Apple.'
     : SIGNED
       ? 'Signed with a Developer ID (not notarized).'
-      : 'Ad-hoc signed only (unsigned). Gatekeeper will call it damaged on first open -- see the download page for the one-time fix.';
+      : 'Ad-hoc signed only (unsigned). Gatekeeper will call it damaged on first open -- see docs/INSTALL.md for the one-time fix.';
   return `${PRODUCT_NAME} ${VERSION}, macOS Apple Silicon (arm64) only.\n\n${signedLine}\n\nSHA-256: ${sha256}`;
 }
 
