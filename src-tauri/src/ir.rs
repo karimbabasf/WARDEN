@@ -15,6 +15,8 @@ pub enum Harness {
     Codex,
     Cursor,
     Hermes,
+    Grok,
+    OpenClaw,
     Generic(String),
 }
 impl Harness {
@@ -24,9 +26,24 @@ impl Harness {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::Hermes => "hermes",
+            Self::Grok => "grok",
+            Self::OpenClaw => "openclaw",
             Self::Generic(s) => s.as_str(),
         }
     }
+
+    /// Every harness WARDEN knows by name, in the order the legend lists them.
+    ///
+    /// `Generic` is deliberately absent: it is the escape hatch for a harness the
+    /// app has not been taught, and it carries no fixed identity to enumerate.
+    pub const KNOWN: [Harness; 6] = [
+        Harness::ClaudeCode,
+        Harness::Codex,
+        Harness::Cursor,
+        Harness::Hermes,
+        Harness::Grok,
+        Harness::OpenClaw,
+    ];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]

@@ -10,6 +10,7 @@ use super::identity::{
 use super::awaiting::AwaitingReason;
 use super::liveness::{partition_claude, read_claude_registry, AgentStatus};
 use super::model::RadarState;
+use super::procs::{Liveness, ProcessIndex};
 use super::status::{
     agent_status, agent_verdict, claude_conversation_status, codex_subagent_completed_at,
     transcript_mtime_secs_ago, StatusVerdict,
@@ -22,8 +23,8 @@ use std::path::Path;
 
 /// Assemble the live agent forest from the store + the Claude liveness registry.
 ///
-/// `is_alive`/`now` are injected so the join is deterministic and unit-testable
-/// without real PIDs or a real clock. The forest is the set of store sessions;
+/// `is_alive`/`procs`/`now` are injected so the join is deterministic and unit-testable
+/// without real PIDs, a real process table or a real clock. The forest is the set of store sessions;
 /// each becomes a [`RadarAgent`] with:
 /// * `parentId`/`depth`/`childCount` from `Store::parent_of`;
 /// * size + exact composition from the session's last `TokenUsage` event
@@ -38,6 +39,7 @@ pub fn assemble(
     sessions_dir: &Path,
     is_alive: &dyn Fn(u32) -> bool,
     is_codex_open: &dyn Fn(&Session) -> bool,
+    procs: &ProcessIndex,
     now: DateTime<Utc>,
 ) -> RadarState {
     let sessions = store.sessions().unwrap_or_default();
@@ -85,10 +87,46 @@ pub fn assemble(
     // A subagent is open iff the ROOT of its parent-chain is directly open — close
     // the root and the whole tree implodes; this also guarantees no kept subagent
     // ever dangles (its parent shares the same open root, so it is kept too).
-    let directly_open = |s: &Session| -> bool {
+    // The FILE-shaped openness rule, one arm per harness that has one. This is what
+    // RADAR has always used, kept intact: Claude's registry partition, Codex's
+    // "under sessions/ and not archived/".
+    //
+    // The catch-all is `true` rather than the old fall-through to Claude's registry.
+    // That fall-through was a latent bug: a Grok or Hermes session was looked up in
+    // `~/.claude/sessions/`, matched nothing, and could never open however healthy it
+    // was. A harness with no file rule of its own now leans entirely on the process
+    // table below, which is the only honest evidence available for it.
+    let file_rule = |s: &Session| -> bool {
         match s.harness {
+            Harness::ClaudeCode => claude_status.contains_key(&s.external_id),
             Harness::Codex => is_codex_open(s),
-            _ => claude_status.contains_key(&s.external_id),
+            _ => true,
+        }
+    };
+
+    // PROCESS TRUTH, and the direction it is allowed to push.
+    //
+    // The table may only ever CLOSE a globe, never open one: `Open` and `Unknown`
+    // both defer to the file rule, and only `Closed` overrides it. That asymmetry is
+    // deliberate. Termination is the fault being fixed, and closing faster cannot
+    // invent an agent that is not there, while letting the table open things would
+    // add a brand new way to draw a phantom.
+    //
+    // Claude is exempt because its registry is strictly better evidence: it maps a
+    // session id to an exact pid, where the table can only match on a directory. Two
+    // Claude sessions in one folder are distinguishable to the registry and identical
+    // to `lsof`, so overriding the registry here could only ever lose information.
+    let directly_open = |s: &Session| -> bool {
+        if matches!(s.harness, Harness::ClaudeCode) {
+            return file_rule(s);
+        }
+        let cwd = s
+            .project
+            .as_ref()
+            .map(|p| p.cwd.to_string_lossy().into_owned());
+        match procs.resolve(&s.harness, cwd.as_deref()) {
+            Liveness::Closed => false,
+            Liveness::Open | Liveness::Unknown => file_rule(s),
         }
     };
     let by_id: HashMap<&str, &Session> = sessions.iter().map(|s| (s.id.as_str(), s)).collect();
@@ -516,7 +554,7 @@ mod tests {
     use crate::radar::agent::recent_activity;
     use crate::radar::composition;
     use crate::radar::context::est_cost_usd;
-    use crate::radar::live::{recompute_radar_state, refresh_live_context};
+    use crate::radar::live::{recompute_radar_state_with, refresh_live_context};
     use chrono::Utc;
     use std::path::PathBuf;
 
@@ -678,7 +716,7 @@ mod tests {
             );
         }
         let reg = claude_registry(&[(4242, "live-sid")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         assert_eq!(
             state.agents.len(),
             1,
@@ -728,7 +766,7 @@ mod tests {
         store.link_child_session("child", "root").unwrap();
 
         let reg = claude_registry(&[(100, "root-ext")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), now);
 
         assert!(
             state.agents.iter().any(|a| a.id == "root"),
@@ -803,9 +841,8 @@ mod tests {
             &store,
             Path::new("/no/registry"),
             &|_| true,
-            &codex_all_open,
-            now,
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            now);
         let agent = state.agents.iter().find(|a| a.id == "codex-tail").unwrap();
         assert_eq!(agent.context_tokens, 94_263);
         assert_eq!(
@@ -866,7 +903,7 @@ mod tests {
             .unwrap();
 
         let reg = claude_registry(&[(4242, "tail-growth-ext")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), now);
         let agent = state.agents.iter().find(|a| a.id == "tail-growth").unwrap();
         assert_eq!(
             agent.context_tokens, 1_250,
@@ -975,9 +1012,8 @@ mod tests {
             &store,
             Path::new("/no/registry"),
             &|_| true,
-            &codex_all_open,
-            now + chrono::Duration::seconds(1),
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            now + chrono::Duration::seconds(1));
         let agent = state.agents.iter().find(|a| a.id == "tail-order").unwrap();
         assert_eq!(
             agent.context_tokens, 42_000,
@@ -1006,7 +1042,7 @@ mod tests {
 
         // First assemble: a cache miss → it tokenizes the transcript.
         let before1 = composition::tokenize_call_count();
-        let state1 = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state1 = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         let tokenized_run1 = composition::tokenize_call_count() - before1;
         assert!(
             tokenized_run1 > 0,
@@ -1021,7 +1057,7 @@ mod tests {
 
         // Second assemble: the store is unchanged → cache hit → ZERO tokenization.
         let before2 = composition::tokenize_call_count();
-        let state2 = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state2 = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         let tokenized_run2 = composition::tokenize_call_count() - before2;
         assert_eq!(
             tokenized_run2, 0,
@@ -1068,7 +1104,7 @@ mod tests {
         // the child rides on its open root. is_alive=true; codex predicate unused.
         let reg = claude_registry(&[(100, "root-ext")]);
         let now = Utc::now();
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), now);
 
         assert_eq!(state.agents.len(), 2);
         let root = state
@@ -1217,9 +1253,8 @@ mod tests {
             &store,
             Path::new("/no/registry"),
             &|_| true,
-            &is_codex_open,
-            Utc::now(),
-        );
+            &is_codex_open, &ProcessIndex::unscanned(),
+            Utc::now());
 
         // Recompute re-derived the link and persisted it.
         assert_eq!(
@@ -1318,7 +1353,7 @@ mod tests {
         // The lead holds a PID and is WORKING: a member is quiet between turns while the
         // lead generates, so a working lead keeps every member on the board.
         let reg = claude_registry_status(&[(4242, "lead-ext", "busy")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), now);
 
         let mate = state
             .agents
@@ -1388,7 +1423,7 @@ mod tests {
 
         // The lead is alive but IDLE: the run is over, so a finished member is free to go.
         let reg = claude_registry_status(&[(4242, "lead-ext", "idle")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), now);
 
         assert!(
             state.agents.iter().all(|a| a.id != "done"),
@@ -1402,6 +1437,198 @@ mod tests {
         assert_eq!(active.parent_id.as_deref(), Some("lead"));
         let lead = state.agents.iter().find(|a| a.id == "lead").unwrap();
         assert_eq!(lead.child_count, 1, "only the still-live member is a child");
+    }
+
+    /// Build one open Codex root sitting in `cwd`, plus the file rule that calls it
+    /// open. Shared by the process-liveness tests below so they differ ONLY in what
+    /// the process table says.
+    fn open_codex_root_in(cwd: &str) -> (Store, Session, DateTime<Utc>) {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let s = Session {
+            id: "cx-root".into(),
+            harness: Harness::Codex,
+            external_id: "thread-root".into(),
+            project: Some(crate::ir::ProjectRef {
+                cwd: std::path::PathBuf::from(cwd),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: std::path::PathBuf::from("/tmp/rollout-root.jsonl"),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({ "originator": "Codex Desktop" }),
+        };
+        store.upsert_session_batch(&s, &[], &[], 0).unwrap();
+        (store, s, now)
+    }
+
+    fn codex_proc(pid: u32) -> crate::radar::procs::AgentProcess {
+        crate::radar::procs::AgentProcess {
+            harness: Harness::Codex,
+            pid,
+            ppid: 1,
+            started_at: "Sun Aug 30 02:10:32 2026".into(),
+            argv0: "codex".into(),
+        }
+    }
+
+    /// THE TERMINATION FIX. Codex publishes no pid, so its only file-shaped signal
+    /// that an agent is gone is the rollout being moved to `archived/`, which does
+    /// not happen when the agent is killed. The file rule below says OPEN, and the
+    /// globe used to stay on the board indefinitely on the strength of it.
+    ///
+    /// With a sweep that ran and found no Codex process, the agent is closed on this
+    /// recompute instead.
+    #[test]
+    fn a_codex_session_with_no_live_process_closes_immediately() {
+        let (store, _s, now) = open_codex_root_in("/repo/alpha");
+        let is_codex_open = |_: &Session| true; // the file rule still says OPEN
+        let procs = ProcessIndex::new(Vec::new(), Default::default());
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &is_codex_open,
+            &procs,
+            now,
+        );
+        assert!(
+            state.agents.is_empty(),
+            "a Codex agent whose process is gone must implode, not wait for the archive"
+        );
+    }
+
+    /// The other direction, so the fix cannot pass by simply closing everything: a
+    /// live Codex process in the session's own directory keeps its globe.
+    #[test]
+    fn a_codex_session_with_a_live_process_stays_open() {
+        let (store, _s, now) = open_codex_root_in("/repo/alpha");
+        let is_codex_open = |_: &Session| true;
+        let procs = ProcessIndex::new(
+            vec![codex_proc(4242)],
+            [(4242u32, "/repo/alpha".to_string())].into_iter().collect(),
+        );
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &is_codex_open,
+            &procs,
+            now,
+        );
+        assert_eq!(state.agents.len(), 1, "a running Codex agent still renders");
+    }
+
+    /// Two agents of one harness, one killed. The survivor must not hold the dead
+    /// one's globe open, which is what a coarse "is the harness running at all"
+    /// rule would have done.
+    #[test]
+    fn a_killed_codex_session_closes_while_its_sibling_survives() {
+        let (store, _s, now) = open_codex_root_in("/repo/killed");
+        let is_codex_open = |_: &Session| true;
+        // The only live Codex process is working somewhere else entirely.
+        let procs = ProcessIndex::new(
+            vec![codex_proc(4242)],
+            [(4242u32, "/repo/survivor".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &is_codex_open,
+            &procs,
+            now,
+        );
+        assert!(
+            state.agents.is_empty(),
+            "a sibling in another directory must not keep a killed agent alive"
+        );
+    }
+
+    /// The safety valve at the assemble level: a FAILED sweep must leave the board
+    /// exactly as the file rules left it, never implode it.
+    #[test]
+    fn an_unscanned_process_table_leaves_the_file_rules_in_charge() {
+        let (store, _s, now) = open_codex_root_in("/repo/alpha");
+        let is_codex_open = |_: &Session| true;
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &is_codex_open,
+            &ProcessIndex::unscanned(),
+            now,
+        );
+        assert_eq!(
+            state.agents.len(),
+            1,
+            "a failed process sweep must not empty the radar"
+        );
+    }
+
+    /// The latent multi-harness bug, as a test. A Grok session used to be looked up
+    /// in Claude's registry by the `_ =>` fall-through, match nothing, and be
+    /// undrawable however healthy it was. It now leans on the process table, which
+    /// is the only evidence a harness without a file rule has.
+    #[test]
+    fn a_harness_with_no_file_rule_opens_on_its_process() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let s = Session {
+            id: "gk-root".into(),
+            harness: Harness::Grok,
+            external_id: "grok-session-1".into(),
+            project: Some(crate::ir::ProjectRef {
+                cwd: std::path::PathBuf::from("/repo/grok"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec![],
+            started_at: now,
+            ended_at: None,
+            source_path: std::path::PathBuf::from("/tmp/chat_history.jsonl"),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({}),
+        };
+        store.upsert_session_batch(&s, &[], &[], 0).unwrap();
+
+        let running = ProcessIndex::new(
+            vec![crate::radar::procs::AgentProcess {
+                harness: Harness::Grok,
+                pid: 77,
+                ppid: 1,
+                started_at: "Sun Aug 30 02:10:32 2026".into(),
+                argv0: "grok".into(),
+            }],
+            [(77u32, "/repo/grok".to_string())].into_iter().collect(),
+        );
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &|_| false,
+            &running,
+            now,
+        );
+        assert_eq!(state.agents.len(), 1, "a running Grok session must render");
+
+        let gone = ProcessIndex::new(Vec::new(), Default::default());
+        let state = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &|_| false,
+            &gone,
+            now,
+        );
+        assert!(state.agents.is_empty(), "and must close when it exits");
     }
 
     /// Regression: a Codex Desktop subagent silent far longer than the Claude 90s file
@@ -1458,7 +1685,7 @@ mod tests {
         // Both rollouts are open (present, not archived, fresh) in the Codex sense.
         let open = ["thread-parent", "thread-child"];
         let is_codex_open = |s: &Session| open.contains(&s.external_id.as_str());
-        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, now);
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, &ProcessIndex::unscanned(), now);
 
         let child = state
             .agents
@@ -1533,7 +1760,7 @@ mod tests {
 
         // Parent open; child's own rollout CLOSED (archived or stale).
         let is_codex_open = |s: &Session| s.external_id == "thread-parent";
-        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, now);
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, &ProcessIndex::unscanned(), now);
 
         assert!(
             state.agents.iter().all(|a| a.id != "cx-child"),
@@ -1639,7 +1866,7 @@ mod tests {
         // Both rollouts still present (open); the child reported task_complete.
         let is_codex_open =
             |s: &Session| ["thread-parent", "thread-child"].contains(&s.external_id.as_str());
-        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, now);
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, &ProcessIndex::unscanned(), now);
 
         assert!(
             state.agents.iter().all(|a| a.id != "cx-child"),
@@ -1674,7 +1901,7 @@ mod tests {
 
         let is_codex_open =
             |s: &Session| ["thread-parent", "thread-child"].contains(&s.external_id.as_str());
-        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, now);
+        let state = assemble(&store, Path::new("/no/registry"), &|_| true, &is_codex_open, &ProcessIndex::unscanned(), now);
 
         let child = state
             .agents
@@ -1744,7 +1971,7 @@ mod tests {
             .unwrap();
 
         let registry = tempfile::tempdir().unwrap();
-        let _ = recompute_radar_state(&store, registry.path());
+        let _ = recompute_radar_state_with(&store, registry.path(), &ProcessIndex::unscanned());
 
         match old_sessions {
             Some(v) => std::env::set_var("WARDEN_CODEX_SESSIONS", v),
@@ -1793,7 +2020,7 @@ mod tests {
 
         let store = Store::memory().unwrap();
         let claude_registry = tempfile::tempdir().unwrap();
-        let state = recompute_radar_state(&store, claude_registry.path());
+        let state = recompute_radar_state_with(&store, claude_registry.path(), &ProcessIndex::unscanned());
 
         match old_sessions {
             Some(v) => std::env::set_var("WARDEN_CODEX_SESSIONS", v),
@@ -1852,7 +2079,7 @@ mod tests {
         let store = Store::memory().unwrap();
         let claude_registry = tempfile::tempdir().unwrap();
         let refreshed = refresh_live_context(&store, claude_registry.path());
-        let state = recompute_radar_state(&store, claude_registry.path());
+        let state = recompute_radar_state_with(&store, claude_registry.path(), &ProcessIndex::unscanned());
 
         match old_sessions {
             Some(v) => std::env::set_var("WARDEN_CODEX_SESSIONS", v),
@@ -1936,7 +2163,7 @@ mod tests {
 
         let store = Store::memory().unwrap();
         let refreshed = refresh_live_context(&store, registry.path());
-        let state = recompute_radar_state(&store, registry.path());
+        let state = recompute_radar_state_with(&store, registry.path(), &ProcessIndex::unscanned());
 
         match old_claude_projects {
             Some(v) => std::env::set_var("WARDEN_CLAUDE_PROJECTS", v),
@@ -2141,7 +2368,7 @@ mod tests {
             Some((2, 100, 1000, 50, "claude-opus-4-8")),
         );
         let reg = claude_registry(&[(100, "r-ext")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         let a = state
             .agents
             .iter()
@@ -2196,7 +2423,7 @@ mod tests {
         store.link_child_session("c-sid", "p-sid").unwrap();
 
         let reg = claude_registry(&[(100, "p-ext")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         let c = state
             .agents
             .iter()
@@ -2284,9 +2511,8 @@ mod tests {
             &store,
             Path::new("/no/registry"),
             &|_| true,
-            &codex_all_open,
-            Utc::now(),
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            Utc::now());
         let a = &state.agents[0];
         assert_eq!(a.context_tokens, 0);
         assert_eq!(a.fill_pct, 0.0);
@@ -2326,7 +2552,7 @@ mod tests {
         );
 
         let reg = claude_registry(&[(100, "live-ext")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
 
         assert_eq!(
             state.agents.len(),
@@ -2441,7 +2667,7 @@ mod tests {
                 .unwrap_or_default()
         };
 
-        let s1 = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        let s1 = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), now);
         assert_eq!(
             st(&s1, "idle-sess"),
             "idle",
@@ -2455,7 +2681,7 @@ mod tests {
 
         // Determinism: a second assemble on the UNCHANGED store at the SAME instant
         // yields identical statuses (no mtime, no flicker).
-        let s2 = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        let s2 = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), now);
         assert_eq!(
             st(&s2, "idle-sess"),
             st(&s1, "idle-sess"),
@@ -2535,9 +2761,8 @@ mod tests {
             &store,
             registry.path(),
             &|_| true,
-            &codex_all_open,
-            base + chrono::Duration::seconds(240),
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            base + chrono::Duration::seconds(240));
 
         let codex = state
             .agents
@@ -2616,9 +2841,8 @@ mod tests {
             &store,
             registry.path(),
             &|_| true,
-            &codex_all_open,
-            base + chrono::Duration::seconds(60),
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            base + chrono::Duration::seconds(60));
 
         let codex = state
             .agents
@@ -2695,9 +2919,8 @@ mod tests {
             &store,
             registry.path(),
             &|_| true,
-            &codex_all_open,
-            base + chrono::Duration::seconds(60),
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            base + chrono::Duration::seconds(60));
 
         let codex = state
             .agents
@@ -2795,9 +3018,8 @@ mod tests {
             &store,
             registry.path(),
             &|_| true,
-            &codex_all_open,
-            patch_ts + chrono::Duration::seconds(20),
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            patch_ts + chrono::Duration::seconds(20));
 
         let codex = state
             .agents
@@ -2841,9 +3063,8 @@ mod tests {
             &store,
             Path::new("/no/registry"),
             &|_| true,
-            &is_codex_open,
-            Utc::now(),
-        );
+            &is_codex_open, &ProcessIndex::unscanned(),
+            Utc::now());
 
         assert_eq!(
             state.agents.len(),
@@ -2903,7 +3124,7 @@ mod tests {
 
         // Only the open root is registered alive.
         let reg = claude_registry(&[(100, "op-root-ext")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
 
         // The open tree survives, nested and counted.
         let root = state
@@ -3265,9 +3486,8 @@ mod tests {
             &store,
             reg.path(),
             &|_| true,
-            &codex_all_open,
-            t0 + chrono::Duration::seconds(1),
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            t0 + chrono::Duration::seconds(1));
         let sub = s1
             .agents
             .iter()
@@ -3280,9 +3500,8 @@ mod tests {
             &store,
             reg.path(),
             &|_| true,
-            &codex_all_open,
-            t0 + chrono::Duration::seconds(30),
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            t0 + chrono::Duration::seconds(30));
         assert!(
             s2.agents.iter().all(|a| a.id != "sub"),
             "dropped past grace"
@@ -3293,9 +3512,8 @@ mod tests {
             &store,
             reg.path(),
             &|_| true,
-            &codex_all_open,
-            t0 + chrono::Duration::seconds(60),
-        );
+            &codex_all_open, &ProcessIndex::unscanned(),
+            t0 + chrono::Duration::seconds(60));
         assert!(
             s3.agents.iter().all(|a| a.id != "sub"),
             "stays dropped (no resurrection)"
@@ -3414,7 +3632,7 @@ mod tests {
 
         // The lead is alive and BUSY — the old rule held BOTH members on the board.
         let reg = claude_registry_status(&[(4242, "lead-ext", "busy")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, now);
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), now);
 
         // "mev-l1" has a logged Agent result → retired despite the busy lead.
         assert!(
@@ -3537,7 +3755,7 @@ mod tests {
             vec![done_text("Ready when you are.")],
         );
         let reg = claude_registry_waiting(11, "sid-wait", "permission prompt");
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         let a = state.agents.iter().find(|a| a.id == "root").unwrap();
         assert_eq!(a.status, "awaiting");
         assert_eq!(
@@ -3570,7 +3788,7 @@ mod tests {
             vec![done_text("Done. 214 tests pass, nothing left to decide.")],
         );
         let reg = claude_registry_status(&[(21, "sid-asked", "idle"), (22, "sid-reported", "idle")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         let by = |id: &str| state.agents.iter().find(|a| a.id == id).unwrap();
         assert_eq!(by("asked").status, "awaiting");
         assert_eq!(by("asked").awaiting_reason.as_deref(), Some("question"));
@@ -3616,7 +3834,7 @@ mod tests {
         let store = Store::memory().unwrap();
         seed_open_question_tool(&store, "prompting", "sid-prompt");
         let reg = claude_registry(&[(31, "sid-prompt")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         let a = state.agents.iter().find(|a| a.id == "prompting").unwrap();
         assert_eq!(
             a.status, "awaiting",
@@ -3642,7 +3860,7 @@ mod tests {
         let store = Store::memory().unwrap();
         seed_open_question_tool(&store, "prompting", "sid-prompt");
         let reg = claude_registry_status(&[(31, "sid-prompt", "busy")]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         let a = state.agents.iter().find(|a| a.id == "prompting").unwrap();
         assert_eq!(a.status, "working");
         assert_eq!(a.awaiting_reason, None);
@@ -3665,7 +3883,7 @@ mod tests {
             }],
         );
         let reg = claude_registry(&[]);
-        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, Utc::now());
+        let state = assemble(&store, reg.path(), &|_| true, &codex_all_open, &ProcessIndex::unscanned(), Utc::now());
         let a = state.agents.iter().find(|a| a.id == "cx").unwrap();
         assert_eq!(a.status, "awaiting");
         assert_eq!(a.awaiting_reason.as_deref(), Some("question"));

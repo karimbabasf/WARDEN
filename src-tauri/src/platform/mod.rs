@@ -222,3 +222,90 @@ pub fn process_alive(pid: u32) -> bool {
         true
     }
 }
+
+/// Every local agent process, from one `ps` sweep.
+///
+/// This is the harness-INDEPENDENT liveness source. [`process_alive`] answers a
+/// question you can only ask once you already hold a pid, which is exactly what a
+/// harness without a registry never gives you; this enumerates instead, so a
+/// harness that publishes nothing is still tracked, and its death is observed on
+/// the next sweep rather than inferred from a file that stopped changing.
+///
+/// Thin syscall wrapper by design: the decisions live in
+/// [`crate::radar::procs::scan_ps_output`], which is pure and carries the tests.
+///
+/// `/bin/ps` rather than a process-listing crate: `controlling_tty` and
+/// `terminal_host_for_pid` already read the process table this way, so this adds
+/// no dependency and no new failure mode. `-axo pid=,ppid=,lstart=,args=` is BSD
+/// syntax; Linux's `ps` accepts the same fields, so the one porting hazard is a
+/// platform whose `ps` lacks `lstart`, where the parse rejects every row and the
+/// scan degrades to empty rather than to wrong identities.
+/// `None` when the sweep could not run. That is NOT the same as an empty vec, and
+/// the caller must not flatten it: an empty sweep means "no agents are running",
+/// which closes every globe, while a failed sweep means "we did not look" and has
+/// to leave the board alone.
+pub fn list_agent_processes() -> Option<Vec<crate::radar::procs::AgentProcess>> {
+    #[cfg(unix)]
+    {
+        let out = std::process::Command::new("/bin/ps")
+            .args(["-axo", "pid=,ppid=,lstart=,args="])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        Some(crate::radar::procs::scan_ps_output(&text, std::process::id()))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Working directories for `pids`, in ONE `lsof` call.
+///
+/// A missing entry is normal and must stay survivable: `lsof` can be denied by
+/// policy, and a process can exit between the sweep and this lookup. The caller
+/// treats an absent directory as "cannot decide", never as "not running".
+///
+/// One call for the whole set rather than one per pid: this runs on the liveness
+/// tick, and a spawn per agent would scale the cost with the size of the fleet
+/// exactly when the fleet is busiest.
+pub fn process_cwds(pids: &[u32]) -> std::collections::HashMap<u32, String> {
+    #[cfg(unix)]
+    {
+        if pids.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        let list = pids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let Ok(out) = std::process::Command::new("/usr/sbin/lsof")
+            .args(["-a", "-p", &list, "-d", "cwd", "-Fn"])
+            .output()
+        else {
+            return std::collections::HashMap::new();
+        };
+        crate::radar::procs::parse_lsof_cwds(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pids;
+        std::collections::HashMap::new()
+    }
+}
+
+/// The full process picture RADAR asks liveness questions of: one `ps` sweep plus
+/// one `lsof` for the agents it found.
+pub fn process_index() -> crate::radar::procs::ProcessIndex {
+    let Some(procs) = list_agent_processes() else {
+        tracing::warn!("process sweep failed; RADAR liveness falls back to file rules");
+        return crate::radar::procs::ProcessIndex::unscanned();
+    };
+    let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+    let cwds = process_cwds(&pids);
+    crate::radar::procs::ProcessIndex::new(procs, cwds)
+}

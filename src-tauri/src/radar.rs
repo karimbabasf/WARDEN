@@ -10,6 +10,8 @@
 //! * [`hierarchy`] — pure resolvers that link subagents to their parents
 //!   (Claude `subagents/` + `toolUseId`; Codex `parent_thread_id`).
 //! * [`liveness`] — open/working/awaiting/idle/closed partition (pure core + thin syscall).
+//! * [`procs`] — which harnesses are RUNNING locally (pure core + thin syscall). The
+//!   harness-independent liveness source: a killed agent is observed, not waited out.
 //! * [`awaiting`] — is the agent stopped on the OPERATOR? (pure; the third globe state).
 //! * [`composition`] — exact + estimated context composition (pure).
 //! * [`status`] — per-session working/awaiting/idle/terminated verdict from conversation state.
@@ -26,6 +28,7 @@ pub mod awaiting;
 pub mod composition;
 pub mod hierarchy;
 pub mod liveness;
+pub mod procs;
 
 mod agent;
 mod assemble;
@@ -40,7 +43,7 @@ mod teams;
 // ── public API (kept byte-identical to the pre-split `crate::radar` surface) ──
 pub use assemble::assemble;
 pub use awaiting::AwaitingReason;
-pub use live::{recompute_radar_state, refresh_live_context};
+pub use live::{recompute_radar_state, recompute_radar_state_with, refresh_live_context};
 pub use liveness::{AgentStatus, LiveSession};
 pub use model::{
     RadarAction, RadarActivity, RadarAgent, RadarComposition, RadarContextBreakdown,

@@ -12,7 +12,11 @@
 //
 // Harness colour/glyph/label literals live in `harnessColors.ts` — no duplication.
 
-import { harnessColor } from '@/viz/shared/theme/harnessColors';
+import {
+  harnessColor,
+  KNOWN_HARNESS_IDS,
+  type HarnessId,
+} from '@/viz/shared/theme/harnessColors';
 
 export type RadarTheme = {
   /** Human label rendered in cards/legend, e.g. "Claude". */
@@ -23,21 +27,26 @@ export type RadarTheme = {
   glyph: string;
 };
 
-// Keys are snake_case harness ids exactly as the backend emits them.
-// Values sourced from harnessColors — no literals duplicated here.
-const _cl = harnessColor('claude_code');
-const _cx = harnessColor('codex');
-export const RADAR_PALETTE = {
-  claude_code: { label: _cl.label, color: _cl.hue, glyph: _cl.glyph },
-  codex:       { label: _cx.label, color: _cx.hue, glyph: _cx.glyph },
-} as const satisfies Record<string, RadarTheme>;
+// Keys are snake_case harness ids exactly as the backend emits them. Values are
+// sourced from harnessColors, with no literals duplicated here.
+//
+// Built by MAPPING the canonical id list rather than by hand: a globe is the most
+// visible surface in the app, and a harness missing from this table renders as
+// neutral slate, which reads as "WARDEN does not know what this is" rather than
+// as a gap in a palette. Enumerating removes the chance of forgetting one.
+export const RADAR_PALETTE = Object.fromEntries(
+  KNOWN_HARNESS_IDS.map((id) => {
+    const c = harnessColor(id);
+    return [id, { label: c.label, color: c.hue, glyph: c.glyph }];
+  }),
+) as Record<string, RadarTheme>;
 
 // Unknown / schema-drift harness — a quiet slate globe, never borrowing another
 // harness's identity (honest-viz). Distinct hue from both brand colours.
 const _un = harnessColor('unknown');
 export const RADAR_NEUTRAL: RadarTheme = { label: _un.label, color: _un.hue, glyph: _un.glyph };
 
-export type RadarHarnessId = keyof typeof RADAR_PALETTE;
+export type RadarHarnessId = HarnessId;
 
 /** Resolve a (possibly unknown) snake_case harness id to its Radar theme. */
 export function radarHarness(h: string): RadarTheme {

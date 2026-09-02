@@ -581,9 +581,19 @@ pub async fn preview_observed_state(
 }
 
 fn fresh_radar_state_for_read(state: &AppState) -> RadarState {
+    fresh_radar_state_for_read_with(state, &crate::platform::process_index())
+}
+
+/// [`fresh_radar_state_for_read`] with the process table INJECTED, so a test can
+/// drive the read path against fixture transcripts without depending on which
+/// harnesses happen to be running on the machine executing the suite.
+fn fresh_radar_state_for_read_with(
+    state: &AppState,
+    procs: &crate::radar::procs::ProcessIndex,
+) -> RadarState {
     let sessions_dir = default_claude_sessions_dir();
     radar::refresh_live_context(&state.store, &sessions_dir);
-    let radar = radar::recompute_radar_state(&state.store, &sessions_dir);
+    let radar = radar::recompute_radar_state_with(&state.store, &sessions_dir, procs);
     state.cache_radar_state(radar.clone());
     radar
 }
@@ -1027,7 +1037,11 @@ mod tests {
             agents: Vec::new(),
         });
 
-        let radar = fresh_radar_state_for_read(&state);
+        // Unscanned: this test is about the CACHE not hiding a live rollout, and
+        // the fixture has no Codex process behind it. A real sweep would rightly
+        // close it and the assertion would be testing the process rule instead.
+        let radar =
+            fresh_radar_state_for_read_with(&state, &crate::radar::procs::ProcessIndex::unscanned());
 
         assert!(
             radar
@@ -1077,7 +1091,7 @@ mod tests {
             serde_json::json!({ "pid": 100, "sessionId": "c1", "cwd": "/work" }).to_string(),
         )
         .unwrap();
-        let state = crate::radar::assemble(&store, reg.path(), &|_| true, &|_| false, Utc::now());
+        let state = crate::radar::assemble(&store, reg.path(), &|_| true, &|_| false, &crate::radar::procs::ProcessIndex::unscanned(), Utc::now());
         assert_eq!(state.agents.len(), 1, "one seeded OPEN session yields one agent");
         let agent = &state.agents[0];
         assert_eq!(agent.id, "c1");
