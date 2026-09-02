@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod codex;
+pub mod grok;
 
 use crate::ir::*;
 use anyhow::Result;
@@ -39,7 +40,8 @@ impl AdapterRegistry {
     pub fn new(store: crate::store::Store) -> Self {
         let adapters: Vec<Box<dyn Adapter>> = vec![
             Box::new(claude_code::ClaudeCodeAdapter::new(store.clone())),
-            Box::new(codex::CodexAdapter::new(store)),
+            Box::new(codex::CodexAdapter::new(store.clone())),
+            Box::new(grok::GrokAdapter::new(store)),
         ];
         Self { adapters }
     }
