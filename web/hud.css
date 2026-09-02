@@ -72,6 +72,15 @@ html, body {
   box-shadow: var(--lift);
 }
 
+/* Everything the panel draws, in one box, so the genie's content transform carries
+   the plates, the globes and the captions through the neck together. Written from
+   the animation loop. */
+.wd-hud-stage {
+  position: absolute;
+  inset: 0;
+  will-change: transform, opacity;
+}
+
 /* Cut once at the largest panel the layout can ask for, then clipped by the panel.
    Resizing a WebGL drawing buffer every frame of a spring reallocates it every frame. */
 .wd-hud-canvas {
@@ -109,15 +118,17 @@ html, body {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  will-change: transform, opacity;
 }
 
 /* ── header: the one line that answers "does anything need me" ───────────── */
+/* Faded up by the loop once the box has room for it; starts unseen. */
 .wd-hud-head {
   position: absolute;
   top: 13px;
   left: 0;
   right: 0;
+  opacity: 0;
+  will-change: opacity;
   display: flex;
   align-items: center;
   justify-content: center;

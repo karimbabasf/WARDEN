@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { genieFrame, smootherstep } from './hudGenie';
+import { GENIE_MS, genieFrame, genieProgress, smootherstep } from './hudGenie';
 
 const GEO = { width: 400, height: 300, neckLeft: 190, neckRight: 212 };
 
@@ -18,6 +18,25 @@ describe('smootherstep', () => {
     expect(smootherstep(1)).toBe(1);
     expect(smootherstep(9)).toBe(1);
     expect(smootherstep(0.5)).toBeCloseTo(0.5, 5);
+  });
+});
+
+describe('genieProgress', () => {
+  it('runs from rest to the neck over GENIE_MS and clamps outside it', () => {
+    expect(genieProgress(-50)).toBe(0);
+    expect(genieProgress(0)).toBe(0);
+    expect(genieProgress(GENIE_MS / 2)).toBeCloseTo(0.5, 5);
+    expect(genieProgress(GENIE_MS)).toBe(1);
+    expect(genieProgress(GENIE_MS * 3)).toBe(1);
+  });
+
+  it('is eased: slow off the mark, fastest through the middle, slow into the icon', () => {
+    const step = GENIE_MS / 10;
+    const speed = (t: number) => genieProgress(t + step) - genieProgress(t);
+    expect(speed(0)).toBeLessThan(speed(GENIE_MS * 0.45));
+    expect(speed(GENIE_MS - step)).toBeLessThan(speed(GENIE_MS * 0.45));
+    // and monotonic: the panel never grows back mid-collapse
+    for (let t = 0; t < GENIE_MS; t += step) expect(speed(t)).toBeGreaterThan(0);
   });
 });
 
