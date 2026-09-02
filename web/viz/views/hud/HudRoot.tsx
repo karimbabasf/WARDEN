@@ -102,13 +102,24 @@ export function HudRoot() {
     invoke('hud_hide').catch(() => {});
   }, []);
 
-  // Picking a globe is the HUD's one control: it OPENS WARDEN on that agent. The app
-  // is raised first and the panel genies away behind it, so the window is already
-  // arriving while the island funnels back into the tray. Closing first would race the
-  // window it is about to raise. Only roots reach here (see HudPanel).
+  // Picking a globe is the HUD's one control: it takes you to the TERMINAL that session
+  // is running in, the tab and window the agent actually lives in, resolved and raised
+  // by the same read-and-raise path as the detail panel's "take me there". Only when
+  // that cannot be done (an IDE-hosted session, a window that has since closed, an
+  // Automation refusal) does it fall back to opening WARDEN on the agent, where the
+  // detail panel states the reason and, for a refusal, the one remedy. The panel
+  // genies away at once either way: the click is the decision, and whatever comes
+  // forward arrives while the island funnels back into the tray. Only roots reach here
+  // (see HudPanel).
   const onPick = useCallback(
     (agent: RadarAgent) => {
-      invoke('hud_focus_agent', { agentId: agent.id }).catch(() => {});
+      const agentId = agent.id;
+      const openWarden = () => invoke('hud_focus_agent', { agentId }).catch(() => {});
+      invoke<{ ok?: boolean }>('focus_agent_terminal', { agentId })
+        .then((out) => {
+          if (!out?.ok) return openWarden();
+        })
+        .catch(openWarden);
       dismiss();
     },
     [dismiss],
