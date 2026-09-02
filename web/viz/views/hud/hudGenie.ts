@@ -111,6 +111,21 @@ export function genieFrame(t: number, geo: GenieGeometry): GenieFrame {
   };
 }
 
-/** How long the collapse runs. Under 300ms: the close is the system responding, and
- *  the user has already decided. */
-export const GENIE_MS = 280;
+/** How long the collapse runs. Around 300ms: the close is the system responding, and
+ *  the user has already decided. It is eased (below), so it reads a touch quicker
+ *  than a linear 300 would. */
+export const GENIE_MS = 300;
+
+/**
+ * Elapsed time to collapse progress.
+ *
+ * Linear time was the one mechanical thing left in the close: the bottom edge swept
+ * up at one constant speed and stopped dead at the neck. Smoothstep leaves from rest,
+ * gathers speed through the middle where the funnel does its reading, and lands in
+ * the icon instead of hitting it. Zero velocity at both ends, so it also joins the
+ * still panel before it and the hidden window after it without a kink.
+ */
+export function genieProgress(elapsedMs: number): number {
+  const t = clamp01(elapsedMs / GENIE_MS);
+  return t * t * (3 - 2 * t);
+}

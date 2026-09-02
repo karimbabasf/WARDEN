@@ -175,11 +175,13 @@ pub async fn hud_hide(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Take me to this agent: raise the war room and select the globe the HUD was showing.
+/// Open WARDEN on this agent: raise the war room and select the globe the HUD was showing.
 ///
-/// The HUD's one and only control. It raises the window BEFORE the HUD finishes
-/// collapsing, deliberately, closing first would leave a beat of empty desktop between
-/// the click and the window it summoned.
+/// The HUD's FALLBACK. Picking a globe there raises the agent's own terminal first
+/// (`focus_agent_terminal`); this runs only when that could not be done, so the
+/// operator lands on the detail panel that states why. It raises the window BEFORE
+/// the HUD finishes collapsing, deliberately, closing first would leave a beat of
+/// empty desktop between the click and the window it summoned.
 #[tauri::command]
 pub async fn hud_focus_agent(app: tauri::AppHandle, agent_id: String) -> Result<(), String> {
     use tauri::Emitter;
