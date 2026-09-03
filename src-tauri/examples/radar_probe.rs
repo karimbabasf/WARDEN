@@ -49,6 +49,15 @@ fn main() {
         );
     }
 
+    // The APP's read path (`fresh_radar_state_for_read`) refreshes live context BEFORE
+    // it assembles, and this probe did not, so the two could legitimately disagree on
+    // how many globes exist: an ingest can ADD a session or a subagent the read-only
+    // recompute never saw. `WARDEN_RADAR_PROBE_REFRESH=1` reproduces the real path.
+    // Off by default because the refresh WRITES to the db, so it belongs on a copy.
+    if std::env::var("WARDEN_RADAR_PROBE_REFRESH").is_ok() {
+        let n = warden_lib::radar::refresh_live_context(&store, &reg);
+        eprintln!("refresh_live_context ingested {n} events");
+    }
     let state = recompute_radar_state(&store, &reg);
 
     // Dump the EXACT bytes the `get_radar_state` IPC command returns to a scratch file

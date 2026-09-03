@@ -25,6 +25,10 @@ import { hudTree, type HudNode } from './hudSort';
 /** How long the open spring needs before the panel counts as arrived. */
 const SETTLE_MS = 420;
 
+/** Fallback pull while the panel is open, matching the war room's own. Push events stay
+ *  the fast path; this only exists so a missed one cannot persist. */
+export const HUD_VISIBLE_PULL_MS = 750;
+
 export function HudRoot() {
   const [nodes, setNodes] = useState<HudNode[]>([]);
   const [phase, setPhase] = useState<HudPhase>('closed');
@@ -51,6 +55,33 @@ export function HudRoot() {
       un.then((f) => f()).catch(() => {});
     };
   }, []);
+
+  // The push feed above had NO fallback, and it was the only thing keeping this
+  // window honest: one pull at mount, then `radar_state` forever. A single missed or
+  // dropped emit therefore left the HUD showing a fleet that no longer exists, with
+  // nothing to ever correct it, which is the "why am I seeing agents that are gone"
+  // report. The war room has covered this since it was written (`RADAR_VISIBLE_PULL_MS`);
+  // the HUD never did.
+  //
+  // Only while the panel is actually on screen. A hidden HUD showing a stale fleet is
+  // nobody's problem, and polling it would be paying for a glance nobody is taking.
+  useEffect(() => {
+    if (phase === 'closed') return;
+    let alive = true;
+    const pull = () => {
+      invoke('get_radar_state')
+        .then((rs) => {
+          if (alive) setNodes(hudTree(normalizeRadarState(rs)));
+        })
+        .catch(() => {});
+    };
+    pull(); // immediate, so an open never starts from a stale list
+    const id = window.setInterval(pull, HUD_VISIBLE_PULL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [phase]);
 
   // ── summon / dismiss, driven by the tray ───────────────────────────────────
   useEffect(() => {
