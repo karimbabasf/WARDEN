@@ -98,6 +98,20 @@ pub fn default_codex_sessions() -> PathBuf {
         .map(|s| expand_tilde(&s))
         .unwrap_or_else(|_| dirs::home_dir().expect("home directory should resolve").join(".codex/sessions"))
 }
+/// Grok CLI session root `~/.grok/sessions`. Layout is
+/// `<percent-encoded cwd>/<session uuid>/events.jsonl`, so the WORKING DIRECTORY
+/// is carried by the path itself rather than by any record inside the file.
+/// `WARDEN_GROK_SESSIONS` overrides (tests point it at a temp dir).
+pub fn default_grok_sessions() -> PathBuf {
+    std::env::var("WARDEN_GROK_SESSIONS")
+        .map(|s| expand_tilde(&s))
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .expect("home directory should resolve")
+                .join(".grok/sessions")
+        })
+}
+
 /// RADAR: the Claude Code liveness registry directory `~/.claude/sessions`. Each
 /// `<pid>.json` records a currently-open session `{pid, sessionId, cwd, …}`.
 /// `WARDEN_CLAUDE_SESSIONS` overrides (tests point it at a temp dir). The dir is

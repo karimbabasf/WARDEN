@@ -31,6 +31,24 @@ pub fn refresh_live_context(store: &Store, sessions_dir: &Path) -> usize {
 /// avoids re-reading/hashing live transcript files on every heartbeat while preserving
 /// live nesting when new data actually arrives.
 pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> super::RadarState {
+    // One process sweep per recompute. This is what lets a harness that publishes
+    // no pid (Codex today, Grok and Hermes next) lose its globe the moment the
+    // process dies, instead of waiting for a file to be archived or to age out.
+    recompute_radar_state_with(store, sessions_dir, &crate::platform::process_index())
+}
+
+/// [`recompute_radar_state`] with the process table INJECTED.
+///
+/// Exists because the real sweep reads this machine, which makes any test that
+/// goes through the live path depend on what happens to be running while it runs.
+/// A fixture Codex rollout with no Codex process is exactly the case the process
+/// rule is built to close, so those tests pass [`ProcessIndex::unscanned`] and keep
+/// testing the file rules they were written for.
+pub fn recompute_radar_state_with(
+    store: &Store,
+    sessions_dir: &Path,
+    procs: &super::procs::ProcessIndex,
+) -> super::RadarState {
     // The Codex live set is the set of rollout uuids whose file currently sits under
     // `~/.codex/sessions/` (and NOT under `~/.codex/archived_sessions/`). We scan the
     // two roots ONCE here, then close over the resulting set so `assemble` stays a
@@ -46,6 +64,7 @@ pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> super::Radar
         sessions_dir,
         &liveness::pid_alive,
         &is_codex_open,
+        procs,
         Utc::now(),
     )
 }
