@@ -245,6 +245,16 @@ pub fn process_alive(pid: u32) -> bool {
 /// which closes every globe, while a failed sweep means "we did not look" and has
 /// to leave the board alone.
 pub fn list_agent_processes() -> Option<Vec<crate::radar::procs::AgentProcess>> {
+    let text = ps_snapshot()?;
+    Some(crate::radar::procs::scan_ps_output(
+        &text,
+        std::process::id(),
+    ))
+}
+
+/// One `ps` sweep, raw. Split out so [`process_index`] can read BOTH the agent
+/// processes and the all-pid start times from a single spawn instead of two.
+fn ps_snapshot() -> Option<String> {
     #[cfg(unix)]
     {
         let out = std::process::Command::new("/bin/ps")
@@ -254,8 +264,7 @@ pub fn list_agent_processes() -> Option<Vec<crate::radar::procs::AgentProcess>> 
         if !out.status.success() {
             return None;
         }
-        let text = String::from_utf8_lossy(&out.stdout);
-        Some(crate::radar::procs::scan_ps_output(&text, std::process::id()))
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
     #[cfg(not(unix))]
     {
@@ -301,11 +310,17 @@ pub fn process_cwds(pids: &[u32]) -> std::collections::HashMap<u32, String> {
 /// The full process picture RADAR asks liveness questions of: one `ps` sweep plus
 /// one `lsof` for the agents it found.
 pub fn process_index() -> crate::radar::procs::ProcessIndex {
-    let Some(procs) = list_agent_processes() else {
+    let Some(text) = ps_snapshot() else {
         tracing::warn!("process sweep failed; RADAR liveness falls back to file rules");
         return crate::radar::procs::ProcessIndex::unscanned();
     };
+    let self_pid = std::process::id();
+    let procs = crate::radar::procs::scan_ps_output(&text, self_pid);
+    // Start times for EVERY pid, not just the ones classified as agents: this is the
+    // pid-reuse guard for harnesses that publish a pid of their own, and Claude runs
+    // under argv[0]s the classifier cannot claim.
+    let starts = crate::radar::procs::scan_ps_starts(&text, self_pid);
     let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
     let cwds = process_cwds(&pids);
-    crate::radar::procs::ProcessIndex::new(procs, cwds)
+    crate::radar::procs::ProcessIndex::with_starts(procs, cwds, starts)
 }

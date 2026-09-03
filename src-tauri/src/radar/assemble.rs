@@ -5,7 +5,8 @@
 
 use super::agent::build_agent;
 use super::identity::{
-    display_label, parent_completion_at, subagent_terminated_at, teammate_dispatch_call_id,
+    display_label, dispatches_settled_at, parent_completion_at, subagent_terminated_at,
+    teammate_dispatch_call_id,
 };
 use super::awaiting::AwaitingReason;
 use super::liveness::{partition_claude, read_claude_registry, AgentStatus};
@@ -13,7 +14,7 @@ use super::model::RadarState;
 use super::procs::{Liveness, ProcessIndex};
 use super::status::{
     agent_status, agent_verdict, claude_conversation_status, codex_subagent_completed_at,
-    transcript_mtime_secs_ago, StatusVerdict,
+    transcript_is_missing, transcript_mtime_secs_ago, StatusVerdict,
 };
 use crate::ir::{Harness, Session};
 use crate::store::Store;
@@ -45,8 +46,30 @@ pub fn assemble(
     let sessions = store.sessions().unwrap_or_default();
 
     // Liveness: map a Claude external session id → status from the registry.
-    let registry = read_claude_registry(sessions_dir);
+    //
+    // PID REUSE. `~/.claude/sessions/<pid>.json` is removed on a clean exit, so the
+    // file lingering is itself the signature of a session that was killed, crashed or
+    // OOM'd. `is_alive` alone reads that leftover as open again the moment the OS
+    // hands its number to any other process, and because nothing ever revisits the
+    // verdict the dead session's globe then stays for as long as the borrower runs.
+    // The registry states `procStart` precisely so the number can be checked against
+    // an identity, so check it: a pid the sweep saw starting at a DIFFERENT time is a
+    // different process, and the row behind it is gone.
+    //
+    // Only ever subtracts. An unobserved pid, an absent `procStart` and a failed sweep
+    // all leave the entry alone for `is_alive` to judge, so the worst case is exactly
+    // the behaviour that shipped before.
+    let registry: Vec<(u32, serde_json::Value)> = read_claude_registry(sessions_dir)
+        .into_iter()
+        .filter(|(pid, v)| {
+            let claimed = v.get("procStart").and_then(|s| s.as_str());
+            procs.is_same_process(*pid, claimed).unwrap_or(true)
+        })
+        .collect();
     let mtime_secs_ago = |sid: &str| transcript_mtime_secs_ago(&sessions, sid, now);
+    // "The harness deleted this transcript", which is NOT the same as `mtime_secs_ago`
+    // returning None (that also covers a session id we hold no row for).
+    let transcript_gone = |sid: &str| transcript_is_missing(&sessions, sid);
     // FAULT B: when the registry carries no authoritative `status`, decide working/idle
     // from the session's CONVERSATION STATE (its last ingested event), not file mtime —
     // deterministic across reads, so the working↔idle flicker is gone. The closure
@@ -91,16 +114,24 @@ pub fn assemble(
     // RADAR has always used, kept intact: Claude's registry partition, Codex's
     // "under sessions/ and not archived/".
     //
-    // The catch-all is `true` rather than the old fall-through to Claude's registry.
-    // That fall-through was a latent bug: a Grok or Hermes session was looked up in
-    // `~/.claude/sessions/`, matched nothing, and could never open however healthy it
-    // was. A harness with no file rule of its own now leans entirely on the process
-    // table below, which is the only honest evidence available for it.
+    // The catch-all leans on the process table below, which is the only honest
+    // evidence available for a harness that publishes no registry and no archive.
+    // It is a RECENCY test rather than the flat `true` it used to be, because `true`
+    // means open forever: the table answers `Unknown` whenever `lsof` is denied, the
+    // session row carries no cwd, or the running process is one the classifier cannot
+    // name, and `Unknown` defers straight back to this rule. Every one of those cases
+    // pinned a session from days ago onto the board with no way off it. Age it out on
+    // the window Codex already uses, for the same reason Codex has one: with no
+    // termination signal, "nothing has been written for hours" is the last honest cue.
+    // A transcript that is GONE is closed outright, whatever the window says.
+    let unsignalled_stale_secs = crate::util::radar_codex_stale_secs();
     let file_rule = |s: &Session| -> bool {
         match s.harness {
             Harness::ClaudeCode => claude_status.contains_key(&s.external_id),
             Harness::Codex => is_codex_open(s),
-            _ => true,
+            _ => mtime_secs_ago(&s.external_id)
+                .map(|secs| unsignalled_stale_secs == 0 || secs <= unsignalled_stale_secs)
+                .unwrap_or(false),
         }
     };
 
@@ -313,8 +344,37 @@ pub fn assemble(
                 .entry(parent.clone())
                 .or_insert_with(|| store.session_events(parent).unwrap_or_default())
                 .as_slice();
-            subagent_terminated_at(tid, parent_events, last, now, terminate_ms)
+            subagent_terminated_at(tid, parent_events, last, now, terminate_ms).or_else(|| {
+                // No `toolUseId`, so nothing above could match this child to its
+                // dispatch, and the 90s file-silence backstop was the only rule left.
+                // The parent knows sooner: see `dispatches_settled_at`. Restricted to
+                // the no-id case so a child that HAS an id keeps waiting for its own
+                // result rather than for its siblings'.
+                tid.is_none()
+                    .then(|| dispatches_settled_at(parent_events, child.started_at))
+                    .flatten()
+            })
         };
+        // LAST RESORT: the harness DELETED the child's transcript.
+        //
+        // Every rule above is an inference from something that is still there. This one
+        // is a fact, and it is the only rule that covers the case none of them can: a
+        // subagent with no `toolUseId` to match against its parent and no member name to
+        // recover one, whose file is gone and so has no mtime for the silence backstop to
+        // measure. `subagent_terminated_at` answers None to that (`child_last_activity?`),
+        // and None means "still running", so the globe stayed nested under its root for
+        // the whole life of the root. On this machine 763 of the 821 subagent rows with
+        // no other signal are in exactly that state, which is the bulk of the agents the
+        // board was still drawing hours after they finished.
+        //
+        // Last rather than first because a parent's logged completion is a BETTER
+        // timestamp than "the file is gone by now": it says when the agent finished, so
+        // one that just returned still plays its implode. This arm only fires where the
+        // alternative was never.
+        let terminated_at = terminated_at.or_else(|| {
+            transcript_gone(&child.external_id)
+                .then(|| child.ended_at.unwrap_or(child.started_at))
+        });
         if let Some(ts) = terminated_at {
             let age_ms = now.signed_duration_since(ts).num_milliseconds().max(0) as u64;
             if age_ms <= grace_ms {
@@ -696,6 +756,98 @@ mod tests {
     /// tests whose subject is composition/labels/links, not membership.
     fn codex_all_open(_: &Session) -> bool {
         true
+    }
+
+    /// `~/.claude/sessions/<pid>.json` carrying the `procStart` a real registry writes
+    /// (UTC), for the pid-reuse guard.
+    fn claude_registry_proc_start(pid: u32, sid: &str, started: DateTime<Utc>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(format!("{pid}.json")),
+            serde_json::json!({
+                "pid": pid,
+                "sessionId": sid,
+                "cwd": "/work",
+                "procStart": started.format("%a %b %e %H:%M:%S %Y").to_string(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// A `ProcessIndex` that observed `pid` starting at `started`, the way one `ps`
+    /// sweep reports it: local time, and with no agent process claimed at all (Claude's
+    /// real argv[0]s are ones the classifier rejects).
+    fn sweep_saw(pid: u32, started: DateTime<Utc>) -> ProcessIndex {
+        ProcessIndex::with_starts(
+            Vec::new(),
+            Default::default(),
+            [(
+                pid,
+                started
+                    .with_timezone(&chrono::Local)
+                    .format("%a %b %e %H:%M:%S %Y")
+                    .to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    /// A killed Claude session leaves its `<pid>.json` behind (only a clean exit removes
+    /// it). `is_alive` alone then says "open" again as soon as the OS hands that number
+    /// to anything else, and nothing ever revisits the verdict, so the dead session's
+    /// globe stays for as long as the borrower runs. `procStart` is in the file for
+    /// exactly this reason.
+    #[test]
+    fn a_recycled_pid_does_not_reopen_a_killed_session() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(9);
+        seed(&store, "root", "root-ext", Harness::ClaudeCode, Some("/work"), None);
+
+        // Same pid, same start time: the session really is the one still running.
+        let reg = claude_registry_proc_start(4242, "root-ext", started);
+        let alive = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            &sweep_saw(4242, started),
+            now,
+        );
+        assert_eq!(alive.agents.len(), 1, "the live session must still render");
+
+        // Same pid, a start time two minutes ago: the number was recycled and the
+        // session behind that file died hours back.
+        let recycled = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            &sweep_saw(4242, now - chrono::Duration::minutes(2)),
+            now,
+        );
+        assert!(
+            recycled.agents.is_empty(),
+            "a recycled pid must not reopen the dead session behind a leftover registry file"
+        );
+
+        // A sweep that never saw the pid leaves the old `is_alive` rule in charge.
+        let unobserved = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            &ProcessIndex::unscanned(),
+            now,
+        );
+        assert_eq!(
+            unobserved.agents.len(),
+            1,
+            "an unobserved pid is not evidence of death"
+        );
     }
 
     /// One live Claude session re-ingested as SEVERAL store rows (same external id,
@@ -1580,6 +1732,13 @@ mod tests {
     fn a_harness_with_no_file_rule_opens_on_its_process() {
         let store = Store::memory().unwrap();
         let now = Utc::now();
+        // A REAL transcript on disk: a harness with no file rule is now aged out on
+        // transcript recency (see `file_rule`), so a session whose transcript never
+        // existed is closed before the process table is ever consulted, and this test
+        // would be asserting the wrong thing.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("chat_history.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
         let s = Session {
             id: "gk-root".into(),
             harness: Harness::Grok,
@@ -1592,7 +1751,7 @@ mod tests {
             model_ids: vec![],
             started_at: now,
             ended_at: None,
-            source_path: std::path::PathBuf::from("/tmp/chat_history.jsonl"),
+            source_path: transcript,
             raw_hash: 0,
             ingested_at: now,
             meta: serde_json::json!({}),
@@ -3467,6 +3626,302 @@ mod tests {
                 _ => None,
             })
             .expect("root must carry the tool-result")
+    }
+
+    /// Seed a registry-open Claude ROOT plus one SUBAGENT under it that carries no
+    /// `toolUseId` and no member name, so nothing but the file rules can retire it.
+    /// `sub_path` is used verbatim as the child's transcript, `dispatch` optionally adds
+    /// an `Agent` tool-call (and its result) to the root.
+    fn seed_root_with_signalless_subagent(
+        store: &Store,
+        sub_path: PathBuf,
+        sub_started: DateTime<Utc>,
+        sub_ended: Option<DateTime<Utc>>,
+        dispatch: Option<(DateTime<Utc>, Option<DateTime<Utc>>)>,
+    ) {
+        let root = Session {
+            id: "root".into(),
+            harness: Harness::ClaudeCode,
+            external_id: "root-ext".into(),
+            project: Some(ProjectRef {
+                cwd: PathBuf::from("/work"),
+                repo_root: None,
+                git_branch: None,
+            }),
+            model_ids: vec![],
+            started_at: sub_started - chrono::Duration::seconds(60),
+            ended_at: None,
+            source_path: PathBuf::from("/tmp/root-signalless.jsonl"),
+            raw_hash: 0,
+            ingested_at: sub_started,
+            meta: serde_json::json!({}),
+        };
+        let turn = Turn {
+            id: "root-t0".into(),
+            session_id: "root".into(),
+            parent_id: None,
+            role: Role::Assistant,
+            index: 1,
+            started_at: root.started_at,
+            duration_ms: None,
+            is_sidechain: false,
+        };
+        let mut events = Vec::new();
+        if let Some((call_ts, result_ts)) = dispatch {
+            events.push(EventRecord {
+                id: "root-call".into(),
+                turn_id: "root-t0".into(),
+                session_id: "root".into(),
+                ts: call_ts,
+                event: Event::ToolCall {
+                    tool: "Agent".into(),
+                    input: serde_json::json!({ "description": "sweep" }),
+                    call_id: "toolu_dispatch".into(),
+                    kind: crate::ir::ToolKind::SubagentTask,
+                },
+                raw_ref: RawRef {
+                    source_path: root.source_path.clone(),
+                    offset: 0,
+                    line: 1,
+                },
+            });
+            if let Some(result_ts) = result_ts {
+                events.push(EventRecord {
+                    id: "root-res".into(),
+                    turn_id: "root-t0".into(),
+                    session_id: "root".into(),
+                    ts: result_ts,
+                    event: Event::ToolResult {
+                        call_id: "toolu_dispatch".into(),
+                        status: ToolStatus::Ok,
+                        bytes: 0,
+                        summary: None,
+                    },
+                    raw_ref: RawRef {
+                        source_path: root.source_path.clone(),
+                        offset: 1,
+                        line: 2,
+                    },
+                });
+            }
+        }
+        store
+            .upsert_session_batch(&root, &[turn], &events, 0)
+            .unwrap();
+
+        let sub = Session {
+            id: "sub".into(),
+            harness: Harness::ClaudeCode,
+            external_id: "sub-ext".into(),
+            project: None,
+            model_ids: vec![],
+            started_at: sub_started,
+            ended_at: sub_ended,
+            source_path: sub_path,
+            raw_hash: 0,
+            ingested_at: sub_started,
+            meta: serde_json::json!({}),
+        };
+        store.upsert_session_batch(&sub, &[], &[], 0).unwrap();
+        store.link_child_session("sub", "root").unwrap();
+    }
+
+    /// The reported bug, at its largest. A subagent with no `toolUseId` and no member
+    /// name has only the file rules left, and when the harness has DELETED its
+    /// transcript those rules had nothing to work with: no id to match, and no mtime for
+    /// the 90s silence backstop to measure, so `subagent_terminated_at` answered None and
+    /// None means "still running". The globe then stayed nested under its root for the
+    /// root's whole life. 763 of the 821 subagent rows on this machine with no other
+    /// signal are in that state.
+    #[test]
+    fn a_subagent_whose_transcript_was_deleted_is_retired() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("subagents/agent-gone.jsonl"); // never created
+        seed_root_with_signalless_subagent(
+            &store,
+            gone,
+            now - chrono::Duration::hours(3),
+            Some(now - chrono::Duration::hours(2)),
+            None,
+        );
+        let reg = claude_registry(&[(4242, "root-ext")]);
+        let state = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            &ProcessIndex::unscanned(),
+            now,
+        );
+        assert!(
+            state.agents.iter().all(|a| a.id != "sub"),
+            "a subagent whose transcript the harness deleted must not still be drawn"
+        );
+        let root = state.agents.iter().find(|a| a.id == "root").unwrap();
+        assert_eq!(root.child_count, 0, "and it must not still be counted");
+    }
+
+    /// A transcript that is still on disk and still fresh is NOT a deleted one: the
+    /// child stays. Guards the rule above against closing live agents.
+    #[test]
+    fn a_subagent_whose_transcript_is_still_there_stays() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-live.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        seed_root_with_signalless_subagent(
+            &store,
+            path,
+            now - chrono::Duration::seconds(20),
+            None,
+            None,
+        );
+        let reg = claude_registry(&[(4242, "root-ext")]);
+        let state = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            &ProcessIndex::unscanned(),
+            now,
+        );
+        assert!(
+            state.agents.iter().any(|a| a.id == "sub"),
+            "a running subagent still has its transcript and must stay on the board"
+        );
+    }
+
+    /// The other half of the complaint: not late, but not INSTANT. A subagent with no
+    /// `toolUseId` used to need 90 seconds of file silence before it was called
+    /// finished, even though the parent had already logged the result of the dispatch
+    /// that launched it. The transcript here is fresh (one second old), so the silence
+    /// backstop cannot fire and the parent's result is the only thing that can retire
+    /// this child.
+    #[test]
+    fn a_signalless_subagent_retires_on_its_parents_dispatch_result() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-x.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let reg = claude_registry(&[(4242, "root-ext")]);
+        let started = now - chrono::Duration::seconds(30);
+
+        // Dispatch logged, no result yet: the child is out and must stay.
+        seed_root_with_signalless_subagent(
+            &store,
+            path.clone(),
+            started,
+            None,
+            Some((started - chrono::Duration::seconds(1), None)),
+        );
+        let open = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            &ProcessIndex::unscanned(),
+            now,
+        );
+        assert!(
+            open.agents.iter().any(|a| a.id == "sub"),
+            "an open dispatch means the subagent is still running"
+        );
+
+        // The dispatch returns. The child is finished NOW, not in 90 seconds.
+        let store = Store::memory().unwrap();
+        seed_root_with_signalless_subagent(
+            &store,
+            path,
+            started,
+            None,
+            Some((
+                started - chrono::Duration::seconds(1),
+                Some(now - chrono::Duration::seconds(1)),
+            )),
+        );
+        let done = assemble(
+            &store,
+            reg.path(),
+            &|_| true,
+            &codex_all_open,
+            &ProcessIndex::unscanned(),
+            now,
+        );
+        let sub = done
+            .agents
+            .iter()
+            .find(|a| a.id == "sub")
+            .expect("still emitted, inside the implode grace");
+        assert_eq!(
+            sub.status, "terminated",
+            "the parent's result retires the child on the pass that ingests it"
+        );
+    }
+
+    /// A harness with no file rule of its own (Grok here) used to answer a flat `true`
+    /// to "is this open", which is open forever: the process table is its only close
+    /// signal and it answers `Unknown` whenever `lsof` is denied or the row carries no
+    /// cwd. Age it out on the same window Codex uses.
+    #[test]
+    fn a_harness_with_no_file_rule_ages_out_on_a_stale_transcript() {
+        let store = Store::memory().unwrap();
+        let now = Utc::now();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let s = Session {
+            id: "gk".into(),
+            harness: Harness::Grok,
+            external_id: "grok-1".into(),
+            project: None, // no cwd: the process table can only answer Unknown
+            model_ids: vec![],
+            started_at: now - chrono::Duration::hours(30),
+            ended_at: None,
+            source_path: path.clone(),
+            raw_hash: 0,
+            ingested_at: now,
+            meta: serde_json::json!({}),
+        };
+        store.upsert_session_batch(&s, &[], &[], 0).unwrap();
+        let running = ProcessIndex::new(
+            vec![crate::radar::procs::AgentProcess {
+                harness: Harness::Grok,
+                pid: 77,
+                ppid: 1,
+                started_at: "Sun Aug 30 02:10:32 2026".into(),
+                argv0: "grok".into(),
+            }],
+            Default::default(),
+        );
+
+        set_old_mtime(&path, 30 * 3600); // 30h, past the 6h window
+        let stale = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &|_| false,
+            &running,
+            now,
+        );
+        assert!(
+            stale.agents.is_empty(),
+            "a session untouched for 30h must not still be drawn on a bare Unknown"
+        );
+
+        set_old_mtime(&path, 60); // a minute ago
+        let fresh = assemble(
+            &store,
+            Path::new("/no/registry"),
+            &|_| true,
+            &|_| false,
+            &running,
+            now,
+        );
+        assert_eq!(fresh.agents.len(), 1, "a live session must still render");
     }
 
     /// B4 end-to-end: a subagent whose parent logged its tool-result is emitted ONCE

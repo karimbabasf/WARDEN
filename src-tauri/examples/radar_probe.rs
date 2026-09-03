@@ -23,14 +23,30 @@ fn main() {
 
     // ── Raw registry ground truth (what liveness actually reads) ────────────────
     let registry = read_claude_registry(&reg);
-    println!("\n=== CLAUDE REGISTRY ({} entries) ===", registry.len());
+    // The pid-reuse guard, shown per entry. `same_proc` is the three-valued answer the
+    // forest actually uses: `true` this is still that process, `false` the pid was
+    // recycled and the session behind this leftover file is gone, `-` not observed (the
+    // old `alive` rule decides). A `false` here beside `alive=true` is the exact case
+    // that used to leave a dead session's globe on the board forever.
+    let procs = warden_lib::platform::process_index();
+    println!(
+        "\n=== CLAUDE REGISTRY ({} entries; sweep saw {} pids) ===",
+        registry.len(),
+        procs.observed_pids()
+    );
     for (pid, v) in &registry {
         let alive = pid_alive(*pid);
         let sid = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("?");
         let cwd = v.get("cwd").and_then(|x| x.as_str()).unwrap_or("?");
         let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("<none>");
         let ver = v.get("version").and_then(|x| x.as_str()).unwrap_or("?");
-        println!("  pid={pid} alive={alive} reg_status={status} ver={ver} sid={sid} cwd={cwd}");
+        let same = procs
+            .is_same_process(*pid, v.get("procStart").and_then(|x| x.as_str()))
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "  pid={pid} alive={alive} same_proc={same} reg_status={status} ver={ver} sid={sid} cwd={cwd}"
+        );
     }
 
     let state = recompute_radar_state(&store, &reg);

@@ -150,6 +150,56 @@ pub(crate) fn parent_completion_at(
         .max()
 }
 
+/// When every `Agent`/`Task` dispatch that could have launched a child starting at
+/// `child_started_at` had returned, or `None` while any of them is still open.
+///
+/// The fast path for a subagent carrying no `toolUseId`. Without one there is nothing
+/// to match against the parent, so the only rule left was the file-silence backstop:
+/// wait 90 seconds of no writes and call it finished. That is the whole of the "WARDEN
+/// is late to notice an agent ended" complaint for this class of subagent, and the wait
+/// is not needed, because the parent states the answer directly. A subagent exists
+/// because the parent made a dispatch call, and the parent logs that call's result when
+/// the subagent returns. So if no dispatch the parent made before this child appeared is
+/// still open, this child is not running either.
+///
+/// Two deliberate conservatisms, both chosen so this can only ever be late, never wrong:
+///
+/// * only calls at or before `child_started_at` count. The parent logs the call and the
+///   child's transcript appears after it, so a later call belongs to a different child.
+/// * ALL of those calls must have returned, and the answer is the LAST of their
+///   completions. A parent that fans out three agents at once gives all three the same
+///   candidate set, so each waits for the slowest. Seconds of extra patience against a
+///   90 second timer, and it removes any chance of retiring a sibling that is still out.
+///
+/// Completion is [`parent_completion_at`], so an async agent's launch acknowledgement
+/// does not count as a return. `None` when the parent made no such call at all: no
+/// evidence is not the same as evidence of finishing.
+pub(crate) fn dispatches_settled_at(
+    parent_events: &[(crate::ir::Turn, crate::ir::EventRecord)],
+    child_started_at: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let candidates: Vec<&str> = parent_events
+        .iter()
+        .filter_map(|(_, e)| match &e.event {
+            Event::ToolCall { tool, call_id, .. }
+                if (tool == "Agent" || tool == "Task") && e.ts <= child_started_at =>
+            {
+                Some(call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let mut latest: Option<DateTime<Utc>> = None;
+    for call_id in candidates {
+        let done = parent_completion_at(call_id, parent_events)?;
+        latest = Some(latest.map_or(done, |cur: DateTime<Utc>| cur.max(done)));
+    }
+    latest
+}
+
 /// Recover the `Agent`/`Task` tool-call id that dispatched an in-process TEAMMATE, by
 /// matching the member's roster `name` to the call's `name` argument in the LEAD's events
 /// (newest match wins, so a re-dispatched member keys off its latest run).

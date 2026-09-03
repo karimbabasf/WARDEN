@@ -383,6 +383,29 @@ pub(crate) fn claude_conversation_status(
     }
 }
 
+/// Has the harness DELETED this session's transcript?
+///
+/// The distinction [`transcript_mtime_secs_ago`] cannot draw. That function folds
+/// "no such session" and "the file is gone" into one `None`, and the two are
+/// opposite facts: the first is ignorance, the second is the strongest termination
+/// signal a subagent ever produces. A row only exists because the file was read to
+/// create it, so a row whose `source_path` no longer resolves means the harness
+/// cleaned the transcript up, and a subagent that is still running always has one.
+///
+/// Reading this as ignorance is what left finished subagents on the board for the
+/// whole life of their root: with no `toolUseId` to match and no mtime to age, the
+/// file-silence backstop had no timestamp to work from and returned "still live"
+/// forever. On this machine 763 of the 821 subagent rows with no other termination
+/// signal are in exactly that state.
+///
+/// `false` for an unknown session id: absence of a row is not evidence of a death.
+pub(crate) fn transcript_is_missing(sessions: &[Session], external_id: &str) -> bool {
+    sessions
+        .iter()
+        .find(|s| s.external_id == external_id)
+        .is_some_and(|s| !s.source_path.exists())
+}
+
 /// Seconds since the session's transcript was last modified, by `external_id`.
 /// Returns `None` when the session/file is unknown or its mtime is unreadable.
 pub(crate) fn transcript_mtime_secs_ago(

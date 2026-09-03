@@ -194,6 +194,60 @@ pub fn scan_ps_output(output: &str, self_pid: u32) -> Vec<AgentProcess> {
     out
 }
 
+/// Every pid in a `ps` sweep with its raw `lstart` string, agent or not.
+///
+/// Deliberately does NOT run [`classify`]: its consumer asks about pid identity,
+/// not about harnesses, and a process WARDEN cannot name is still a process whose
+/// number is taken. `self_pid` is dropped for the same reason as in
+/// [`scan_ps_output`].
+pub fn scan_ps_starts(output: &str, self_pid: u32) -> std::collections::HashMap<u32, String> {
+    let mut out = std::collections::HashMap::new();
+    for line in output.lines() {
+        let Some((pid, _, started_at, _)) = parse_ps_line(line) else {
+            continue;
+        };
+        if pid == self_pid {
+            continue;
+        }
+        out.insert(pid, started_at);
+    }
+    out
+}
+
+/// Do a `ps` start time and a harness-reported start time name the same instant?
+///
+/// The two are the same calendar format (`%a %b %e %H:%M:%S %Y`) in DIFFERENT time
+/// zones, and that is the whole difficulty. `ps lstart` prints local time; Claude's
+/// registry writes `procStart` in UTC. On this machine the same process reads as
+/// `Wed Sep  2 22:00:06 2026` from `ps` and `Thu Sep  3 05:00:06 2026` from the
+/// registry. A string compare (which is what every other identity check in this
+/// module does, on purpose) would call every live session dead here, so this one
+/// place parses.
+///
+/// One second of tolerance: the two clocks round the same instant independently,
+/// and a process whose pid was recycled inside one second of the original's start
+/// is not a case worth failing open for.
+///
+/// Unparseable on either side does NOT answer `false`: the caller must never treat
+/// "we cannot read this format" as death, so it returns `true` (the same process,
+/// as far as we can tell) and leaves the verdict to the plain pid check.
+pub fn same_process(ps_lstart_local: &str, harness_proc_start_utc: &str) -> bool {
+    const FMT: &str = "%a %b %e %H:%M:%S %Y";
+    let parse = |s: &str| chrono::NaiveDateTime::parse_from_str(s.trim(), FMT).ok();
+    let (Some(local), Some(utc)) = (parse(ps_lstart_local), parse(harness_proc_start_utc)) else {
+        return true; // unreadable format: never let a parse failure close a globe
+    };
+    use chrono::TimeZone;
+    let Some(observed) = chrono::Local.from_local_datetime(&local).earliest() else {
+        return true; // a DST gap: the same refusal to guess
+    };
+    let claimed = chrono::Utc.from_utc_datetime(&utc);
+    (observed.with_timezone(&chrono::Utc) - claimed)
+        .num_seconds()
+        .abs()
+        <= 1
+}
+
 /// Parse `lsof -d cwd -Fn` output into pid to working directory.
 ///
 /// The `-F` machine format is a stream of one-letter-tagged lines: `p<pid>` opens
@@ -249,6 +303,20 @@ pub enum Liveness {
 pub struct ProcessIndex {
     procs: Vec<AgentProcess>,
     cwds: std::collections::HashMap<u32, String>,
+    /// Start time of EVERY process the sweep saw, agent or not, keyed by pid.
+    ///
+    /// Separate from `procs` because its question is different. `procs` answers
+    /// "which harnesses are running", and to do that it has to recognise a command
+    /// line; this answers "is pid N still the process that pid N was", which needs
+    /// no recognition at all. That matters for Claude, whose sessions are launched
+    /// under argv[0]s the classifier cannot claim (`.../claude/versions/2.1.259`,
+    /// and a bundled `ClaudeCode.app/Contents/MacOS/claude` the app-bundle guard
+    /// deliberately rejects), so a map built only from claimed agents would report
+    /// every one of them as gone.
+    ///
+    /// An absent pid means "not observed", never "dead": see
+    /// [`ProcessIndex::is_same_process`].
+    starts: std::collections::HashMap<u32, String>,
     /// Did the sweep actually run? An index that never observed the machine must
     /// answer `Unknown` to everything.
     ///
@@ -270,8 +338,50 @@ impl ProcessIndex {
         Self {
             procs,
             cwds,
+            starts: std::collections::HashMap::new(),
             scanned: true,
         }
+    }
+
+    /// [`ProcessIndex::new`] plus the all-pid start-time map from the same sweep.
+    pub fn with_starts(
+        procs: Vec<AgentProcess>,
+        cwds: std::collections::HashMap<u32, String>,
+        starts: std::collections::HashMap<u32, String>,
+    ) -> Self {
+        Self {
+            procs,
+            cwds,
+            starts,
+            scanned: true,
+        }
+    }
+
+    /// Is `pid` still the process that started at `proc_start`?
+    ///
+    /// This is the pid-reuse guard for a harness that DOES publish a pid. Claude
+    /// writes `~/.claude/sessions/<pid>.json` and removes it on a clean exit, but a
+    /// session that was killed, crashed or OOM'd leaves the file behind. `kill(pid,
+    /// 0)` alone then says "alive" the moment the OS hands that number to anything
+    /// else, and the dead session's globe comes back and never leaves. Comparing the
+    /// start time makes the answer about a process rather than about a slot.
+    ///
+    /// Three-valued in effect, and the `None` arm is the safe one:
+    ///
+    /// * pid absent from the sweep (or no sweep, or the registry stated no start
+    ///   time) → `None`: we did not observe it, so the caller keeps its old
+    ///   `pid_alive` rule. Never read as death.
+    /// * pid present and the start times name the same instant → `Some(true)`.
+    /// * pid present and they do not → `Some(false)`: this pid was recycled and the
+    ///   session behind that registry file is gone.
+    pub fn is_same_process(&self, pid: u32, proc_start: Option<&str>) -> Option<bool> {
+        let observed = self.starts.get(&pid)?;
+        let claimed = proc_start?;
+        Some(same_process(observed, claimed))
+    }
+
+    pub fn observed_pids(&self) -> usize {
+        self.starts.len()
     }
 
     /// An index that observed nothing and therefore claims nothing. Used when the
@@ -359,6 +469,99 @@ mod tests {
             procs,
             cwds.iter().map(|(p, c)| (*p, c.to_string())).collect(),
         )
+    }
+
+    /// The whole point of the pid-reuse guard: `ps` reports LOCAL time and Claude's
+    /// registry reports UTC, so the same process reads as two different strings.
+    /// Built from one instant rather than hard-coded so the test says the same thing
+    /// in every time zone.
+    #[test]
+    fn same_process_matches_one_instant_across_the_two_clocks() {
+        const FMT: &str = "%a %b %e %H:%M:%S %Y";
+        let t = chrono::Utc::now() - chrono::Duration::hours(3);
+        let from_ps = t.with_timezone(&chrono::Local).format(FMT).to_string();
+        let from_registry = t.format(FMT).to_string();
+        assert!(
+            same_process(&from_ps, &from_registry),
+            "{from_ps} and {from_registry} are the same process"
+        );
+    }
+
+    /// A leftover `<pid>.json` whose number the OS handed to something else. The
+    /// borrower started at a different time, so the dead session must not reopen.
+    #[test]
+    fn same_process_rejects_a_recycled_pid() {
+        const FMT: &str = "%a %b %e %H:%M:%S %Y";
+        let now = chrono::Utc::now();
+        let borrower = (now - chrono::Duration::minutes(2))
+            .with_timezone(&chrono::Local)
+            .format(FMT)
+            .to_string();
+        let dead_session = (now - chrono::Duration::hours(9)).format(FMT).to_string();
+        assert!(!same_process(&borrower, &dead_session));
+    }
+
+    /// A format neither side can parse must NEVER read as death: an unfamiliar `ps`
+    /// would otherwise close every globe on the board at once.
+    #[test]
+    fn same_process_keeps_a_session_it_cannot_parse() {
+        assert!(same_process("not a date", "Thu Sep  3 05:00:06 2026"));
+        assert!(same_process("Thu Sep  3 05:00:06 2026", ""));
+    }
+
+    /// The start-time map must cover pids the harness classifier cannot name.
+    /// Real Claude sessions on this machine run as
+    /// `/Users/k/.local/share/claude/versions/2.1.259` (argv[0]'s basename is a
+    /// version number) and out of a `ClaudeCode.app` bundle the app-bundle guard
+    /// rejects on purpose. A map built from claimed agents would hold neither, and
+    /// the pid guard would then report both live sessions as recycled.
+    #[test]
+    fn scan_ps_starts_keeps_processes_the_classifier_cannot_name() {
+        let out = "\
+ 4760     1 Wed Sep  2 22:00:06 2026 /Users/k/.local/share/claude/versions/2.1.259 --session-id a1
+ 4608     1 Wed Sep  2 21:59:00 2026 /Users/k/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude --bg-pty-host
+ 65151    1 Thu Sep  3 03:01:08 2026 claude --effort max
+";
+        let starts = scan_ps_starts(out, 999);
+        assert_eq!(starts.len(), 3, "every pid, not just the claimed agents");
+        // `parse_ps_line` rejoins the five `lstart` tokens with single spaces, so the
+        // stored form is normalized. `same_process` has to read that form, not just the
+        // space-padded one `ps` prints.
+        assert_eq!(
+            starts.get(&4760).map(String::as_str),
+            Some("Wed Sep 2 22:00:06 2026")
+        );
+        assert!(same_process(
+            starts.get(&4760).unwrap(),
+            &chrono::NaiveDateTime::parse_from_str(
+                "Wed Sep  2 22:00:06 2026",
+                "%a %b %e %H:%M:%S %Y"
+            )
+            .map(|n| {
+                use chrono::TimeZone;
+                chrono::Local
+                    .from_local_datetime(&n)
+                    .earliest()
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+                    .format("%a %b %e %H:%M:%S %Y")
+                    .to_string()
+            })
+            .unwrap()
+        ));
+        // And the classifier really does reject two of them, which is why the map
+        // cannot be built from its output.
+        assert_eq!(scan_ps_output(out, 999).len(), 1);
+    }
+
+    /// A pid the sweep never saw is "not observed", not "dead". The caller keeps its
+    /// own `pid_alive` rule for it, so a failed or partial sweep cannot implode
+    /// anything.
+    #[test]
+    fn is_same_process_defers_on_a_pid_it_never_saw() {
+        let idx = index(vec![proc(Harness::ClaudeCode, 10)], &[(10, "/a")]);
+        assert_eq!(idx.is_same_process(10, Some("Thu Sep  3 05:00:06 2026")), None);
+        assert_eq!(ProcessIndex::unscanned().is_same_process(10, None), None);
     }
 
     #[test]
