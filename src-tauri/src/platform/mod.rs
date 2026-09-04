@@ -46,7 +46,19 @@ pub fn activate_self() {
     imp::activate_self();
 }
 
+/// Put a window on screen without activating the app or making it key.
+///
+/// The half of "show" that a background process does not get for free. `show()` un-hides
+/// a window; on macOS it does not necessarily ORDER it in, and for a borderless,
+/// transparent, never-key window shown by an app the user is not in, it does not. The
+/// menu-bar HUD's auto-summon needs exactly this and must not have the rest of what
+/// focusing a window does. MUST run on the main thread; a no-op elsewhere.
+pub fn order_front_without_activating(ns_window: *mut std::ffi::c_void) {
+    imp::order_front_without_activating(ns_window);
+}
+
 // ---------------------------------------------------------------------------
+// Terminal LOCATION: finding the window an agent is running in, and raising it.// ---------------------------------------------------------------------------
 // Terminal LOCATION: finding the window an agent is running in, and raising it.
 //
 // This surface only READS the process tree and RAISES a window. It never types

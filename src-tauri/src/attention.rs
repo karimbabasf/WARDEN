@@ -30,9 +30,12 @@ use std::sync::{Mutex, OnceLock};
 /// of THIS running app's notification history and has no meaning to a caller. Entries
 /// leave when the agent stops awaiting (it answered, or it died), which is what makes a
 /// second block on the same agent announce again.
-fn announced() -> &'static Mutex<HashSet<String>> {
-    static ANNOUNCED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    ANNOUNCED.get_or_init(|| Mutex::new(HashSet::new()))
+///
+/// `None` means WARDEN has not seen a forest yet. That is NOT the same as an empty set:
+/// see [`fold_awaiting`] for why the first one has to stay silent.
+fn announced() -> &'static Mutex<Option<HashSet<String>>> {
+    static ANNOUNCED: OnceLock<Mutex<Option<HashSet<String>>>> = OnceLock::new();
+    ANNOUNCED.get_or_init(|| Mutex::new(None))
 }
 
 /// Is the auto-open enabled? `WARDEN_HUD_AUTO_AWAIT=0` turns it off.
@@ -64,9 +67,21 @@ fn fold_awaiting(now: HashSet<String>) -> Vec<String> {
     let Ok(mut seen) = announced().lock() else {
         return Vec::new();
     };
-    let mut fresh: Vec<String> = now.difference(&seen).cloned().collect();
+    // THE FIRST FOREST NEVER ANNOUNCES. An agent that was already waiting before WARDEN
+    // launched has not just started waiting: it is the state of the world at boot, and
+    // "here is everything that was already true" is not a notification.
+    //
+    // This is also what keeps the login case honest. The first recompute lands about
+    // 85ms after start, long before the HUD's webview has loaded and subscribed, so a
+    // summon there showed a window the frontend never learned to draw: an empty panel
+    // that then blocked every later summon because the window counted as already up.
+    let Some(previous) = seen.as_ref() else {
+        *seen = Some(now);
+        return Vec::new();
+    };
+    let mut fresh: Vec<String> = now.difference(previous).cloned().collect();
     fresh.sort();
-    *seen = now;
+    *seen = Some(now);
     fresh
 }
 
@@ -83,7 +98,12 @@ mod tests {
     /// sharing it would flake. The sequence below is the whole rule in order.
     #[test]
     fn announces_transitions_into_awaiting_and_only_transitions() {
-        let _ = fold_awaiting(set(&[])); // start from a known state
+        // The FIRST forest is the state of the world, not news, whatever is in it.
+        assert!(
+            fold_awaiting(set(&["already-waiting-before-we-launched"])).is_empty(),
+            "an agent that was already blocked at boot has not just blocked"
+        );
+        let _ = fold_awaiting(set(&[])); // and now to a known empty state
 
         assert!(fold_awaiting(set(&[])).is_empty(), "nothing awaiting, nothing to say");
 

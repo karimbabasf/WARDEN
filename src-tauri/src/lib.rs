@@ -158,16 +158,45 @@ fn show_hud(
     // clicking and blur-to-dismiss start mattering.
     if summon.focus {
         let _ = w.set_focus();
+    } else {
+        // `show()` is only half of showing a window that a BACKGROUND app owns. The
+        // other half is ordering it into the front level, which the click path gets for
+        // free from `set_focus` and this one must get without the focus. Main thread,
+        // because AppKit says so.
+        #[cfg(target_os = "macos")]
+        if let Ok(ns) = w.ns_window() {
+            let ns = ns as usize;
+            let _ = app.run_on_main_thread(move || {
+                platform::order_front_without_activating(ns as *mut std::ffi::c_void);
+            });
+        }
     }
-    let _ = app.emit_to(
-        "hud",
-        "hud_summon",
-        serde_json::json!({
-            "centreX": icon_centre - x,
-            "width": icon_size.width,
-            "auto": summon.auto,
-        }),
-    );
+    // PUSH AND PULL, because the push alone cannot be relied on here. The HUD's webview
+    // does not boot until its window is first shown, so the very first summon of a
+    // session emits into a page that does not exist yet: the window appeared, the panel
+    // never opened, and because the window then counted as visible every later summon
+    // was suppressed as "already up". The frontend asks for this on mount
+    // (`hud_pending_summon`), so a summon survives a webview that is still loading.
+    let payload = serde_json::json!({
+        "centreX": icon_centre - x,
+        "width": icon_size.width,
+        "auto": summon.auto,
+    });
+    set_pending_summon(Some(payload.clone()));
+    let _ = app.emit_to("hud", "hud_summon", payload);
+}
+
+/// The summon the HUD has not picked up yet, if any. See [`show_hud`].
+pub(crate) fn pending_summon() -> &'static std::sync::Mutex<Option<serde_json::Value>> {
+    static PENDING: std::sync::OnceLock<std::sync::Mutex<Option<serde_json::Value>>> =
+        std::sync::OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub(crate) fn set_pending_summon(v: Option<serde_json::Value>) {
+    if let Ok(mut p) = pending_summon().lock() {
+        *p = v;
+    }
 }
 
 /// How a HUD summon was asked for. The tray click is deliberate and behaves like any
@@ -209,11 +238,8 @@ pub(crate) fn summon_hud_for_attention(app: &tauri::AppHandle) {
     if war_room_focused {
         return;
     }
-    let Some(rect) = app
-        .tray_by_id("warden-tray")
-        .and_then(|t| t.rect().ok().flatten())
-    else {
-        tracing::debug!("no tray rect; skipping the attention summon");
+    let Some(rect) = attention_rect(app) else {
+        tracing::debug!("no usable tray rect; skipping the attention summon");
         return;
     };
     // `show_hud` only needs a point to pick the MONITOR the icon sits on, and the icon's
@@ -228,6 +254,91 @@ pub(crate) fn summon_hud_for_attention(app: &tauri::AppHandle) {
     show_hud(app, rect, point, HudSummon::AUTO);
 }
 
+/// The last rect a real tray CLICK reported, which is a rect macOS had certainly placed.
+fn last_click_rect() -> &'static std::sync::Mutex<Option<tauri::Rect>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<tauri::Rect>>> =
+        std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Where to grow the panel from when nobody clicked anything.
+///
+/// `TrayIcon::rect()` reads the status item's window frame, and macOS does not place that
+/// window until it has drawn the icon: an app started by the login agent and never
+/// brought forward reports `(0, 0, 34, 33)`, which flips into the BOTTOM-left corner of
+/// the screen. Trusting it would open the panel in the one place a menu-bar panel can
+/// never belong, and that is the exact case this feature exists for.
+///
+/// So: the live rect when it is genuinely placed, else the last rect a click reported
+/// (exact, and true for the whole session once the operator has opened the panel once),
+/// else the top-right of the primary display, where menu-bar extras live. The last one
+/// is an approximation and says so; it is still under the menu bar, which is the part
+/// that matters.
+fn attention_rect(app: &tauri::AppHandle) -> Option<tauri::Rect> {
+    if let Some(rect) = app
+        .tray_by_id("warden-tray")
+        .and_then(|t| t.rect().ok().flatten())
+    {
+        if rect_is_placed(app, &rect) {
+            return Some(rect);
+        }
+    }
+    if let Some(rect) = last_click_rect().lock().ok().and_then(|r| *r) {
+        return Some(rect);
+    }
+    let mon = app.primary_monitor().ok().flatten()?;
+    let scale = mon.scale_factor();
+    let origin = mon.position().to_logical::<f64>(scale);
+    let size = mon.size().to_logical::<f64>(scale);
+    // A guess at where the icon is, not a claim: the right end of the menu bar, inset by
+    // roughly the width of the clock and the controls that always sit outboard of it.
+    const FALLBACK_INSET: f64 = 180.0;
+    const ICON: f64 = 24.0;
+    // The rect's HEIGHT is what the panel hangs below, so it has to be the menu bar, not
+    // the tolerance above. 37pt is a notched Mac's bar; on an unnotched display the panel
+    // opens about 13px lower than it would from the real icon, which is invisible against
+    // an animation that grows out of the bar anyway.
+    const MENU_BAR_HEIGHT: f64 = 37.0;
+    Some(tauri::Rect {
+        position: tauri::LogicalPosition::new(origin.x + size.width - FALLBACK_INSET, origin.y)
+            .into(),
+        size: tauri::LogicalSize::new(ICON, MENU_BAR_HEIGHT).into(),
+    })
+}
+
+/// How far down from the top of a display a tray icon can possibly be. The macOS menu
+/// bar is 24pt, 37pt on a notched display; 60 clears both with room and is still nowhere
+/// near the middle of any screen.
+const MENU_BAR_STRIP: f64 = 60.0;
+
+/// Has macOS actually placed this status item, or is it reporting an unpositioned window?
+///
+/// A tray icon is in the menu bar, so its top edge is within [`MENU_BAR_STRIP`] of the top
+/// of the display it is on. Anything else is the unplaced `(0, 0)` frame flipped into the
+/// bottom of the screen.
+fn rect_is_placed(app: &tauri::AppHandle, rect: &tauri::Rect) -> bool {
+    let scale = app
+        .get_webview_window("hud")
+        .and_then(|w| w.scale_factor().ok())
+        .unwrap_or(1.0);
+    let pos = rect.position.to_logical::<f64>(scale);
+    let size = rect.size.to_logical::<f64>(scale);
+    let centre = tauri::PhysicalPosition::new(
+        (pos.x + size.width / 2.0) * scale,
+        (pos.y + size.height / 2.0) * scale,
+    );
+    let Some(mon) = app
+        .monitor_from_point(centre.x, centre.y)
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten())
+    else {
+        return false;
+    };
+    let top = mon.position().to_logical::<f64>(mon.scale_factor()).y;
+    pos.y >= top - 1.0 && pos.y <= top + MENU_BAR_STRIP
+}
+
 /// Left-clicking the tray icon toggles the HUD.
 ///
 /// The CLOSE half is asynchronous on purpose: the window may not be hidden until the
@@ -239,10 +350,20 @@ fn toggle_hud(app: &tauri::AppHandle, rect: tauri::Rect, point: tauri::PhysicalP
         .and_then(|w| w.is_visible().ok())
         .unwrap_or(false);
     if visible {
+        set_pending_summon(None);
         let _ = app.emit_to("hud", "hud_dismiss", ());
     } else {
         show_hud(app, rect, point, HudSummon::CLICK);
     }
+}
+
+/// Was WARDEN started by something other than a person: the login agent, a script?
+///
+/// `--hidden` is how that is said. A flag rather than a setting because it describes
+/// this LAUNCH, not a preference: the same install must open its window when you
+/// double-click it and stay in the menu bar when the machine boots it for you.
+fn starts_hidden() -> bool {
+    std::env::args().any(|a| a == "--hidden")
 }
 
 pub fn run() {
@@ -255,9 +376,9 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             // 1) Persistent app: show a Dock icon so Minimize has a home and the
-            //    window behaves like a regular macOS app. The window opens visible on
-            //    launch (tauri.conf.json visible:true); the daemon stays alive when it
-            //    is later hidden or minimized.
+            //    window behaves like a regular macOS app. The window is created hidden
+            //    and shown at the end of setup (unless `--hidden`); the daemon stays
+            //    alive when it is later hidden or minimized.
             platform::apply_activation_policy(app);
 
             let state = AppState::init().map_err(|e| format!("state init: {e}"))?;
@@ -431,6 +552,12 @@ pub fn run() {
                         ..
                     } = event
                     {
+                        // A rect from a real click is one macOS has certainly placed, so
+                        // keep it: an auto summon can then grow the panel from the exact
+                        // icon even when the status item reports an unpositioned frame.
+                        if let Ok(mut last) = last_click_rect().lock() {
+                            *last = Some(rect);
+                        }
                         toggle_hud(tray.app_handle(), rect, position);
                     }
                 });
@@ -439,8 +566,8 @@ pub fn run() {
             }
             tray.build(app)?;
 
-            // 5) The window is a persistent, normal macOS window, visible on launch
-            //    (tauri.conf.json visible:true). It never dismisses on blur or focus
+            // 5) The window is a persistent, normal macOS window, shown on launch by
+            //    the summon at the end of setup. It never dismisses on blur or focus
             //    loss: it stays put until the user minimizes or closes it (a close
             //    hides it so the daemon keeps watching). The tray and the optional
             //    hotkey can re-show or toggle it.
@@ -468,10 +595,24 @@ pub fn run() {
                 .map_err(|e| format!("global shortcut: {e}"))?;
             }
 
-            // Focus the window on launch and wake the render loop. The window is
-            // already visible (tauri.conf.json visible:true); this focuses it and
-            // emits the warden_hotkey wake signal so the R3F loop resumes at once.
-            summon_overlay(app.handle());
+            // Show and focus the window on launch, and wake the render loop. The
+            // window is created HIDDEN (tauri.conf.json visible:false) and shown here
+            // rather than the other way round: a `--hidden` launch that had to hide an
+            // already-visible window would flash a 3D war room across the screen on
+            // every boot. `raise_overlay` shows before it focuses, so the ordinary
+            // launch is unchanged.
+            //
+            // `--hidden` skips it, and that is the ONLY thing the flag does: the login
+            // agent passes it so a boot does not put a 3D window in front of you before
+            // you have asked for one. WARDEN is a daemon at that moment; the tray icon
+            // is the whole of what it needs to say. Launching it by hand from the Dock
+            // or Finder passes no flag and behaves exactly as it always has, and the
+            // hotkey, the tray and the Dock icon all still raise it.
+            if starts_hidden() {
+                dismiss_overlay(app.handle());
+            } else {
+                summon_overlay(app.handle());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -482,6 +623,7 @@ pub fn run() {
             get_radar_state,
             hud_hide,
             hud_take_focus,
+            hud_pending_summon,
             hud_focus_agent,
             rename_session,
             reveal_path,

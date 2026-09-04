@@ -37,6 +37,10 @@ export const HUD_VISIBLE_PULL_MS = 750;
  *  it costs nothing. Reaching for the panel cancels the clock for good — see `engage`. */
 export const HUD_AUTO_LINGER_MS = 6000;
 
+/** What Rust sends (or holds) to open the panel: where the tray icon is, and whether
+ *  anybody asked. */
+export type HudSummonPayload = { centreX?: number; width?: number; auto?: boolean };
+
 /** Does this panel leave on its own clock?
  *
  *  Only an AUTO summon does, only while it is on screen, and only until the operator
@@ -62,6 +66,23 @@ export function HudRoot() {
 
   const dismiss = useCallback(() => {
     setPhase((p) => (p === 'opening' || p === 'open' ? 'closing' : p));
+  }, []);
+
+  // CLAIM THE SUMMON WE WERE NOT ALIVE FOR. This webview does not boot until its window
+  // is first shown, so the summon that showed it was emitted at a page that did not exist
+  // yet. Rust holds the last one; ask for it on mount and open from the answer.
+  //
+  // No pending summon while the window is up means the window is STRANDED (a fresh
+  // HudRoot draws no panel by definition), so hide it: "visible" has to keep meaning "the
+  // panel is open" for the tray toggle and the auto-open to reason about it.
+  useEffect(() => {
+    invoke<{ centreX?: number; width?: number; auto?: boolean } | null>('hud_pending_summon')
+      .then((p) => {
+        if (!p) return invoke('hud_hide').catch(() => {});
+        applySummon(p);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── the live forest ────────────────────────────────────────────────────────
@@ -105,26 +126,29 @@ export function HudRoot() {
     };
   }, [phase]);
 
+  // One definition of "open the panel here", because there are two ways in now: the push
+  // event, and the pull on mount that covers a webview which was not there for it.
+  const applySummon = useCallback((p: HudSummonPayload | null | undefined) => {
+    setWindowW(window.innerWidth);
+    setNeck({
+      centreX: Number.isFinite(p?.centreX) ? (p?.centreX as number) : window.innerWidth / 2,
+      width: Math.max(16, Number.isFinite(p?.width) ? (p?.width as number) : 24),
+    });
+    setAuto(p?.auto === true);
+    setEngaged(false);
+    setPhase('opening');
+  }, []);
+
   // ── summon / dismiss, driven by the tray ───────────────────────────────────
   useEffect(() => {
     const subs = [
-      listen<{ centreX: number; width: number; auto?: boolean }>('hud_summon', (e) => {
-        const p = e.payload;
-        setWindowW(window.innerWidth);
-        setNeck({
-          centreX: Number.isFinite(p?.centreX) ? p.centreX : window.innerWidth / 2,
-          width: Math.max(16, Number.isFinite(p?.width) ? p.width : 24),
-        });
-        setAuto(p?.auto === true);
-        setEngaged(false);
-        setPhase('opening');
-      }),
+      listen<HudSummonPayload>('hud_summon', (e) => applySummon(e.payload)),
       listen('hud_dismiss', () => dismiss()),
     ];
     return () => {
       for (const s of subs) s.then((f) => f()).catch(() => {});
     };
-  }, [dismiss]);
+  }, [dismiss, applySummon]);
 
   useEffect(() => {
     if (phase !== 'opening') return;

@@ -172,7 +172,32 @@ pub async fn hud_hide(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("hud") {
         let _ = w.hide();
     }
+    crate::set_pending_summon(None);
     Ok(())
+}
+
+/// The summon the HUD has not drawn yet, claimed exactly once.
+///
+/// A summon is PUSHED as an event and also held here, because the push alone is not
+/// reliable at the one moment this feature exists for: the HUD's webview may still be
+/// loading when the window is shown, and an event emitted at a page that does not exist
+/// yet is simply lost. HudRoot asks for this on mount and opens the panel from the answer.
+///
+/// Returns `None` when the window is not actually visible: a summon that has been
+/// dismissed or hidden since must not replay a panel nobody is waiting for. `None` while
+/// the window IS up tells the frontend the window is STRANDED and should be hidden.
+#[tauri::command]
+pub async fn hud_pending_summon(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    use tauri::Manager;
+    let visible = app
+        .get_webview_window("hud")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if !visible {
+        crate::set_pending_summon(None);
+        return Ok(None);
+    }
+    Ok(crate::pending_summon().lock().ok().and_then(|mut p| p.take()))
 }
 
 /// Hand the HUD the keyboard.

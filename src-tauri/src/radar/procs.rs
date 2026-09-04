@@ -135,6 +135,54 @@ pub fn classify(argv: &[&str]) -> Option<Harness> {
         .and_then(|a| harness_for_basename(&basename(a).to_ascii_lowercase()))
 }
 
+/// The process sweep, reused for up to [`sweep_ttl`] rather than re-run per recompute.
+///
+/// One sweep is two subprocess spawns (`ps -axo` over every process on the machine, then
+/// one `lsof` for the pids it claimed) and measured 52ms of the 69ms a whole recompute
+/// cost — three quarters of the radar's steady-state CPU spent re-asking a question
+/// whose answer changes on the scale of a process starting or dying, not on the scale of
+/// a transcript growing by one line.
+///
+/// The TTL is safe because of the asymmetry the process table already lives under: it
+/// may only ever CLOSE a globe, never open one (see `assemble`). A stale sweep therefore
+/// delays a dead agent's globe by at most the TTL and can never invent a live one. Both
+/// halves of the fallback (Claude's pid registry, the file rules) are unaffected.
+///
+/// `WARDEN_PROCS_TTL_MS` overrides; `0` disables the cache and sweeps every time.
+pub fn cached_process_index() -> ProcessIndex {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, ProcessIndex)>>> =
+        std::sync::OnceLock::new();
+    let ttl = sweep_ttl();
+    let cell = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if !ttl.is_zero() {
+        if let Ok(guard) = cell.lock() {
+            if let Some((at, idx)) = guard.as_ref() {
+                if at.elapsed() < ttl {
+                    return idx.clone();
+                }
+            }
+        }
+    }
+    let fresh = crate::platform::process_index();
+    if !ttl.is_zero() {
+        if let Ok(mut guard) = cell.lock() {
+            *guard = Some((std::time::Instant::now(), fresh.clone()));
+        }
+    }
+    fresh
+}
+
+/// How long a process sweep may be reused. Default 2s: long enough that the 1s recompute
+/// floor and the 125ms urgent floor both hit the cache most of the time, short enough
+/// that a killed agent's globe still closes in about the time it takes to notice.
+fn sweep_ttl() -> std::time::Duration {
+    let ms = std::env::var("WARDEN_PROCS_TTL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(2000);
+    std::time::Duration::from_millis(ms)
+}
+
 /// One row of `ps -axo pid=,ppid=,lstart=,args=`, split into its fixed prefix and
 /// its command line.
 ///
@@ -296,54 +344,6 @@ pub enum Liveness {
 
 /// The process sweep, indexed for per-session liveness questions.
 ///
-/// The process sweep, reused for up to [`sweep_ttl`] rather than re-run per recompute.
-///
-/// One sweep is two subprocess spawns (`ps -axo` over every process on the machine, then
-/// one `lsof` for the pids it claimed) and measured 52ms of the 69ms a whole recompute
-/// cost — three quarters of the radar's steady-state CPU spent re-asking a question
-/// whose answer changes on the scale of a process starting or dying, not on the scale of
-/// a transcript growing by one line.
-///
-/// The TTL is safe because of the asymmetry the process table already lives under: it
-/// may only ever CLOSE a globe, never open one (see `assemble`). A stale sweep therefore
-/// delays a dead agent's globe by at most the TTL and can never invent a live one. Both
-/// halves of the fallback (Claude's pid registry, the file rules) are unaffected.
-///
-/// `WARDEN_PROCS_TTL_MS` overrides; `0` disables the cache and sweeps every time.
-pub fn cached_process_index() -> ProcessIndex {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, ProcessIndex)>>> =
-        std::sync::OnceLock::new();
-    let ttl = sweep_ttl();
-    let cell = CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    if !ttl.is_zero() {
-        if let Ok(guard) = cell.lock() {
-            if let Some((at, idx)) = guard.as_ref() {
-                if at.elapsed() < ttl {
-                    return idx.clone();
-                }
-            }
-        }
-    }
-    let fresh = crate::platform::process_index();
-    if !ttl.is_zero() {
-        if let Ok(mut guard) = cell.lock() {
-            *guard = Some((std::time::Instant::now(), fresh.clone()));
-        }
-    }
-    fresh
-}
-
-/// How long a process sweep may be reused. Default 2s: long enough that the 1s recompute
-/// floor and the 125ms urgent floor both hit the cache most of the time, short enough
-/// that a killed agent's globe still closes in about the time it takes to notice.
-fn sweep_ttl() -> std::time::Duration {
-    let ms = std::env::var("WARDEN_PROCS_TTL_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(2000);
-    std::time::Duration::from_millis(ms)
-}
-
 /// `cwds` is separate from the sweep because a working directory costs a second
 /// syscall per pid: the sweep is one `ps` over ~1000 processes, and only the
 /// handful it claims are ever asked where they are running.
