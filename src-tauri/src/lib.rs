@@ -1,3 +1,4 @@
+pub mod attention;
 pub mod commands;
 pub mod ingest;
 pub mod ir;
@@ -100,7 +101,12 @@ const HUD_GAP: f64 = 6.0;
 /// cannot be springed and tears at 120Hz). What the frontend needs back is the icon's
 /// own geometry in WINDOW-LOCAL coordinates, that is the point the panel grows out of
 /// and the neck the genie funnels into, so it has to survive the edge clamp below.
-fn show_hud(app: &tauri::AppHandle, rect: tauri::Rect, point: tauri::PhysicalPosition<f64>) {
+fn show_hud(
+    app: &tauri::AppHandle,
+    rect: tauri::Rect,
+    point: tauri::PhysicalPosition<f64>,
+    summon: HudSummon,
+) {
     let Some(w) = app.get_webview_window("hud") else {
         return;
     };
@@ -143,12 +149,83 @@ fn show_hud(app: &tauri::AppHandle, rect: tauri::Rect, point: tauri::PhysicalPos
     let _ = w.show();
     // Focus is what lets a click anywhere else dismiss the panel: macOS reports that as
     // a blur on this window, and there is no other signal for "the user looked away".
-    let _ = w.set_focus();
+    //
+    // An AUTO summon deliberately does not take it. Nobody asked for this window, and a
+    // panel that grabs the keyboard because an agent blocked would eat the next
+    // keystrokes of whatever the operator was actually typing — the one way to make a
+    // helpful notification hostile. It arrives unfocused, leaves on its own clock, and
+    // takes focus the moment the pointer reaches it (`hud_take_focus`), which is when
+    // clicking and blur-to-dismiss start mattering.
+    if summon.focus {
+        let _ = w.set_focus();
+    }
     let _ = app.emit_to(
         "hud",
         "hud_summon",
-        serde_json::json!({ "centreX": icon_centre - x, "width": icon_size.width }),
+        serde_json::json!({
+            "centreX": icon_centre - x,
+            "width": icon_size.width,
+            "auto": summon.auto,
+        }),
     );
+}
+
+/// How a HUD summon was asked for. The tray click is deliberate and behaves like any
+/// menu-bar panel; an auto summon is a notification and behaves like one.
+#[derive(Debug, Clone, Copy)]
+struct HudSummon {
+    /// Take the keyboard. True for a click the operator made, false for one they did not.
+    focus: bool,
+    /// Tell the frontend to run its linger clock and dismiss itself.
+    auto: bool,
+}
+
+impl HudSummon {
+    const CLICK: Self = Self { focus: true, auto: false };
+    const AUTO: Self = Self { focus: false, auto: true };
+}
+
+/// Open the HUD because an agent has just started waiting on the operator.
+///
+/// The geometry a tray CLICK hands us for free (the icon's rect) has to be asked for
+/// here, because there is no click. Everything else is the same summon, minus the focus
+/// grab — see [`show_hud`] and `attention` for why.
+///
+/// Silent no-op when the panel is already up, when the war room is the focused window
+/// (the operator is looking at the fleet already; a second surface saying so is noise),
+/// or when macOS will not report where the tray icon is.
+pub(crate) fn summon_hud_for_attention(app: &tauri::AppHandle) {
+    let already_up = app
+        .get_webview_window("hud")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if already_up {
+        return;
+    }
+    let war_room_focused = app
+        .get_webview_window("overlay")
+        .and_then(|w| Some(w.is_visible().ok()? && w.is_focused().ok()?))
+        .unwrap_or(false);
+    if war_room_focused {
+        return;
+    }
+    let Some(rect) = app
+        .tray_by_id("warden-tray")
+        .and_then(|t| t.rect().ok().flatten())
+    else {
+        tracing::debug!("no tray rect; skipping the attention summon");
+        return;
+    };
+    // `show_hud` only needs a point to pick the MONITOR the icon sits on, and the icon's
+    // own centre names that monitor exactly.
+    let scale = app
+        .get_webview_window("hud")
+        .and_then(|w| w.scale_factor().ok())
+        .unwrap_or(1.0);
+    let pos = rect.position.to_physical::<f64>(scale);
+    let size = rect.size.to_physical::<f64>(scale);
+    let point = tauri::PhysicalPosition::new(pos.x + size.width / 2.0, pos.y + size.height / 2.0);
+    show_hud(app, rect, point, HudSummon::AUTO);
 }
 
 /// Left-clicking the tray icon toggles the HUD.
@@ -164,7 +241,7 @@ fn toggle_hud(app: &tauri::AppHandle, rect: tauri::Rect, point: tauri::PhysicalP
     if visible {
         let _ = app.emit_to("hud", "hud_dismiss", ());
     } else {
-        show_hud(app, rect, point);
+        show_hud(app, rect, point, HudSummon::CLICK);
     }
 }
 
@@ -404,6 +481,7 @@ pub fn run() {
             hide_window,
             get_radar_state,
             hud_hide,
+            hud_take_focus,
             hud_focus_agent,
             rename_session,
             reveal_path,

@@ -29,12 +29,34 @@ const SETTLE_MS = 420;
  *  the fast path; this only exists so a missed one cannot persist. */
 export const HUD_VISIBLE_PULL_MS = 750;
 
+/** How long a panel nobody asked for stays up before it leaves again.
+ *
+ *  An auto summon (an agent just stopped on the operator) is a NOTIFICATION, and the
+ *  thing that separates a notification from an interruption is that it goes away by
+ *  itself. Long enough to read a fleet of globes and decide, short enough that ignoring
+ *  it costs nothing. Reaching for the panel cancels the clock for good — see `engage`. */
+export const HUD_AUTO_LINGER_MS = 6000;
+
+/** Does this panel leave on its own clock?
+ *
+ *  Only an AUTO summon does, only while it is on screen, and only until the operator
+ *  reaches for it. A tray click never does: the operator asked for that one and it stays
+ *  until they click away, press Escape, or pick a globe. */
+export function autoDismisses(auto: boolean, engaged: boolean, phase: HudPhase): boolean {
+  if (!auto || engaged) return false;
+  return phase === 'opening' || phase === 'open';
+}
+
 export function HudRoot() {
   const [nodes, setNodes] = useState<HudNode[]>([]);
   const [phase, setPhase] = useState<HudPhase>('closed');
   const [neck, setNeck] = useState<HudNeck>({ centreX: 0, width: 24 });
   const [windowW, setWindowW] = useState(() => window.innerWidth);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  // Was this summon asked for? A tray click behaves like any menu-bar panel; a summon
+  // the operator did not make has to earn its place and then leave.
+  const [auto, setAuto] = useState(false);
+  const [engaged, setEngaged] = useState(false);
   const phaseRef = useRef<HudPhase>('closed');
   phaseRef.current = phase;
 
@@ -86,13 +108,15 @@ export function HudRoot() {
   // ── summon / dismiss, driven by the tray ───────────────────────────────────
   useEffect(() => {
     const subs = [
-      listen<{ centreX: number; width: number }>('hud_summon', (e) => {
+      listen<{ centreX: number; width: number; auto?: boolean }>('hud_summon', (e) => {
         const p = e.payload;
         setWindowW(window.innerWidth);
         setNeck({
           centreX: Number.isFinite(p?.centreX) ? p.centreX : window.innerWidth / 2,
           width: Math.max(16, Number.isFinite(p?.width) ? p.width : 24),
         });
+        setAuto(p?.auto === true);
+        setEngaged(false);
         setPhase('opening');
       }),
       listen('hud_dismiss', () => dismiss()),
@@ -119,6 +143,26 @@ export function HudRoot() {
     };
   }, [dismiss]);
 
+  // Reaching for the panel is the deliberate act a tray click would have been, so from
+  // here an auto summon behaves exactly like a clicked one: it stops leaving on its own
+  // clock, and it takes the keyboard it declined on the way in. Focus is what a click
+  // outside reports as a blur, which is the only "the user looked away" signal macOS
+  // gives, and it also spends the activating click so the FIRST press lands on a globe.
+  const engage = useCallback(() => {
+    setEngaged((was) => {
+      if (!was) invoke('hud_take_focus').catch(() => {});
+      return true;
+    });
+  }, []);
+
+  // A panel nobody asked for leaves by itself. Only while it is genuinely unengaged: the
+  // clock is cancelled the moment the pointer arrives, and never runs for a tray click.
+  useEffect(() => {
+    if (!autoDismisses(auto, engaged, phase)) return;
+    const t = window.setTimeout(dismiss, HUD_AUTO_LINGER_MS);
+    return () => window.clearTimeout(t);
+  }, [auto, engaged, phase, dismiss]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') dismiss();
@@ -130,6 +174,8 @@ export function HudRoot() {
   const onClosed = useCallback(() => {
     setPhase('closed');
     setHoveredId(null);
+    setAuto(false);
+    setEngaged(false);
     invoke('hud_hide').catch(() => {});
   }, []);
 
@@ -159,10 +205,16 @@ export function HudRoot() {
   return (
     <div
       className={`wd-hud-root is-${phase}`}
+      onPointerOver={(e) => {
+        // Bubbled from the panel: the pointer is ON it, not in the empty dismiss area
+        // around it (which is this element itself).
+        if (e.target !== e.currentTarget) engage();
+      }}
       onPointerDown={(e) => {
         // Anywhere outside the panel is dismiss territory: the window is mostly empty
         // and a click that lands on nothing should not feel like a dead zone.
         if (e.target === e.currentTarget) dismiss();
+        else engage();
       }}
     >
       <HudPanel

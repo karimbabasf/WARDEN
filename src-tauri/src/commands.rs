@@ -175,6 +175,23 @@ pub async fn hud_hide(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Hand the HUD the keyboard.
+///
+/// Only an AUTO summon needs this. That one arrives unfocused on purpose (it must not
+/// eat the keystrokes of whatever the operator was typing when an agent blocked), and
+/// an unfocused window gets no blur, so it also has no "the user looked away" signal
+/// and its first click would be spent activating it. The frontend calls this the moment
+/// the pointer reaches the panel: reaching for it IS the deliberate act that a tray
+/// click would have been, and from here the panel behaves exactly like a clicked one.
+#[tauri::command]
+pub async fn hud_take_focus(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("hud") {
+        let _ = w.set_focus();
+    }
+    Ok(())
+}
+
 /// Open WARDEN on this agent: raise the war room and select the globe the HUD was showing.
 ///
 /// The HUD's FALLBACK. Picking a globe there raises the agent's own terminal first

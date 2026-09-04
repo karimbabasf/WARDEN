@@ -139,6 +139,16 @@ pub(crate) fn recompute_and_emit_radar(
     );
     cache_radar_state(cache, state.clone());
     let _ = app.emit("radar_state", &state);
+    // An agent that has just stopped on the operator is the one state the menu bar
+    // should not wait to be asked about. Fires on the TRANSITION only, and never steals
+    // the keyboard: see `crate::attention`.
+    if crate::attention::auto_open_enabled() {
+        let waiting = crate::attention::newly_awaiting(&state);
+        if !waiting.is_empty() {
+            tracing::debug!(agents = ?waiting, "agent awaiting the operator; summoning the HUD");
+            crate::summon_hud_for_attention(app);
+        }
+    }
     agent_count
 }
 
