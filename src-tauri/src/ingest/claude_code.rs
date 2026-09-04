@@ -159,6 +159,28 @@ impl SubagentMeta {
 /// field is read leniently (missing → empty / `None`, never an error), while
 /// `agent_id` comes from the `agent-<id>` filename stem. Returns an error only when
 /// the file cannot be read or is not valid JSON.
+/// [`read_subagent_meta`], remembered for the life of the process.
+///
+/// The harness writes a subagent's sidecar once, at spawn, and never rewrites it, so the
+/// only thing repeated reads can change is how long a relink takes. `None` is NOT cached:
+/// a sidecar that is not there yet may still be written.
+fn cached_subagent_meta(path: &Path) -> Option<SubagentMeta> {
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, SubagentMeta>>,
+    > = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(m) = memo.lock() {
+        if let Some(hit) = m.get(path) {
+            return Some(hit.clone());
+        }
+    }
+    let fresh = read_subagent_meta(path).ok()?;
+    if let Ok(mut m) = memo.lock() {
+        m.insert(path.to_path_buf(), fresh.clone());
+    }
+    Some(fresh)
+}
+
 pub fn read_subagent_meta(path: &Path) -> Result<SubagentMeta> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let v: Value =
@@ -320,17 +342,27 @@ pub fn ingest_all(
 /// every fact it reads is permanent, so it converges however the writes interleaved.
 pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
     let sessions = store.sessions()?;
+    // ONE query for the whole linkage table, not `parent_of` per subagent row. This runs
+    // after every ingest that lands new bytes and the per-row form was most of the 262ms
+    // it cost on a real store, where the loop below walks every subagent WARDEN has ever
+    // seen to decide that almost all of them are already linked.
+    let parents = store.parent_links().unwrap_or_default();
 
     let mut candidates = Vec::new();
     for s in &sessions {
         if !matches!(s.harness, Harness::ClaudeCode) || !is_subagent_session_path(&s.source_path) {
             continue;
         }
+        let linked = parents.get(&s.id).map(Option::is_some).unwrap_or(false);
 
         // The durable `toolUseId`/identity lives in the on-disk sidecar next to the
         // subagent transcript. Repair the row once, then future relink calls can
         // exit before scanning parent events.
-        let sidecar = read_subagent_meta(&sidecar_path(&s.source_path)).ok();
+        //
+        // MEMOISED: a sidecar is written once when the subagent spawns and never
+        // rewritten, so re-reading thousands of them on every ingest buys nothing. A
+        // miss is retried (the file can still appear); a hit is kept for the process.
+        let sidecar = cached_subagent_meta(&sidecar_path(&s.source_path));
         if let Some(m) = sidecar.as_ref() {
             let row_has = |k: &str| {
                 s.meta
@@ -372,7 +404,7 @@ pub fn link_claude_subagents_in_store(store: &Store) -> Result<usize> {
             }
         }
 
-        if store.parent_of(&s.id)?.is_none() {
+        if !linked {
             candidates.push((s, sidecar));
         }
     }

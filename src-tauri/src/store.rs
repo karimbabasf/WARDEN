@@ -129,6 +129,43 @@ impl Store {
         if !has_approved_col {
             c.execute_batch("ALTER TABLE observer_grants ADD COLUMN approved_at INTEGER;")?;
         }
+        // The subagent relink's one hot query (`agent_task_call_parents`) filters the
+        // events table down to Claude `Agent`/`Task` tool calls: 1854 rows out of
+        // 921826 on a real store. Without this it was a full table scan that read every
+        // payload blob to throw almost all of them away, and it runs after every ingest
+        // that lands new bytes — 2.5s cold, 258ms warm. A PARTIAL index over exactly the
+        // predicate holds only those rows, so the same query costs 13ms.
+        //
+        // `json_extract` is deterministic, which is what makes it legal in an index
+        // WHERE clause. The write side pays one `json_extract` per inserted event, which
+        // is microseconds against a batch that already serialises the payload to JSON.
+        c.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_events_task_calls \
+             ON events(session_id, ts, id) \
+             WHERE kind='tool_call' AND json_extract(payload_json,'$.tool') IN ('Agent','Task');",
+        )?;
+        // The live ingest's cheap "has this transcript moved" oracle. Byte offsets alone
+        // could not answer it: a watcher event or a heartbeat refresh had to read the
+        // WHOLE file and SHA-256 it just to learn that nothing had changed, which is
+        // what made `refresh_live_context` cost 3.1s on a real corpus. Length plus mtime
+        // answers the same question from one `stat`. Same `table_info` guard as
+        // `parent_session_id` above, since SQLite has no `ADD COLUMN IF NOT EXISTS`.
+        //
+        // Both default to 0, which is the reserved "unknown" value and never compares
+        // equal, so an existing install simply pays the old full read once per file and
+        // is on the fast path from the second look onwards.
+        for col in ["size", "mtime_ns"] {
+            let present: bool = c
+                .prepare("SELECT 1 FROM pragma_table_info('watermarks') WHERE name=?")?
+                .query_row([col], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if !present {
+                c.execute_batch(&format!(
+                    "ALTER TABLE watermarks ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0;"
+                ))?;
+            }
+        }
         // Armed compaction is gone. `compact_arms` was that feature's entire
         // footprint on the machine, so the migration DROPS it rather than leaving a
         // dead table behind on every install that ever ran the old build. Nothing
@@ -311,6 +348,52 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Everything the live ingest needs to know about a source file before it opens it:
+    /// how far we parsed, and what the file looked like when we did.
+    ///
+    /// `size`/`mtime_ns` are `0` on a row written by the older schema (and on a file
+    /// never seen), which is the reserved "unknown" value: it never compares equal, so
+    /// an unknown mark always falls through to a real read.
+    pub fn source_mark(&self, path: &Path) -> Result<SourceMark> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT offset,size,mtime_ns FROM watermarks WHERE source_path=?",
+                [path.to_string_lossy().to_string()],
+                |r| {
+                    Ok(SourceMark {
+                        offset: r.get::<_, i64>(0)? as u64,
+                        size: r.get::<_, i64>(1)? as u64,
+                        mtime_ns: r.get::<_, i64>(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// Record what a source file looked like at the moment we last read it.
+    ///
+    /// Written SEPARATELY from the byte watermark, and deliberately: the watermark
+    /// advances only through a parsed batch, while this must be stamped even when a
+    /// read yielded no complete record (a half-written line), or the next event would
+    /// read the same bytes again. Never creates a row it does not already own the
+    /// offset for — an `INSERT` here with offset 0 would claim a file as fully parsed.
+    pub fn set_source_stat(&self, path: &Path, size: u64, mtime_ns: i64) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO watermarks(source_path,offset,rowid,cursor,updated_at,size,mtime_ns) \
+             VALUES(?1,0,0,NULL,?4,?2,?3) \
+             ON CONFLICT(source_path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, updated_at=excluded.updated_at",
+            params![
+                path.to_string_lossy(),
+                size as i64,
+                mtime_ns,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Byte watermark for a source file: the absolute offset up to which we have
     /// already ingested. Returns 0 when the file has never been seen, so callers
     /// read the whole file on first sight and only `bytes[offset..]` thereafter.
@@ -492,6 +575,16 @@ impl Store {
         let e: i64 = c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
         Ok((s as u32, e as u64, 0))
     }
+}
+
+/// What [`Store::source_mark`] knows about a transcript file: the byte offset we have
+/// parsed to, plus the length and mtime it had when we did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceMark {
+    pub offset: u64,
+    pub size: u64,
+    /// Nanoseconds since the epoch; `0` means "not known" and never matches.
+    pub mtime_ns: i64,
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
