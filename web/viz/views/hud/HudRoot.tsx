@@ -66,6 +66,14 @@ export function HudRoot() {
   const [windowW, setWindowW] = useState(() => window.innerWidth);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const hostVisible = useHostVisible();
+  // Are we a section inside somebody else's panel? The notch owns its material, its
+  // corner radius, its shadow, its header and its open/close spring, so in that host
+  // the HUD draws only the fleet and lets all of that through.
+  const embedded = !isTauriHost();
+  const [hostBox, setHostBox] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
   // Was this summon asked for? A tray click behaves like any menu-bar panel; a summon
   // the operator did not make has to earn its place and then leave.
   const [auto, setAuto] = useState(false);
@@ -93,6 +101,20 @@ export function HudRoot() {
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The section's box is the notch's, and it changes only when the notch itself does
+  // (a display change, a settings change). Cheap to watch and wrong to assume.
+  useEffect(() => {
+    if (!embedded) return;
+    const onResize = () =>
+      setHostBox((b) =>
+        b.width === window.innerWidth && b.height === window.innerHeight
+          ? b
+          : { width: window.innerWidth, height: window.innerHeight },
+      );
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [embedded]);
 
   // ── the live forest ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -184,6 +206,10 @@ export function HudRoot() {
   // outside reports as a blur, which is the only "the user looked away" signal macOS
   // gives, and it also spends the activating click so the FIRST press lands on a globe.
   const engage = useCallback(() => {
+    // Nothing to engage in the section: there is no auto-dismiss clock to cancel and
+    // no window of ours to give the keyboard to. Left in, it would fire a bridge call
+    // on every pointer entering the tab.
+    if (!isTauriHost()) return;
     setEngaged((was) => {
       if (!was) invoke('hud_take_focus').catch(() => {});
       return true;
@@ -236,14 +262,18 @@ export function HudRoot() {
           if (!out?.ok) return openWarden();
         })
         .catch(openWarden);
-      dismiss();
+      // Our own panel funnels away as the terminal comes forward: the click was the
+      // decision. The section must NOT, for the same reason Escape must not: nothing
+      // in that host ever sends a second summon, so a dismiss there is permanent and
+      // the tab would be blank until WARDEN restarts.
+      if (isTauriHost()) dismiss();
     },
     [dismiss],
   );
 
   return (
     <div
-      className={`wd-hud-root is-${phase}`}
+      className={`wd-hud-root is-${phase}${embedded ? ' is-embedded' : ''}`}
       onPointerOver={(e) => {
         // Bubbled from the panel: the pointer is ON it, not in the empty dismiss area
         // around it (which is this element itself).
@@ -251,9 +281,12 @@ export function HudRoot() {
       }}
       onPointerDown={(e) => {
         // Anywhere outside the panel is dismiss territory: the window is mostly empty
-        // and a click that lands on nothing should not feel like a dead zone.
-        if (e.target === e.currentTarget) dismiss();
-        else engage();
+        // and a click that lands on nothing should not feel like a dead zone. In the
+        // section that empty area is the notch's own padding, and a click there is the
+        // host's to interpret, not ours to close on.
+        if (e.target === e.currentTarget) {
+          if (!embedded) dismiss();
+        } else engage();
       }}
     >
       <HudPanel
@@ -261,6 +294,8 @@ export function HudRoot() {
         phase={phase}
         neck={neck}
         windowW={windowW}
+        embedded={embedded}
+        hostBox={hostBox}
         hoveredId={hoveredId}
         onClosed={onClosed}
         onPick={onPick}

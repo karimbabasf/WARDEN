@@ -244,6 +244,33 @@ html, body {
   color: var(--ink-faint);
 }
 
+/* ── embedded: the WARDEN tab inside the boring.notch fork ───────────────── */
+/* THE NOTCH IS THE PANEL. It already carries the material, the corner radius, the
+   shadow and the header that names this tab, so an island drawn inside it put one
+   rounded card in another and read as a web page dropped into a hole rather than a
+   section of the notch.
+
+   Everything here is subtraction, and it is CSS rather than a second component on
+   purpose: the globes, their captions, their hover plates and every animation they
+   run are the same code in both hosts, and they have to stay that way or the two
+   drift. What differs is only what is drawn UNDER them, which is nothing. The box,
+   the position and the header are handled in HudPanel (`embedded`); the surface is
+   handled here. */
+.wd-hud-root.is-embedded .wd-hud-shade { filter: none; }
+
+.wd-hud-root.is-embedded .wd-hud-panel {
+  background: none;
+  border: 0;
+  box-shadow: none;
+  /* The blur exists so a panel floating over the desktop stays a surface. Here there
+     is nothing behind it but the notch's own black, and a backdrop-filter over that
+     costs a compositing pass to change nothing. */
+  backdrop-filter: none;
+}
+
+/* The strip sits under the fleet rather than at the bottom of a card. */
+.wd-hud-root.is-embedded .wd-hud-overflow { bottom: 6px; }
+
 /* ── reduced motion ──────────────────────────────────────────────────────── */
 /* The size morph and the genie are already skipped in the loop (it snaps the
    springs and holds the clip at the full rectangle, cross-fading instead). This

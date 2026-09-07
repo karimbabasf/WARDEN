@@ -117,6 +117,82 @@ function HudLab() {
     return () => window.clearTimeout(t);
   }, [open]);
 
+
+  // `?section=1` swaps the menu-bar island for the WARDEN TAB inside the boring.notch
+  // fork: the same panel with `embedded` set, inside a mock of the notch's real open
+  // box. It exists because that host cannot be screenshotted from here at all (it is a
+  // WKWebView inside another app's panel), so without it the one thing nobody could
+  // check is the one thing the embed is for.
+  const section = new URLSearchParams(window.location.search).get('section') !== null;
+  // boring.notch's own numbers: openNotchSize 640x190 (sizing/matters.swift), padded
+  // by cornerRadiusInsets.opened.top (19) + 12 each side, with its header above.
+  const NOTCH_W = 640;
+  const NOTCH_H = 190;
+  const NOTCH_INSET = 31;
+  const NOTCH_HEAD_H = 38;
+  const secW = NOTCH_W - NOTCH_INSET * 2;
+  const secH = NOTCH_H - NOTCH_HEAD_H - 28;
+
+  if (section) {
+    return (
+      <>
+        <div className="lab-controls">
+          <label>
+            fleet
+            <input
+              type="range"
+              min={0}
+              max={23}
+              value={count}
+              onChange={(e) => setCount(Number(e.currentTarget.value))}
+            />
+            <b>{count}</b>
+          </label>
+          <label>
+            subagents
+            <input
+              type="range"
+              min={0}
+              max={12}
+              value={kids}
+              onChange={(e) => setKids(Number(e.currentTarget.value))}
+            />
+            <b>{kids}</b>
+          </label>
+        </div>
+
+        {/* The notch, as boring.notch draws it: black, its own corners, its own
+            header. Everything WARDEN is allowed to paint is inside the dashed box. */}
+        <div
+          className="lab-notch"
+          style={{ left: `calc(50% - ${NOTCH_W / 2}px)`, width: NOTCH_W, height: NOTCH_H }}
+        >
+          <div className="lab-notch-head" style={{ height: NOTCH_HEAD_H }}>
+            <span className="lab-notch-tab">Home</span>
+            <span className="lab-notch-tab">Shelf</span>
+            <span className="lab-notch-tab is-on">WARDEN</span>
+          </div>
+          <div className="lab-notch-body" style={{ width: secW, height: secH }}>
+            <div className="wd-hud-root is-embedded">
+              <HudPanel
+                nodes={nodes}
+                phase={phase}
+                neck={{ centreX: secW / 2, width: 22 }}
+                windowW={secW}
+                embedded
+                hostBox={{ width: secW, height: secH }}
+                hoveredId={hoveredId}
+                onClosed={() => setPhase('closed')}
+                onPick={(a) => setHoveredId(a.id)}
+                onHover={setHoveredId}
+              />
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
       <div className="lab-menubar">
@@ -172,6 +248,8 @@ function HudLab() {
             phase={phase}
             neck={{ centreX: iconCentre - winX, width: 22 }}
             windowW={WIN_W}
+            embedded={false}
+            hostBox={{ width: WIN_W, height: WIN_H }}
             hoveredId={hoveredId}
             onClosed={() => setPhase('closed')}
             onPick={(a) => setHoveredId(a.id)}

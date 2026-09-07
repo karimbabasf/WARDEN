@@ -46,6 +46,27 @@
       .lab-window .wd-hud-root { position: absolute; }
       body.show-bounds .lab-window { outline: 1px dashed rgba(255, 255, 255, 0.14); }
 
+      /* ?section=1: boring.notch's open notch, at its real numbers
+         (openNotchSize 640x190, cornerRadiusInsets.opened.top 19). The notch draws the
+         black, the corners and the tab row; WARDEN gets only the body box. */
+      .lab-notch {
+        position: fixed; top: 0;
+        background: #000;
+        border-bottom-left-radius: 24px; border-bottom-right-radius: 24px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+        display: flex; flex-direction: column; align-items: center;
+      }
+      .lab-notch-head {
+        width: 100%; display: flex; align-items: center; gap: 10px;
+        padding: 0 31px; box-sizing: border-box;
+        font: 11px/1 var(--sans); color: var(--ink-faint);
+      }
+      .lab-notch-tab { padding: 4px 8px; border-radius: 6px; }
+      .lab-notch-tab.is-on { background: rgba(255, 255, 255, 0.1); color: var(--ink); }
+      .lab-notch-body { position: relative; }
+      body.show-bounds .lab-notch-body { outline: 1px dashed rgba(255, 255, 255, 0.14); }
+      .lab-notch-body .wd-hud-root { position: absolute; }
+
       .lab-controls {
         position: fixed; left: 18px; bottom: 18px; z-index: 9;
         display: flex; flex-direction: column; gap: 8px;
