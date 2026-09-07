@@ -337,9 +337,16 @@ async fn health_route() -> impl IntoResponse {
 fn dist_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     use tauri::Manager;
     if let Ok(res) = app.path().resource_dir() {
-        let candidate = res.join("dist");
-        if candidate.join("hud.html").exists() {
-            return Some(candidate);
+        // `_up_/dist` first, and it is not a typo. The bundle declares `../dist` as a
+        // resource, and Tauri encodes the leading `..` in the path it writes, so an
+        // installed app carries `Resources/_up_/dist`. Checking only `Resources/dist`
+        // silently misses it and falls through to the repo path below, which WORKS on the
+        // machine that built it and breaks the moment that checkout moves.
+        for rel in ["_up_/dist", "dist"] {
+            let candidate = res.join(rel);
+            if candidate.join("hud.html").exists() {
+                return Some(candidate);
+            }
         }
     }
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dist");
