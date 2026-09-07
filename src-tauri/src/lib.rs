@@ -561,8 +561,14 @@ pub fn run() {
                         toggle_hud(tray.app_handle(), rect, position);
                     }
                 });
-            if let Some(icon) = app.default_window_icon().cloned() {
-                tray = tray.icon(icon);
+            // The menu bar gets its OWN icon, never the app tile. A status item is
+            // drawn on the bar's own material, so it must be a TEMPLATE image: shape
+            // in the alpha channel, tinted by macOS to match a light or dark bar and
+            // inverted when the menu is open. Handing it `default_window_icon()` put
+            // the full-colour squircle up there, which reads as a sticker.
+            match tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png")) {
+                Ok(icon) => tray = tray.icon(icon).icon_as_template(true),
+                Err(err) => tracing::warn!(?err, "tray icon failed to decode"),
             }
             tray.build(app)?;
 

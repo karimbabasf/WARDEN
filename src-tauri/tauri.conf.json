@@ -59,6 +59,12 @@
     "active": true,
     "targets": "app",
     "category": "DeveloperTool",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
     "shortDescription": "The agent that watches your agents",
     "longDescription": "WARDEN is a live radar for your local coding agents. It tails your Claude Code and Codex transcripts and renders every active and idle agent as a real-time constellation.",
     "macOS": {

@@ -41,3 +41,6 @@ status.sh
 # the negation a fresh copy of it is silently unstageable.
 .env*
 !.env.example
+
+# Python bytecode from scripts/
+__pycache__/
