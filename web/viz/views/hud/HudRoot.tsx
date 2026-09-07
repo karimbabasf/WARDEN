@@ -15,9 +15,11 @@
 // `hud_hide` fire.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+// NOT from '@tauri-apps/api'. This same file paints in two hosts now: our own Tauri
+// window and the WARDEN section inside the boring.notch fork, which is a bare WKWebView
+// with no Tauri runtime. `hudTransport` picks the transport at runtime, so everything
+// below this line, the panel, the scene and the globes, is one body of code in both.
+import { invoke, listen, getCurrentWindow, isTauriHost } from '@/viz/shared/state/hudTransport';
 import { normalizeRadarState, type RadarAgent } from '@/viz/shared/types/radarTypes';
 import { HudPanel, type HudNeck, type HudPhase } from './HudPanel';
 import { hudTree, type HudNode } from './hudSort';
@@ -187,7 +189,11 @@ export function HudRoot() {
     return () => window.clearTimeout(t);
   }, [auto, engaged, phase, dismiss]);
 
+  // Escape closes a panel we OWN. In the notch section we do not own one: the tab is
+  // boring.notch's, it has its own Escape behaviour, and a dismiss here would blank the
+  // section with no way back, since nothing in that host ever sends a second summon.
   useEffect(() => {
+    if (!isTauriHost()) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') dismiss();
     };

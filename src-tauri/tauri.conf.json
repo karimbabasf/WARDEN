@@ -69,6 +69,9 @@
     "longDescription": "WARDEN is a live radar for your local coding agents. It tails your Claude Code and Codex transcripts and renders every active and idle agent as a real-time constellation.",
     "macOS": {
       "infoPlist": "Info.plist"
-    }
+    },
+    "resources": [
+      "../dist"
+    ]
   }
 }

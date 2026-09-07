@@ -624,7 +624,7 @@ pub async fn preview_observed_state(
     ))
 }
 
-fn fresh_radar_state_for_read(state: &AppState) -> RadarState {
+pub(crate) fn fresh_radar_state_for_read(state: &AppState) -> RadarState {
     fresh_radar_state_for_read_with(state, &crate::platform::process_index())
 }
 

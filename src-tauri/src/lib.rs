@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod bridge;
 pub mod commands;
 pub mod ingest;
 pub mod ir;
@@ -388,6 +389,13 @@ pub fn run() {
             // an explicit observe_start_sharing.
             state.observe.attach_app(app.handle().clone());
 
+            // The loopback bridge for the boring.notch WARDEN section. Starting it here
+            // rather than lazily means the section can attach the moment it is opened,
+            // instead of the first paint waiting on a server that starts on demand. It
+            // binds 127.0.0.1 on an OS-chosen port and gates every request on a token
+            // written to ~/.warden/bridge.json at 0600; see `bridge`.
+            bridge::spawn(app.handle().clone());
+
             // 2) RADAR liveness watchers: the Claude `~/.claude/sessions` registry
             //     (bloom/implode) + the Codex live/archived roots (archive-move =
             //     done). On any change the whole forest is recomputed and pushed as
@@ -671,6 +679,13 @@ pub fn run() {
             // hidden window). The platform seam decides whether this event is it.
             if platform::is_reopen_event(&event) {
                 summon_overlay(app);
+            }
+            // Drop the bridge handshake on the way out. A `bridge.json` that outlives the
+            // process names a dead port and a token nothing will accept, which turns a
+            // clean "WARDEN is not running" in the notch section into a view that sits
+            // there trying to attach to nothing.
+            if matches!(event, tauri::RunEvent::Exit) {
+                bridge::clear_handshake();
             }
         });
 }

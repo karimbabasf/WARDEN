@@ -139,6 +139,12 @@ pub(crate) fn recompute_and_emit_radar(
     );
     cache_radar_state(cache, state.clone());
     let _ = app.emit("radar_state", &state);
+    // The same state, to any external host running our HUD bundle (the boring.notch
+    // section). Mirrored here rather than intercepted at the Tauri event bus so the two
+    // sinks are visible in one place and neither can silently outlive the other.
+    if let Ok(v) = serde_json::to_value(&state) {
+        crate::bridge::publish("radar_state", v);
+    }
     // An agent that has just stopped on the operator is the one state the menu bar
     // should not wait to be asked about. Fires on the TRANSITION only, and never steals
     // the keyboard: see `crate::attention`.
