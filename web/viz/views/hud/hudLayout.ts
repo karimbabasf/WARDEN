@@ -92,6 +92,17 @@ export type HudGrid = {
    *  HUD_CELL_W for the island, whose width is DERIVED from the fleet, and wider in
    *  the embedded section, whose width is GIVEN by the host (see hudEmbedLayout). */
   pitch: number;
+  /** How many moons a root may DRAW. The island has room for HUD_MAX_KID_LINES of
+   *  them; a section has whatever its host left over, which can be one line or none.
+   *  The status word still carries the true count (`hudKidCount`), so a capped strip
+   *  under-draws but never under-reports. */
+  kidCap: number;
+  /** Height of one line of moons. Tighter in a section than in the island for the same
+   *  reason the tail is: the host's box ends where the strip does, so every px the
+   *  line does not need is a px that decides whether the strip exists at all. On the
+   *  grid rather than a constant so the row's HEIGHT and the moons' PLACEMENT cannot
+   *  disagree about it. */
+  kidLineH: number;
   /** Height of each grid row: the base cell, plus room for the tallest moon strip in
    *  that row. One entry per row, so a quiet row stays short next to a busy one. */
   rowHeights: number[];
@@ -131,6 +142,8 @@ export function hudLayout(kidCounts: number[]): HudGrid {
       width: HUD_PILL_W,
       height: HUD_PILL_H,
       pitch: HUD_CELL_W,
+      kidCap: HUD_KIDS_PER_LINE * HUD_MAX_KID_LINES,
+      kidLineH: HUD_KID_LINE_H,
       rowHeights: [],
       rowTops: [],
     };
@@ -158,7 +171,19 @@ export function hudLayout(kidCounts: number[]): HudGrid {
     y += h;
   }
   const height = y + (overflow > 0 ? HUD_OVERFLOW_H : 0) + HUD_PAD;
-  return { cols, rows, visible, overflow, width, height, pitch: HUD_CELL_W, rowHeights, rowTops };
+  return {
+    cols,
+    rows,
+    visible,
+    overflow,
+    width,
+    height,
+    pitch: HUD_CELL_W,
+    kidCap: HUD_KIDS_PER_LINE * HUD_MAX_KID_LINES,
+    kidLineH: HUD_KID_LINE_H,
+    rowHeights,
+    rowTops,
+  };
 }
 
 /** ── the embedded section ──────────────────────────────────────────────────
@@ -176,8 +201,19 @@ export function hudLayout(kidCounts: number[]): HudGrid {
  *  board. Globe size is untouched by all of this (it is context occupancy, on both
  *  screens); what moves is the space between them. */
 
-/** Air at the edges. Small: the host has already padded its own panel. */
+/** Air at the left and right edges. Small: the host has already padded its panel. */
 export const HUD_EMBED_PAD = 8;
+/** Air above and below, when there is any to spare. A notch about one cell tall has
+ *  none once a root grows a strip of moons, and losing the moons to keep a margin is
+ *  the wrong trade: the margin is decoration, the moons are the work. */
+export const HUD_EMBED_PAD_MIN = 2;
+/** Air under the last line of moons. Half the island's, because in a section the box
+ *  ends right there and the host's own padding is the rest of the gap. */
+export const HUD_EMBED_KID_TAIL = 4;
+/** A line of moons in a section. A moon's body is 11px across, so 15 still leaves air
+ *  around it, and those 3px are the difference between one line of subagents and none
+ *  in a notch that is about one cell tall. */
+export const HUD_EMBED_KID_LINE_H = 15;
 /** How far apart cells may spread before the fleet stops reading as one group. */
 export const HUD_EMBED_MAX_PITCH = 132;
 /** A ceiling on columns for a very wide host, so a fleet never becomes a thin line. */
@@ -204,6 +240,8 @@ export function hudEmbedLayout(kidCounts: number[], box: { width: number; height
       width,
       height,
       pitch: HUD_CELL_W,
+      kidCap: HUD_KIDS_PER_LINE,
+      kidLineH: HUD_EMBED_KID_LINE_H,
       rowHeights: [],
       rowTops: [],
     };
@@ -212,7 +250,10 @@ export function hudEmbedLayout(kidCounts: number[], box: { width: number; height
   const inner = Math.max(HUD_CELL_W, width - HUD_EMBED_PAD * 2);
   const maxCols = Math.max(1, Math.min(HUD_EMBED_MAX_COLS, Math.floor(inner / HUD_CELL_W)));
   const fitRows = (reserve: number) =>
-    Math.max(1, Math.min(HUD_MAX_ROWS, Math.floor((height - HUD_EMBED_PAD * 2 - reserve) / HUD_CELL_H)));
+    Math.max(
+      1,
+      Math.min(HUD_MAX_ROWS, Math.floor((height - HUD_EMBED_PAD_MIN * 2 - reserve) / HUD_CELL_H)),
+    );
 
   // Two passes, because naming the fleet we dropped costs a strip and that strip can
   // be what pushes the last row out of the box.
@@ -229,27 +270,52 @@ export function hudEmbedLayout(kidCounts: number[], box: { width: number; height
   const cols = Math.max(1, Math.min(maxCols, Math.ceil(visible / rows)));
   const pitch = Math.min(HUD_EMBED_MAX_PITCH, Math.max(HUD_CELL_W, Math.floor(inner / cols)));
 
+  // Moons get whatever the cells left behind, and that is often one line or none. A
+  // strip drawn past the box's bottom edge is worse than a shorter one: the host clips
+  // it, so the moons that matter most (need-first, see hudSort) would be the ones cut.
+  const spare =
+    height - HUD_EMBED_PAD_MIN * 2 - rows * HUD_CELL_H - (overflow > 0 ? HUD_OVERFLOW_H : 0);
+  const kidLines = Math.max(
+    0,
+    Math.min(HUD_MAX_KID_LINES, Math.floor((spare - HUD_EMBED_KID_TAIL) / HUD_EMBED_KID_LINE_H)),
+  );
+  const kidCap = HUD_KIDS_PER_LINE * kidLines;
+
   const rowHeights: number[] = [];
   for (let r = 0; r < rows; r++) {
     let lines = 0;
     for (let c = 0; c < cols; c++) {
       const i = r * cols + c;
       if (i >= visible) break;
-      lines = Math.max(lines, hudKidLines(kidCounts[i]));
+      lines = Math.max(lines, Math.min(kidLines, hudKidLines(kidCounts[i])));
     }
-    rowHeights.push(HUD_CELL_H + (lines > 0 ? lines * HUD_KID_LINE_H + HUD_KID_TAIL : 0));
+    rowHeights.push(
+      HUD_CELL_H + (lines > 0 ? lines * HUD_EMBED_KID_LINE_H + HUD_EMBED_KID_TAIL : 0),
+    );
   }
   const contentH = rowHeights.reduce((a, b) => a + b, 0) + (overflow > 0 ? HUD_OVERFLOW_H : 0);
   // Centred in the box, but never above its top edge: a fleet taller than the host
   // spills DOWNWARD, where the host clips it, rather than losing its first row.
-  let y = Math.max(HUD_EMBED_PAD, Math.round((height - contentH) / 2));
+  let y = Math.max(HUD_EMBED_PAD_MIN, Math.round((height - contentH) / 2));
   const rowTops: number[] = [];
   for (const h of rowHeights) {
     rowTops.push(y);
     y += h;
   }
 
-  return { cols, rows, visible, overflow, width, height, pitch, rowHeights, rowTops };
+  return {
+    cols,
+    rows,
+    visible,
+    overflow,
+    width,
+    height,
+    pitch,
+    kidCap,
+    kidLineH: HUD_EMBED_KID_LINE_H,
+    rowHeights,
+    rowTops,
+  };
 }
 
 /** The tallest and widest panel `hudLayout` can ever ask for. The HUD's canvas is cut
@@ -309,7 +375,7 @@ export function hudKidCentre(
   const cellTop = cell.y - HUD_CELL_H / 2;
   return {
     x: cell.x - lineW / 2 + col * HUD_KID_PITCH + HUD_KID_PITCH / 2,
-    y: cellTop + HUD_CELL_H + line * HUD_KID_LINE_H + HUD_KID_LINE_H / 2,
+    y: cellTop + HUD_CELL_H + line * grid.kidLineH + grid.kidLineH / 2,
   };
 }
 

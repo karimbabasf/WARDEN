@@ -11,8 +11,11 @@ import {
   HUD_MAX_H,
   HUD_MAX_KID_LINES,
   HUD_MAX_W,
+  HUD_EMBED_KID_LINE_H,
   HUD_EMBED_MAX_PITCH,
   HUD_EMBED_PAD,
+  HUD_EMBED_PAD_MIN,
+  HUD_KIDS_PER_LINE,
   hudCellCentre,
   hudEmbedLayout,
   hudGridShape,
@@ -244,7 +247,44 @@ describe('hudEmbedLayout', () => {
     // A fleet taller than the box (a row of moons in a short notch) has to keep its
     // globes; the host clips the bottom, which is recoverable, not the top.
     const l = hudEmbedLayout([8, 8, 8], { width: 578, height: 90 });
-    expect(l.rowTops[0]).toBeGreaterThanOrEqual(HUD_EMBED_PAD);
+    expect(l.rowTops[0]).toBeGreaterThanOrEqual(HUD_EMBED_PAD_MIN);
+  });
+
+  it('keeps a line of moons in a notch that is barely a cell tall', () => {
+    // The case this exists for, and it lives on a knife edge: 124 is the shortest box
+    // the notch plausibly hands over, and a strip at the island's own line height and
+    // tail does not fit in it. Losing the subagents to keep a margin is the wrong
+    // trade, so the margin goes first.
+    const l = hudEmbedLayout([6, 0, 0], { width: 578, height: 124 });
+    expect(l.kidCap).toBe(HUD_KIDS_PER_LINE);
+    expect(l.kidLineH).toBe(HUD_EMBED_KID_LINE_H);
+    expect(l.rowHeights[0]).toBeGreaterThan(HUD_CELL_H);
+    // Drawn inside the box, not past its bottom edge where the host would clip it.
+    expect(l.rowTops[0] + l.rowHeights[0]).toBeLessThanOrEqual(124);
+  });
+
+  it('gives a taller host its second line of moons', () => {
+    const l = hudEmbedLayout([8, 0], { width: 578, height: 170 });
+    expect(l.kidCap).toBe(HUD_KIDS_PER_LINE * 2);
+    expect(l.rowTops[0] + l.rowHeights[0]).toBeLessThanOrEqual(170);
+  });
+
+  it('drops the strip rather than clipping it when the box has no room', () => {
+    // A fleet that overflows spends its spare height on the "+N more" strip, which is
+    // the stronger claim: a board that hides agents and says nothing is lying.
+    const l = hudEmbedLayout(new Array(12).fill(6), { width: 578, height: 124 });
+    expect(l.overflow).toBeGreaterThan(0);
+    expect(l.kidCap).toBe(0);
+    expect(l.rowHeights[0]).toBe(HUD_CELL_H);
+  });
+
+  it('sizes rows with the same line height it places moons at', () => {
+    // One number, on the grid, because two would drift and the drift is a strip
+    // hanging off the bottom of the notch.
+    const l = hudEmbedLayout([4, 0], { width: 578, height: 132 });
+    const cell = hudCellCentre(0, l);
+    const lastMoon = hudKidCentre(0, 3, 4, l);
+    expect(lastMoon.y).toBeLessThanOrEqual(cell.y - HUD_CELL_H / 2 + l.rowHeights[0]);
   });
 
   it('centres a lone globe instead of parking it at the left edge', () => {

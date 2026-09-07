@@ -268,6 +268,14 @@ html, body {
   backdrop-filter: none;
 }
 
+/* NO HOVER PLATE. The plate is a tone step off the panel's own surface, and there is
+   no surface here: on the notch's black it paints the one thing this section exists to
+   get rid of, a lighter rounded card, and it paints it around whichever globe you are
+   pointing at. The feedback is not lost, it moves to the subject: RadarGlobeBody
+   already brightens a hovered globe and lifts its glow, and the caption goes to full
+   ink. The thing you point at lights up, instead of a box appearing behind it. */
+.wd-hud-root.is-embedded .wd-hud-plate.is-hovered { background: transparent; }
+
 /* The strip sits under the fleet rather than at the bottom of a card. */
 .wd-hud-root.is-embedded .wd-hud-overflow { bottom: 6px; }
 

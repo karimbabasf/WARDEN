@@ -199,12 +199,21 @@ export function HudPanel({
   const canvasH = embedded ? grid.height : HUD_MAX_H;
   const visible = useMemo(() => nodes.slice(0, grid.visible), [nodes, grid.visible]);
   const summary = useMemo(() => hudSummary(nodes.map((n) => n.agent)), [nodes]);
+  // Sliced to what the host has room for. `hudSort` already ordered them need-first,
+  // so a cap drops the quiet ones; the true count stays on the cell's status word, so
+  // a short strip under-draws and never under-reports.
   const kidSlots = useMemo<KidSlot[]>(
     () =>
-      visible.flatMap((n) =>
-        n.kids.map((agent, index) => ({ agent, parentId: n.agent.id, index, count: n.kids.length })),
-      ),
-    [visible],
+      visible.flatMap((n) => {
+        const drawn = n.kids.slice(0, grid.kidCap);
+        return drawn.map((agent, index) => ({
+          agent,
+          parentId: n.agent.id,
+          index,
+          count: drawn.length,
+        }));
+      }),
+    [visible, grid.kidCap],
   );
   // The live cells and moons, plus the ones still leaving. The grid above is laid out
   // from the live list only: a leaving cell holds no slot.
@@ -593,8 +602,19 @@ function HudDriver({
       if (!a) {
         // A ghost the loop never saw alive has nowhere to leave from.
         if (!target) continue;
+        // THE UNFOLD, and it is the section's one piece of theatre. Our own island
+        // grows out of a tray icon, so its cells are already in place when the box
+        // reaches them; a section has no icon to grow from, and cells that simply
+        // faded up in their slots read as a page loading inside the notch rather than
+        // as the notch opening. So the opening batch starts pulled toward the centre
+        // line and springs out to its slots while the host's own panel expands around
+        // it: one motion, borrowed from the host, on open only. 0.45 and not 0 because
+        // travelling the full half-width reads as a fling, not a spread. A cell that
+        // joins later still blooms where it stands.
+        const restX = target.x - mid;
+        const seedX = embedded && inBatch && !reduced ? restX * 0.45 : restX;
         a = {
-          x: spring(target.x - mid),
+          x: spring(seedX),
           y: spring(target.y),
           bornAt: inBatch ? c.openedAt + CELLS_LEAD_MS + i * STAGGER_MS : c.elapsed,
           bloom: !inBatch,

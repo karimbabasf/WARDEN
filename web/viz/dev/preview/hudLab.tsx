@@ -131,7 +131,10 @@ function HudLab() {
   const NOTCH_INSET = 31;
   const NOTCH_HEAD_H = 38;
   const secW = NOTCH_W - NOTCH_INSET * 2;
-  const secH = NOTCH_H - NOTCH_HEAD_H - 28;
+  // 190 less the header, the VStack gap and the 12pt bottom padding. `?h=` overrides
+  // it: the exact number depends on the display's safe-area inset, and the layout has
+  // to hold across the range rather than at one lucky value.
+  const secH = Number(new URLSearchParams(window.location.search).get('h')) || NOTCH_H - NOTCH_HEAD_H - 20;
 
   if (section) {
     return (

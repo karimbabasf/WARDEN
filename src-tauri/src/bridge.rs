@@ -218,6 +218,27 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, args: &serde_json::Value) -
             let radar = crate::commands::fresh_radar_state_for_read(&state);
             serde_json::to_value(radar).map_err(|e| e.to_string())
         }
+        // TAKE ME THERE. The whole point of a globe in the notch: it raises the TERMINAL
+        // WINDOW the agent is running in. Without this on the list the call failed, the
+        // frontend fell through to its `hud_focus_agent` fallback, and clicking an agent
+        // opened WARDEN instead of the window you were pointing at.
+        //
+        // It is read-and-raise, and it stays that way: `focus_tty` selects a tab and
+        // brings a window forward, and a test in `platform` asserts the generated
+        // AppleScript contains no `do script` / `write text` / `keystroke`. The id is
+        // resolved against LIVE radar state, so this cannot name a window that is not
+        // already on the board.
+        "focus_agent_terminal" => {
+            use tauri::Manager;
+            let agent_id = args
+                .get("agentId")
+                .or_else(|| args.get("agent_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "focus_agent_terminal: agentId required".to_string())?;
+            let state = app.state::<crate::commands::AppState>();
+            let out = crate::commands::focus_agent_terminal(state, agent_id.to_string()).await?;
+            serde_json::to_value(out).map_err(|e| e.to_string())
+        }
         "hud_focus_agent" => {
             // camelCase on the wire because that is what `invoke` sends and the frontend
             // call site is unchanged; snake_case accepted too so a hand-made request works.
