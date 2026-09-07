@@ -300,6 +300,10 @@ def render_tray(n: int = 44) -> Image.Image:
         tilt=math.radians(20), detail="micro",
         width=max(SS, round(T * 0.0090)), core_scale=1.05,
     )
+    # Menu-bar glyphs beside this one are solid, so the depth fade cannot ride
+    # into the alpha or the icon reads washed out next to wifi and bluetooth.
+    # Lift everything already drawn to full weight, keeping only its coverage.
+    img.putalpha(img.getchannel("A").point(lambda v: min(255, round(v * 1.75))))
     # A template is judged on alpha alone, so flatten every hue to white and let
     # the existing depth fade survive as coverage.
     a = img.getchannel("A")
