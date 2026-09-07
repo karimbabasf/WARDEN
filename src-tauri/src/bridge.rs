@@ -70,6 +70,15 @@ static BRIDGE: OnceCell<Bridge> = OnceCell::new();
 /// next to the `app.emit` it mirrors, and a bridge nobody has attached to must cost that
 /// path nothing. `broadcast::Sender::send` returning `Err` only means no receivers, which
 /// is the normal state when the section is closed.
+/// Is anyone actually attached?
+///
+/// The caller uses this to skip BUILDING a payload it would only throw away. `publish`
+/// alone is not enough: serializing a whole `RadarState` to JSON on every recompute, for
+/// a section that is closed, is most of the cost of having a bridge at all.
+pub fn has_subscribers() -> bool {
+    BRIDGE.get().map(|b| b.tx.receiver_count() > 0).unwrap_or(false)
+}
+
 pub fn publish(event: &str, payload: serde_json::Value) {
     if let Some(b) = BRIDGE.get() {
         let _ = b.tx.send(BridgeEvent {

@@ -19,7 +19,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // window and the WARDEN section inside the boring.notch fork, which is a bare WKWebView
 // with no Tauri runtime. `hudTransport` picks the transport at runtime, so everything
 // below this line, the panel, the scene and the globes, is one body of code in both.
-import { invoke, listen, getCurrentWindow, isTauriHost } from '@/viz/shared/state/hudTransport';
+import {
+  invoke,
+  listen,
+  getCurrentWindow,
+  isTauriHost,
+  useHostVisible,
+} from '@/viz/shared/state/hudTransport';
 import { normalizeRadarState, type RadarAgent } from '@/viz/shared/types/radarTypes';
 import { HudPanel, type HudNeck, type HudPhase } from './HudPanel';
 import { hudTree, type HudNode } from './hudSort';
@@ -59,6 +65,7 @@ export function HudRoot() {
   const [neck, setNeck] = useState<HudNeck>({ centreX: 0, width: 24 });
   const [windowW, setWindowW] = useState(() => window.innerWidth);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const hostVisible = useHostVisible();
   // Was this summon asked for? A tray click behaves like any menu-bar panel; a summon
   // the operator did not make has to earn its place and then leave.
   const [auto, setAuto] = useState(false);
@@ -110,8 +117,10 @@ export function HudRoot() {
   //
   // Only while the panel is actually on screen. A hidden HUD showing a stale fleet is
   // nobody's problem, and polling it would be paying for a glance nobody is taking.
+  // Also stops when the HOST is not showing us. Polling a section nobody can see is the
+  // same waste as rendering one, and in the section `phase` is never 'closed'.
   useEffect(() => {
-    if (phase === 'closed') return;
+    if (phase === 'closed' || !hostVisible) return;
     let alive = true;
     const pull = () => {
       invoke('get_radar_state')
@@ -126,7 +135,7 @@ export function HudRoot() {
       alive = false;
       window.clearInterval(id);
     };
-  }, [phase]);
+  }, [phase, hostVisible]);
 
   // One definition of "open the panel here", because there are two ways in now: the push
   // event, and the pull on mount that covers a webview which was not there for it.

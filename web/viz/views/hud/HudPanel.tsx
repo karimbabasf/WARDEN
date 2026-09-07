@@ -57,6 +57,8 @@
 
 import { useCallback, useMemo, useRef, type ReactNode, type RefObject } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
+
+import { useHostVisible } from '@/viz/shared/state/hudTransport';
 import * as THREE from 'three';
 import type { RadarAgent } from '@/viz/shared/types/radarTypes';
 import { radarHarness } from '@/viz/modules/radar/radarTheme';
@@ -162,6 +164,7 @@ export function HudPanel({
   onPick: (agent: RadarAgent) => void;
   onHover: (id: string | null) => void;
 }) {
+  const hostVisible = useHostVisible();
   const reduced = useReducedMotion();
   const clipRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -221,7 +224,11 @@ export function HudPanel({
               orthographic
               camera={{ position: [0, 0, 40], left: 0, right: HUD_MAX_W, top: 0, bottom: -HUD_MAX_H, near: 0.1, far: 200 }}
               gl={{ alpha: true, antialias: true, powerPreference: 'high-performance' }}
-              frameloop={phase === 'closed' ? 'never' : 'always'}
+              // 'never' when the host is not showing us. In our own window `hostVisible`
+              // is a constant true and this is exactly the old expression; in the notch
+              // section the panel is ALWAYS open, so without this term the scene would
+              // render at display rate forever behind a closed notch.
+              frameloop={phase === 'closed' || !hostVisible ? 'never' : 'always'}
               dpr={[1, 2]}
               onCreated={({ gl }) => {
                 gl.toneMapping = THREE.ACESFilmicToneMapping;

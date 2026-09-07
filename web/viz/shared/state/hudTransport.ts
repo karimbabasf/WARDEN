@@ -11,6 +11,8 @@
 // add it HERE with an embedded implementation next to it. A direct import compiles fine
 // and then throws in the section, where nobody is watching a console.
 
+import { useEffect, useState } from 'react';
+
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { listen as tauriListen } from '@tauri-apps/api/event';
 import { getCurrentWindow as tauriGetCurrentWindow } from '@tauri-apps/api/window';
@@ -31,6 +33,8 @@ declare global {
      */
     __WARDEN_BRIDGE__?: BridgeHandshake;
     __TAURI_INTERNALS__?: unknown;
+    /** Installed by this module in the section; called by the host. See below. */
+    __wardenSetVisible?: (visible: unknown) => void;
   }
 }
 
@@ -97,6 +101,12 @@ let source: EventSource | null = null;
 
 function ensureSource(): void {
   if (source || typeof window === 'undefined') return;
+  // No EventSource, no stream. Real hosts all have one; this keeps the module importable
+  // where it is absent (tests, SSR) instead of throwing out of a visibility change.
+  if (typeof EventSource === 'undefined') return;
+  // A `listen` registered while the host is hidden must not open a stream; the next
+  // `setHostVisible(true)` opens it.
+  if (!hostVisible) return;
   // The token goes in the query here and nowhere else: `EventSource` cannot set headers.
   source = new EventSource(`/events?token=${encodeURIComponent(bridgeToken())}`);
   source.onmessage = (m) => {
@@ -143,6 +153,65 @@ function stubWindow() {
     onFocusChanged: (_cb: (e: { payload: boolean }) => void): Promise<UnlistenFn> =>
       Promise.resolve(() => {}),
   };
+}
+
+/**
+ * IS THE HOST ACTUALLY SHOWING US?
+ *
+ * In our own window this is always true: the window's existence IS the answer, and
+ * `frameloopFor` already handles minimize and blur from Tauri's own signals.
+ *
+ * In the section it is the single most important number in this file. The notch panel
+ * owns when the tab is on screen, and NOTHING about a hidden WKWebView tells the page
+ * so: `document.hidden` stays false for a view merely taken out of the hierarchy, so
+ * without this the scene would keep rendering. That is not a small waste. The HUD canvas
+ * runs `frameloop='always'` whenever the panel is open, and in the section the panel is
+ * ALWAYS open, so a WebGL scene would drive a 120Hz display forever behind a closed
+ * notch, alongside a 750ms poll, for frames nobody can see.
+ *
+ * The host calls `window.__wardenSetVisible(false)` when the tab goes away or the notch
+ * closes, and true when it comes back. Hidden also CLOSES the event stream, which is
+ * what lets WARDEN skip serializing radar state altogether while nobody is attached.
+ */
+let hostVisible = true;
+const visListeners = new Set<(v: boolean) => void>();
+
+export function isHostVisible(): boolean {
+  return hostVisible;
+}
+
+function setHostVisible(next: boolean): void {
+  if (next === hostVisible) return;
+  hostVisible = next;
+  if (next) {
+    ensureSource();
+  } else {
+    // Drop the stream rather than let it idle. An open EventSource still counts as a
+    // subscriber on the Rust side, and one subscriber is the difference between WARDEN
+    // serializing the whole radar state on every recompute and skipping it entirely.
+    source?.close();
+    source = null;
+  }
+  for (const cb of [...visListeners]) cb(next);
+}
+
+/** React hook form, for the canvas and the pull loop. */
+export function useHostVisible(): boolean {
+  const [v, setV] = useState(hostVisible);
+  useEffect(() => {
+    visListeners.add(setV);
+    setV(hostVisible);
+    return () => {
+      visListeners.delete(setV);
+    };
+  }, []);
+  return v;
+}
+
+if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__ == null) {
+  // Embedded only. Installed unconditionally so the host can call it before the React
+  // tree exists, which it does: the tab can be hidden while the page is still booting.
+  window.__wardenSetVisible = (v: unknown) => setHostVisible(v === true);
 }
 
 export const invoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
