@@ -60,6 +60,16 @@ pub struct BridgeEvent {
 struct Bridge {
     token: String,
     tx: broadcast::Sender<BridgeEvent>,
+    /// The HOST channel, deliberately separate from `tx`.
+    ///
+    /// `tx` carries `radar_state`, and its receiver count is what decides whether the
+    /// recompute path serializes a whole forest at all. The host holds its stream open
+    /// for its entire life, so folding the two together would pin that decision to
+    /// "always yes" and WARDEN would pay for a section nobody has opened.
+    ///
+    /// This one carries a handful of small alerts a year and, by being held, answers
+    /// the other question: is there a notch out there showing our globes right now.
+    attn: broadcast::Sender<BridgeEvent>,
 }
 
 static BRIDGE: OnceCell<Bridge> = OnceCell::new();
@@ -77,6 +87,43 @@ static BRIDGE: OnceCell<Bridge> = OnceCell::new();
 /// a section that is closed, is most of the cost of having a bridge at all.
 pub fn has_subscribers() -> bool {
     BRIDGE.get().map(|b| b.tx.receiver_count() > 0).unwrap_or(false)
+}
+
+/// IS AN EXTERNAL HOST ATTACHED: is boring.notch out there, holding `/attention`?
+///
+/// This is the whole answer to "am I running inside the notch", and it is a FACT about
+/// a held connection rather than a setting anyone has to keep in sync. The notch opens
+/// that stream when it launches and drops it when the operator turns the section off,
+/// so the handover in both directions needs no second switch.
+///
+/// Deliberately NOT `has_subscribers()`. That one is true only while the notch panel is
+/// OPEN and the WARDEN tab picked, which is the minority of the day; using it would let
+/// WARDEN's own panel pop up in front of a closed notch, which is exactly the thing it
+/// is being asked to stop doing.
+pub fn host_attached() -> bool {
+    BRIDGE
+        .get()
+        .map(|b| b.attn.receiver_count() > 0)
+        .unwrap_or(false)
+}
+
+/// Hand an attention alert to the attached host, and say whether anyone took it.
+///
+/// The return value is the HANDOVER: `true` means the notch owns this alert and
+/// WARDEN's own panel must stay down, `false` means there is nobody out there and the
+/// panel is still the only surface. One call, one decision, so the two can never both
+/// fire or both stay silent.
+pub fn publish_attention(payload: serde_json::Value) -> bool {
+    let Some(b) = BRIDGE.get() else {
+        return false;
+    };
+    matches!(
+        b.attn.send(BridgeEvent {
+            event: "warden_attention".to_string(),
+            payload,
+        }),
+        Ok(n) if n > 0
+    )
 }
 
 pub fn publish(event: &str, payload: serde_json::Value) {
@@ -343,6 +390,55 @@ async fn events_route(
         .into_response()
 }
 
+/// THE HOST STREAM: "an agent has just stopped on you", and nothing else.
+///
+/// Separate from `/events` for two reasons that pull the same way. It is held for the
+/// life of the host process (see [`host_attached`]), so it must not drag the radar-state
+/// serialization on with it; and the host reading it is SWIFT, not our bundle, so it
+/// wants a small typed alert rather than a whole forest it would have to model.
+///
+/// The first frame is a `warden_hello`, not a replay of who is currently waiting. An
+/// alert is a TRANSITION, and opening a stream is not one: replaying the level here
+/// would fire the notch open every time boring.notch launched next to a blocked agent.
+async fn attention_route(
+    State(ctx): State<Ctx>,
+    Query(q): Query<TokenQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !origin_ok(&headers, ctx.port) {
+        return (StatusCode::FORBIDDEN, "origin").into_response();
+    }
+    if !token_ok(&supplied_token(&headers, &q)) {
+        return (StatusCode::UNAUTHORIZED, "token").into_response();
+    }
+    let Some(b) = BRIDGE.get() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "no bridge").into_response();
+    };
+    let mut rx = b.attn.subscribe();
+    let stream = async_stream::stream! {
+        if let Ok(ev) = SseEvent::default().json_data(BridgeEvent {
+            event: "warden_hello".into(),
+            payload: serde_json::json!({ "ok": true }),
+        }) {
+            yield Ok::<_, std::convert::Infallible>(ev);
+        }
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if let Ok(ev) = SseEvent::default().json_data(msg) {
+                        yield Ok(ev);
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
+}
+
 /// Liveness plus the one number the host needs to build its URLs. Unauthenticated on
 /// purpose: it answers "is WARDEN up" and nothing else, and the section needs that answer
 /// before it has read a token.
@@ -388,6 +484,9 @@ pub fn spawn(app: tauri::AppHandle) {
     }
     let token = mint_token();
     let (tx, _) = broadcast::channel::<BridgeEvent>(64);
+    // Small: an alert is a handful of ids and it is consumed at once. A host that fell
+    // 16 alerts behind is a host that is not running.
+    let (attn, _) = broadcast::channel::<BridgeEvent>(16);
 
     let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
         Ok(l) => l,
@@ -413,6 +512,7 @@ pub fn spawn(app: tauri::AppHandle) {
         .set(Bridge {
             token: token.clone(),
             tx,
+            attn,
         })
         .is_err()
     {
@@ -429,6 +529,7 @@ pub fn spawn(app: tauri::AppHandle) {
     let mut router = Router::new()
         .route("/health", get(health_route))
         .route("/events", get(events_route))
+        .route("/attention", get(attention_route))
         .route("/invoke", post(invoke_route));
 
     // Static assets last, so a route above always wins over a file that happens to share
@@ -511,6 +612,15 @@ mod tests {
     fn missing_token_is_empty_not_a_panic() {
         let q = TokenQuery { token: None };
         assert_eq!(supplied_token(&HeaderMap::new(), &q), "");
+    }
+
+    /// No bridge means no host, and both halves of the handover have to agree on that:
+    /// nothing is attached, so nothing takes the alert and WARDEN's own panel stays the
+    /// surface. These run without `spawn`, which is exactly that state.
+    #[test]
+    fn without_a_bridge_no_host_is_attached_and_no_alert_is_taken() {
+        assert!(!host_attached());
+        assert!(!publish_attention(serde_json::json!({ "agents": [] })));
     }
 
     #[test]

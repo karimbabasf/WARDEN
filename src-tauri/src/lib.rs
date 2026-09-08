@@ -225,6 +225,13 @@ impl HudSummon {
 /// (the operator is looking at the fleet already; a second surface saying so is noise),
 /// or when macOS will not report where the tray icon is.
 pub(crate) fn summon_hud_for_attention(app: &tauri::AppHandle) {
+    // The notch owns this alert when it is attached (see `bridge::host_attached`). The
+    // caller already branches on that, and this is the second half of the same rule
+    // rather than a duplicate of it: the reason our panel must stay down belongs with
+    // the panel, so a future caller cannot reintroduce the double alert by not knowing.
+    if crate::bridge::host_attached() {
+        return;
+    }
     let already_up = app
         .get_webview_window("hud")
         .and_then(|w| w.is_visible().ok())

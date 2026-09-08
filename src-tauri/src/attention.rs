@@ -17,7 +17,13 @@
 //! * It is a notification, so it leaves on its own. The frontend starts a linger clock
 //!   on an auto summon and dismisses when it runs out, unless the pointer arrived.
 //!
-//! Set `WARDEN_HUD_AUTO_AWAIT=0` to turn the whole behaviour off.
+//! WHICH SURFACE SPEAKS. When boring.notch is attached (it holds `bridge.rs`'s
+//! `/attention` stream for its whole life), the alert goes to the NOTCH and this panel
+//! stays down. Two surfaces saying the same thing, one of them covering the other, is
+//! worse than either alone, and the choice is made by a held connection rather than by
+//! a setting that could disagree with what is actually on screen.
+//!
+//! Set `WARDEN_HUD_AUTO_AWAIT=0` to turn the whole behaviour off, on both surfaces.
 
 use crate::radar::RadarState;
 use std::collections::HashSet;
@@ -57,6 +63,55 @@ pub fn newly_awaiting(state: &RadarState) -> Vec<String> {
             .map(|a| a.id.clone())
             .collect(),
     )
+}
+
+/// How an agent is NAMED to a host that cannot see our types.
+///
+/// Mirrors `hudDisplayName` in `web/viz/views/hud/hudSort.ts` by hand, in the same
+/// order, because the notch must say the same word about an agent that its own globes
+/// are labelled with. A raw id would be honest and useless.
+fn display_name(a: &crate::radar::RadarAgent) -> String {
+    for candidate in [
+        a.nickname.as_deref(),
+        Some(a.label.as_str()),
+        a.title.as_deref(),
+        a.cwd.as_deref(),
+    ] {
+        match candidate {
+            Some(s) if !s.trim().is_empty() => return s.to_string(),
+            _ => {}
+        }
+    }
+    a.id.chars().take(8).collect()
+}
+
+/// The alert an external host is handed: WHO just blocked, and how many are waiting.
+///
+/// A small closed shape, not a radar frame. The host renders a line and opens a panel;
+/// giving it the forest would make it model one. `reason` is already the closed
+/// `question | approval | input` vocabulary (see `radar::awaiting`), so nothing a
+/// harness typed reaches this payload.
+pub fn alert_payload(state: &RadarState, fresh: &[String]) -> serde_json::Value {
+    let fresh_set: HashSet<&str> = fresh.iter().map(String::as_str).collect();
+    let agents: Vec<serde_json::Value> = state
+        .agents
+        .iter()
+        .filter(|a| fresh_set.contains(a.id.as_str()))
+        .map(|a| {
+            serde_json::json!({
+                "id": a.id,
+                "name": display_name(a),
+                "harness": a.harness,
+                "reason": a.awaiting_reason,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "agents": agents,
+        // EVERY agent waiting, not just the new one. "3 agents need you" is the line the
+        // operator acts on; the transition is only what decides whether to speak.
+        "awaiting": state.agents.iter().filter(|a| a.status == "awaiting").count(),
+    })
 }
 
 /// [`newly_awaiting`]'s core, over the awaiting id set alone.

@@ -153,8 +153,19 @@ pub(crate) fn recompute_and_emit_radar(
     if crate::attention::auto_open_enabled() {
         let waiting = crate::attention::newly_awaiting(&state);
         if !waiting.is_empty() {
-            tracing::debug!(agents = ?waiting, "agent awaiting the operator; summoning the HUD");
-            crate::summon_hud_for_attention(app);
+            // ONE surface, whichever one the operator is actually running. When
+            // boring.notch is attached its notch IS the menu bar for this, and our own
+            // panel opening in front of it would be the same alert twice, one of them
+            // covering the other. `publish_attention` answers whether the host took it,
+            // so the choice is made by a held connection rather than by a setting that
+            // could disagree with reality.
+            let payload = crate::attention::alert_payload(&state, &waiting);
+            if crate::bridge::publish_attention(payload) {
+                tracing::debug!(agents = ?waiting, "agent awaiting the operator; handed to the notch");
+            } else {
+                tracing::debug!(agents = ?waiting, "agent awaiting the operator; summoning the HUD");
+                crate::summon_hud_for_attention(app);
+            }
         }
     }
     agent_count
