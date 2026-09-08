@@ -13,9 +13,16 @@
 //
 // Pure (no Three.js, no React), so the rate curve is unit-tested directly.
 
-/** Radians per second a resting globe turns. Roots are larger, so they turn slower. */
-export const SPIN_BASE_ROOT = 0.08;
-export const SPIN_BASE_SUB = 0.14;
+/** Radians per second a resting globe turns. Roots are larger, so they turn slower.
+ *
+ *  Raised 2.5x on 2026-09-08. The old rate put a resting root at ~78 seconds a
+ *  revolution, which is under the threshold where a person reads a thing as turning at
+ *  all: at HUD and notch size the globes looked frozen, and the working lift below had
+ *  nothing legible to lift. ~31s resting, ~17s working reads as alive without whirring,
+ *  and the ratio between the two states is untouched, so the spin still carries the one
+ *  thing it is for. */
+export const SPIN_BASE_ROOT = 0.2;
+export const SPIN_BASE_SUB = 0.34;
 
 /** Extra fraction of the base rate a fully-working globe adds (0.85 = ~1.85x). */
 const SPIN_WORKING_LIFT = 0.85;

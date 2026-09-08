@@ -23,6 +23,7 @@ import {
   invoke,
   listen,
   getCurrentWindow,
+  hostClose,
   isTauriHost,
   useHostVisible,
 } from '@/viz/shared/state/hudTransport';
@@ -257,16 +258,22 @@ export function HudRoot() {
     (agent: RadarAgent) => {
       const agentId = agent.id;
       const openWarden = () => invoke('hud_focus_agent', { agentId }).catch(() => {});
+      // ASK FIRST, THEN GET OUT OF THE WAY, in that order and without awaiting: the
+      // raise is 150ms warm and up to 800ms on the first Apple event of a session, and
+      // every one of those milliseconds used to be spent with the panel still sitting
+      // over the window it had just summoned.
       invoke<{ ok?: boolean }>('focus_agent_terminal', { agentId })
         .then((out) => {
           if (!out?.ok) return openWarden();
         })
         .catch(openWarden);
       // Our own panel funnels away as the terminal comes forward: the click was the
-      // decision. The section must NOT, for the same reason Escape must not: nothing
-      // in that host ever sends a second summon, so a dismiss there is permanent and
-      // the tab would be blank until WARDEN restarts.
+      // decision. The section must NOT dismiss ITSELF, for the same reason Escape must
+      // not: nothing in that host ever sends a second summon, so a dismiss there is
+      // permanent and the tab would be blank until WARDEN restarts. It asks the notch
+      // to close instead, which is the host's own reversible act.
       if (isTauriHost()) dismiss();
+      else hostClose();
     },
     [dismiss],
   );

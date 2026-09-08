@@ -65,7 +65,7 @@ import { radarHarness } from '@/viz/modules/radar/radarTheme';
 import { useReducedMotion } from '@/viz/shared/scene/reducedMotion';
 import { spring, springSnap, springStep, type Spring } from '@/viz/shared/lib/spring';
 import { genieFrame, genieProgress, smootherstep } from './hudGenie';
-import { HudBloom, HudGlobe, HudSceneRig } from './HudGlobe';
+import { HudBloom, HudGlobe, HudSceneRig, HudSky } from './HudGlobe';
 import {
   HUD_CELL_H,
   HUD_CELL_W,
@@ -251,7 +251,11 @@ export function HudPanel({
               className="wd-hud-canvas"
               style={{ width: canvasW, height: canvasH }}
               orthographic
-              camera={{ position: [0, 0, 40], left: 0, right: HUD_MAX_W, top: 0, bottom: -HUD_MAX_H, near: 0.1, far: 200 }}
+              // `far` is thousands, not hundreds, and it is the sky that needs it: the
+              // star shells scale up to cover a panel measured in CSS pixels (see
+              // HudSky), so they sit a long way behind a scene that is otherwise flat
+              // at z=0. An ortho frustum costs nothing for the depth it does not use.
+              camera={{ position: [0, 0, 40], left: 0, right: HUD_MAX_W, top: 0, bottom: -HUD_MAX_H, near: 0.1, far: 4000 }}
               gl={{ alpha: true, antialias: true, powerPreference: 'high-performance' }}
               // 'never' when the host is not showing us. In our own window `hostVisible`
               // is a constant true and this is exactly the old expression; in the notch
@@ -265,6 +269,10 @@ export function HudPanel({
               }}
             >
               <HudSceneRig />
+              {/* FIRST in the tree and furthest back: the void the globes hang in.
+                  Sized to the live canvas, so the section's box and our own panel each
+                  get a sky that fills them. */}
+              <HudSky width={canvasW} height={canvasH} />
               <HudDriver
                 phase={phase}
                 grid={grid}

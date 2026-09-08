@@ -198,7 +198,49 @@ const LAYERS: LayerSpec[] = [
   { count: 6000, radius: 33, spread: 7, sizeScale: 56, sizeMin: 0.8, sizeMax: 1.9, opacity: 0.52, drift: 0.0125, tilt: 0.004, seed: 0x1c0de },
 ];
 
-export function StarCatalog() {
+/** The innermost shell, and the outermost edge of the outermost one. Derived rather
+ *  than typed twice, so re-tuning LAYERS cannot leave a caller sizing the sky off a
+ *  number that has moved. */
+const INNER_R = Math.min(...LAYERS.map((l) => l.radius));
+const OUTER_R = Math.max(...LAYERS.map((l) => l.radius + l.spread));
+
+/**
+ * The sky, optionally re-sized for a camera that is not the war room's.
+ *
+ * The shells above are sized in the war room's world units under a PERSPECTIVE camera.
+ * The HUD draws the same globes ORTHOGRAPHICALLY in CSS pixels, and an ortho projection
+ * has no perspective divide: apparent size is world size, so distance cannot make a
+ * 33-unit shell fill a 460px panel. Dropped in unchanged, the sky is a small ball in
+ * the corner of the box, technically present and never on screen.
+ *
+ * Rather than write a second starfield for the notch (the 2026-08-20 lesson about the
+ * globes applies just as hard to the void they hang in: two implementations drift on
+ * sight), the one catalog takes the numbers that change with the camera.
+ *
+ * `cover` scales the shell radii AND `sizeScale` together, so the sky grows to fill the
+ * box without the stars growing into blobs: the shader's `1/-mv.z` law cancels the two
+ * against each other, and `MAX_STAR_PX` still caps whatever is left.
+ *
+ * `density` is what keeps this honest on battery. 40,000 points is a room; the notch
+ * section is a strip a few hundred pixels tall that sits open on somebody's display all
+ * day, and it wants a few thousand.
+ */
+export function StarCatalog({
+  cover,
+  behind,
+  density = 1,
+  opacity = 1,
+}: {
+  /** World radius the INNERMOST shell must reach. Omit for the war room's own sky. */
+  cover?: number;
+  /** Push the whole sky at least this far behind z=0, so no shell can cross in front
+   *  of what it is a backdrop for. Omit to leave it centred on the origin. */
+  behind?: number;
+  /** Fraction of the war room's star count. */
+  density?: number;
+  /** Multiplies every layer's opacity, for a panel that is not a dark room. */
+  opacity?: number;
+} = {}) {
   const motion = useMemo(
     () =>
       typeof window === 'undefined' ||
@@ -206,9 +248,31 @@ export function StarCatalog() {
     [],
   );
 
+  const scale = cover != null && cover > 0 ? cover / INNER_R : 1;
+
+  // Rebuilt only when the numbers change, which for any one mount is never: the
+  // geometry is tens of thousands of points and `buildLayerGeometry` keys off the
+  // whole spec.
+  const layers = useMemo(
+    () =>
+      scale === 1 && density === 1 && opacity === 1
+        ? LAYERS
+        : LAYERS.map((spec) => ({
+            ...spec,
+            count: Math.max(1, Math.round(spec.count * density)),
+            radius: spec.radius * scale,
+            spread: spec.spread * scale,
+            sizeScale: spec.sizeScale * scale,
+            opacity: spec.opacity * opacity,
+          })),
+    [scale, density, opacity],
+  );
+
+  const z = behind != null ? -(OUTER_R * scale + behind) : 0;
+
   return (
-    <group>
-      {LAYERS.map((spec) => (
+    <group position={[0, 0, z]}>
+      {layers.map((spec) => (
         <StarLayer key={spec.seed} spec={spec} motion={motion} />
       ))}
     </group>

@@ -35,6 +35,32 @@ declare global {
     __TAURI_INTERNALS__?: unknown;
     /** Installed by this module in the section; called by the host. See below. */
     __wardenSetVisible?: (visible: unknown) => void;
+    /** WebKit's script-message bridge, the one channel that runs page -> host. */
+    webkit?: {
+      messageHandlers?: Record<string, { postMessage: (msg: unknown) => void } | undefined>;
+    };
+  }
+}
+
+/**
+ * ASK THE HOST TO PUT ITS PANEL AWAY. No-op in our own window, and no-op if the host
+ * did not install the handler.
+ *
+ * This is the one thing the section genuinely needs to say UPWARDS, and it exists
+ * because of what a globe click means: take me to that terminal. Our own panel funnels
+ * away the instant it is clicked, so the raise (measured at 150ms warm, 800ms on the
+ * first Apple event of a session) happens behind an animation that has already
+ * answered. The section had no such answer: the notch sat open over the window it had
+ * just been asked to summon, and the whole delay was dead air with nothing moving in
+ * it. Nothing here waits for the raise, because the click was the decision.
+ */
+export function hostClose(): void {
+  if (typeof window === 'undefined' || isTauriHost()) return;
+  try {
+    window.webkit?.messageHandlers?.wardenHost?.postMessage({ action: 'close' });
+  } catch {
+    // A host that never installed the handler is not a broken one: it just owns its
+    // panel differently. The click still does its work.
   }
 }
 
