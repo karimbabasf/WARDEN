@@ -44,3 +44,4 @@ status.sh
 
 # Python bytecode from scripts/
 __pycache__/
+public/brickyard/_dev-*

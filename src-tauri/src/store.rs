@@ -569,6 +569,29 @@ impl Store {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
+    /// The events the Brickyard build log folds: tool calls, their results, and file
+    /// snapshots. Narrower than [`Store::session_events`] so a long session's log does not
+    /// parse every message and token row on each poll.
+    pub fn build_events(&self, sid: &str) -> Result<Vec<EventRecord>> {
+        let c = self.conn();
+        let mut st = c.prepare(
+            "SELECT id,session_id,turn_id,ts,payload_json,raw_ref FROM events \
+             WHERE session_id=? AND kind IN ('tool_call','tool_result','file_snapshot')",
+        )?;
+        let rows = st.query_map([sid], |r| {
+            let payload: String = r.get(4)?;
+            let raw: String = r.get(5)?;
+            Ok(EventRecord {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                turn_id: r.get(2)?,
+                ts: parse_dt(&r.get::<_, String>(3)?),
+                event: serde_json::from_str(&payload).expect("event payload was serialized by us; valid JSON"),
+                raw_ref: serde_json::from_str(&raw).expect("raw_ref was serialized by us; valid JSON"),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
     pub fn counts(&self) -> Result<(u32, u64, u32)> {
         let c = self.conn();
         let s: i64 = c.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;

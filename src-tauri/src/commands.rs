@@ -249,6 +249,23 @@ pub async fn get_radar_state(state: tauri::State<'_, AppState>) -> Result<RadarS
     Ok(fresh_radar_state_for_read(&state))
 }
 
+/// The Brickyard build log for one agent: every build action after `after` (a `seq`
+/// cursor), or the whole log when `after` is absent. Reads WARDEN's own store only, and
+/// like the radar it never reaches the observer projection.
+#[tauri::command]
+pub async fn get_build_log(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+    after: Option<u32>,
+) -> Result<Vec<radar::BuildStep>, String> {
+    let events = state.store.build_events(&agent_id).map_err(|e| e.to_string())?;
+    let log = radar::build_log(&events);
+    Ok(match after {
+        Some(cursor) => log.into_iter().filter(|s| s.seq > cursor).collect(),
+        None => log,
+    })
+}
+
 /// The longest session name WARDEN will store or write. Keeps a pathological paste out
 /// of both the SQLite row and the transcript line.
 const MAX_SESSION_NAME: usize = 120;

@@ -35,6 +35,17 @@ Every globe on the radar maps to a real signal, never a fabricated one.
 
 Click a globe to fly the camera in and open its detail panel: the exact context-window breakdown, a live feed of its recent tool calls and messages, its real children, and its model, uptime, and estimated cost.
 
+## Brickyard
+
+Press `B`, or use the switch at the top right, to trade the radar for a workshop. Every root agent gets a bench and builds a real LEGO set from its own work: each file write or command run places the next brick from the set's real instructions, a failed call pulls that brick back off, and a plan or todo update turns a page in the instruction book. Subagents and teammates walk in as extra builders, take a submodel to a side table, and attach it when they finish. A finished set goes on the shelf behind the bench and the next one opens.
+
+- **Click a bench** for its panel: the set, brick and step counts, a 3D preview of the model now and finished, the open instruction page, and a build log where every row is a real tool call.
+- **Click a brick** to see the tool call that placed it.
+- **Click the book** to fly in and read the open pages.
+- **Click a set on the shelf** to inspect the finished model on a turntable and see who built it.
+
+The sets and parts come from the [LDraw](https://www.ldraw.org) Official Model Repository and Parts Library under CC BY 2.0 / 4.0, packed into `public/brickyard/` by `scripts/brickyard/pack.mjs` so the app still opens no network connection. Authors are credited in [`public/brickyard/ATTRIBUTION.txt`](public/brickyard/ATTRIBUTION.txt). LEGO is a trademark of the LEGO Group, which does not sponsor or endorse this project.
+
 ## How it works
 
 ```
@@ -82,6 +93,8 @@ You can eyeball the radar in a plain browser against a mock forest, no Rust buil
 pnpm dev            # then open http://127.0.0.1:1420/radar-lab.html
 ```
 
+The Brickyard has its own sandbox with simulated agents at `/brickyard-lab.html`. `?pre=300` starts the benches 300 tool calls in, `?speed=4` runs the agents faster, and `?select=0` opens the first bench's panel.
+
 ## Configuration
 
 WARDEN needs no configuration. Every setting is an optional override (see [`.env.example`](.env.example)):
@@ -107,8 +120,11 @@ src-tauri/            Rust core (single crate)
 web/                  TypeScript + React Three Fiber island
   main.ts             Tauri event router
   viz/modules/radar/  the constellation, layout, detail panel, hover card
+  viz/modules/brickyard/ the Brickyard: benches, minifig rig, instruction pages
   viz/views/war-room/ the app shell (brand, filter, breadcrumb)
   viz/shared/         state, types, theme, scene helpers
+public/brickyard/     packed LDraw sets, minifig parts, attribution
+scripts/brickyard/    pack.mjs, which builds public/brickyard/ from LDraw
 docs/radar.png        the screenshot above
 ```
 

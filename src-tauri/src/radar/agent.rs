@@ -503,7 +503,7 @@ fn long_running_label(label: String, elapsed_ms: u64) -> String {
 /// command, `codex_tool` for an inner tool like `web__run`); a named tool (Claude
 /// built-ins, MCP) classifies by its name. Returns `None` to drop a row another event
 /// already represents (a Codex `apply_patch`, surfaced by its `FileSnapshot`).
-fn tool_activity(tool: &str, input: &serde_json::Value) -> Option<(&'static str, String)> {
+pub(crate) fn tool_activity(tool: &str, input: &serde_json::Value) -> Option<(&'static str, String)> {
     if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
         return classify_shell_command(cmd);
     }
@@ -671,7 +671,7 @@ fn tool_target_label(tool: &str, input: &serde_json::Value) -> String {
 
 /// A compact tool name: an MCP tool (`mcp__server__tool`) collapses to its final
 /// segment (`tool`); everything else passes through unchanged.
-fn short_tool_name(tool: &str) -> String {
+pub(crate) fn short_tool_name(tool: &str) -> String {
     tool.rsplit("__").next().unwrap_or(tool).to_string()
 }
 

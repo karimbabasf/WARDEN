@@ -642,6 +642,7 @@ pub fn run() {
             minimize_window,
             hide_window,
             get_radar_state,
+            get_build_log,
             hud_hide,
             hud_take_focus,
             hud_pending_summon,

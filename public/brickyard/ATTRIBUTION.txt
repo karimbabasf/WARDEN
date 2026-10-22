@@ -1,0 +1,23 @@
+Brickyard set data
+
+Models: LDraw.org Official Model Repository (https://library.ldraw.org/omr).
+Parts: LDraw.org Parts Library (https://library.ldraw.org).
+Both are redistributable under the Creative Commons Attribution License 2.0 (CCAL 2.0)
+or CC BY 4.0, as stated in each file's !LICENSE line.
+
+Model authors:
+21013-1.mpd: Greg Teft [gregteft]
+60001-1.mpd: Michael Heidemann [mikeheide]
+6350-1.mpd: Robert Paciorek [bercik]
+7130-1.mpd: Daniel Goerner [TK-949]
+6040-1.mpd: Stefan Frenz [smf]
+6890-1.mpd: Willy Tschager [Holly Wood]
+6365-1.mpd: Robert Paciorek [bercik]
+40182-1.mpd: Christian Maglekær
+75892-1.mpd: Adrien Pennamen [AdrienPennamen]
+40143-1.mpd: Christian Maglekær
+6388-1.mpd: Robert Paciorek [bercik]
+7110-1.mpd: Daniel Goerner [TK-949]
+
+minifig.mpd is assembled here from stock LDraw minifig parts.
+LEGO is a trademark of the LEGO Group, which does not sponsor or endorse this project.
