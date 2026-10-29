@@ -6,7 +6,7 @@
 // event it cares about is subscribed inside the view that uses it.
 
 import './hud.css';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '@/viz/shared/state/hudTransport';
 import { mountHud } from '@/viz/app/mountHud';
 
 const diag = (m: string) => {

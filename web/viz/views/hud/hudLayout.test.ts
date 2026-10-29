@@ -11,7 +11,13 @@ import {
   HUD_MAX_H,
   HUD_MAX_KID_LINES,
   HUD_MAX_W,
+  HUD_EMBED_KID_LINE_H,
+  HUD_EMBED_MAX_PITCH,
+  HUD_EMBED_PAD,
+  HUD_EMBED_PAD_MIN,
+  HUD_KIDS_PER_LINE,
   hudCellCentre,
+  hudEmbedLayout,
   hudGridShape,
   hudKidCentre,
   hudKidLines,
@@ -180,5 +186,115 @@ describe('hudPanelLeft', () => {
 
   it('centres when the panel is wider than the window', () => {
     expect(hudPanelLeft(100, 600, 560)).toBe(0);
+  });
+});
+
+describe('hudEmbedLayout', () => {
+  // boring.notch's real body box: openNotchSize 640x190 less the header and the
+  // cornerRadiusInsets it pads the content with. Every number below is judged against
+  // this one, because it is the only host this layout has.
+  const NOTCH = { width: 578, height: 124 };
+
+  it('takes the box it is given rather than deriving one', () => {
+    // The whole difference from the island. Its width IS the notch's, so the section
+    // cannot be a card floating inside a wider panel, which is what it looked like.
+    const l = hudEmbedLayout(bare(4), NOTCH);
+    expect(l.width).toBe(NOTCH.width);
+    expect(l.height).toBe(NOTCH.height);
+  });
+
+  it('spreads the fleet across that width, up to a ceiling', () => {
+    const l = hudEmbedLayout(bare(4), NOTCH);
+    expect(l.cols).toBe(4);
+    expect(l.rows).toBe(1);
+    // 562 inner / 4 would be 140, which is past the point where a board stops reading
+    // as one group, so the pitch stops at the ceiling and the row centres itself.
+    expect(l.pitch).toBe(HUD_EMBED_MAX_PITCH);
+    expect(l.pitch).toBeGreaterThan(HUD_CELL_W);
+  });
+
+  it('never packs tighter than a cell', () => {
+    // Six across 562px is 93 a cell; eight would be 70, which would overlap the
+    // captions, so the column count is capped by what a full-width cell needs.
+    const l = hudEmbedLayout(bare(12), NOTCH);
+    expect(l.pitch).toBeGreaterThanOrEqual(HUD_CELL_W);
+    expect(l.cols * HUD_CELL_W).toBeLessThanOrEqual(NOTCH.width - HUD_EMBED_PAD * 2);
+  });
+
+  it('draws only the rows the host can actually show, and names the rest', () => {
+    // The notch is one cell tall. A second row would be drawn past its bottom edge,
+    // where the host clips it with nothing on screen to say it was there.
+    const l = hudEmbedLayout(bare(12), NOTCH);
+    expect(l.rows).toBe(1);
+    expect(l.visible + l.overflow).toBe(12);
+    expect(l.overflow).toBeGreaterThan(0);
+  });
+
+  it('uses a second row when the host is tall enough for one', () => {
+    const l = hudEmbedLayout(bare(8), { width: 578, height: 260 });
+    expect(l.rows).toBe(2);
+    expect(l.overflow).toBe(0);
+  });
+
+  it('centres the fleet in the box vertically', () => {
+    const l = hudEmbedLayout(bare(3), NOTCH);
+    const top = l.rowTops[0];
+    const bottom = NOTCH.height - (top + l.rowHeights[0]);
+    expect(Math.abs(top - bottom)).toBeLessThanOrEqual(1);
+  });
+
+  it('spills downward rather than losing its first row off the top', () => {
+    // A fleet taller than the box (a row of moons in a short notch) has to keep its
+    // globes; the host clips the bottom, which is recoverable, not the top.
+    const l = hudEmbedLayout([8, 8, 8], { width: 578, height: 90 });
+    expect(l.rowTops[0]).toBeGreaterThanOrEqual(HUD_EMBED_PAD_MIN);
+  });
+
+  it('keeps a line of moons in a notch that is barely a cell tall', () => {
+    // The case this exists for, and it lives on a knife edge: 124 is the shortest box
+    // the notch plausibly hands over, and a strip at the island's own line height and
+    // tail does not fit in it. Losing the subagents to keep a margin is the wrong
+    // trade, so the margin goes first.
+    const l = hudEmbedLayout([6, 0, 0], { width: 578, height: 124 });
+    expect(l.kidCap).toBe(HUD_KIDS_PER_LINE);
+    expect(l.kidLineH).toBe(HUD_EMBED_KID_LINE_H);
+    expect(l.rowHeights[0]).toBeGreaterThan(HUD_CELL_H);
+    // Drawn inside the box, not past its bottom edge where the host would clip it.
+    expect(l.rowTops[0] + l.rowHeights[0]).toBeLessThanOrEqual(124);
+  });
+
+  it('gives a taller host its second line of moons', () => {
+    const l = hudEmbedLayout([8, 0], { width: 578, height: 170 });
+    expect(l.kidCap).toBe(HUD_KIDS_PER_LINE * 2);
+    expect(l.rowTops[0] + l.rowHeights[0]).toBeLessThanOrEqual(170);
+  });
+
+  it('drops the strip rather than clipping it when the box has no room', () => {
+    // A fleet that overflows spends its spare height on the "+N more" strip, which is
+    // the stronger claim: a board that hides agents and says nothing is lying.
+    const l = hudEmbedLayout(new Array(12).fill(6), { width: 578, height: 124 });
+    expect(l.overflow).toBeGreaterThan(0);
+    expect(l.kidCap).toBe(0);
+    expect(l.rowHeights[0]).toBe(HUD_CELL_H);
+  });
+
+  it('sizes rows with the same line height it places moons at', () => {
+    // One number, on the grid, because two would drift and the drift is a strip
+    // hanging off the bottom of the notch.
+    const l = hudEmbedLayout([4, 0], { width: 578, height: 132 });
+    const cell = hudCellCentre(0, l);
+    const lastMoon = hudKidCentre(0, 3, 4, l);
+    expect(lastMoon.y).toBeLessThanOrEqual(cell.y - HUD_CELL_H / 2 + l.rowHeights[0]);
+  });
+
+  it('centres a lone globe instead of parking it at the left edge', () => {
+    const l = hudEmbedLayout(bare(1), NOTCH);
+    expect(hudCellCentre(0, l).x).toBeCloseTo(NOTCH.width / 2, 0);
+  });
+
+  it('draws nothing for an empty fleet, and still fills the box', () => {
+    const l = hudEmbedLayout(bare(0), NOTCH);
+    expect(l).toMatchObject({ cols: 0, rows: 0, visible: 0, overflow: 0 });
+    expect(l.width).toBe(NOTCH.width);
   });
 });

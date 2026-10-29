@@ -32,6 +32,8 @@ import {
   type HiddenAgent,
 } from './hiddenAgents';
 import { ConstellationSwitcher, type ConstellationTarget } from './ConstellationSwitcher';
+import { ViewSwitch, readView, writeView, type WardenView } from './ViewSwitch';
+import { BrickyardView } from '@/viz/modules/brickyard/BrickyardView';
 import { layoutRadarScene, isFlatAgent, type RadarLayout } from '@/viz/modules/radar/radarLayout';
 import { PeerConstellation } from '@/viz/modules/radar/PeerConstellation';
 import { peerLayout as layoutPeerScene, peerWorldPlacement } from '@/viz/modules/radar/peerFraming';
@@ -440,6 +442,14 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
   }, []);
   const railInsets = useRailInsets(selectedId !== null, fleetFolded);
 
+  // Radar or Brickyard. Only one canvas is ever mounted: the other view costs nothing.
+  const [view, setView] = useState<WardenView>(readView);
+  const onView = useCallback((next: WardenView) => {
+    setView(next);
+    writeView(next);
+  }, []);
+  const brickyard = view === 'brickyard';
+
   // The mute list. Persisted like the fold, and applied ONE level above the model
   // (see `hiddenAgents.ts`), so the strip, the globe, the census, the camera bounds
   // and the harness chips all drop the same agents without each being told.
@@ -741,10 +751,15 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
         e.preventDefault();
         onToggleFleet();
       }
+      // B flips between the radar and the brickyard.
+      if (e.key === 'b' || e.key === 'B') {
+        e.preventDefault();
+        onView(view === 'brickyard' ? 'radar' : 'brickyard');
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onToggleFleet]);
+  }, [onToggleFleet, onView, view]);
 
   // Esc backs out one level: while a globe is focused, Esc deselects it (swallowed in
   // the capture phase). With nothing selected this listener is inert.
@@ -799,6 +814,15 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
       className={`viz-root wd-radar-root${selectedRadarAgent ? ' has-dock' : ''}${fleetFolded ? ' fleet-folded' : ''}${peerHasAgents ? ' has-switcher' : ''}`}
       onDoubleClick={onDiscoveryHomeDoubleClick}
     >
+      {brickyard ? (
+        <BrickyardView
+          agents={radarModel.agents}
+          frameloop={frameloop}
+          active={active}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+        />
+      ) : (
       <Canvas
         dpr={[1, 2]}
         frameloop={frameloop}
@@ -831,6 +855,9 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
           onPickFolder={onPickFolder}
         />
       </Canvas>
+      )}
+
+      <ViewSwitch view={view} onView={onView} />
 
       {/* Slim brand mark, top-left. Orients a first-time viewer and carries the live
           agent count without competing with the board. */}
@@ -849,6 +876,8 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
 
       {/* Whose board am I looking at. Top of the free channel, above the focus path,
           and absent entirely until a watched peer actually has a constellation. */}
+      {brickyard ? null : (
+      <>
       <ConstellationSwitcher
         localCount={radarModel.agents.length}
         peerLabel={peerHasAgents ? watched?.peer.label ?? null : null}
@@ -865,6 +894,8 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
       />
 
       <FilterBar agents={radarModel.agents} filter={emphasisFilter} onFilter={onFilter} />
+      </>
+      )}
 
       {/* The board is the page's main content. The <main> landmark gives keyboard
           and screen-reader users a way to skip the chrome straight to it. */}
@@ -899,8 +930,8 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
 
       {/* Radar detail panel: its own right-dock. Opens when a globe is selected and the
           camera has dived in; the roster's jump-to flies to a child via onRadarJump. */}
-      <div className={`wd-inspector wd-radar-dock ${selectedRadarAgent ? 'is-open' : ''}`}>
-        {selectedRadarAgent ? (
+      <div className={`wd-inspector wd-radar-dock ${selectedRadarAgent && !brickyard ? 'is-open' : ''}`}>
+        {selectedRadarAgent && !brickyard ? (
           <RadarDetailPanel
             agent={selectedRadarAgent}
             children={selectedRadarChildren}
@@ -916,7 +947,7 @@ export function WarRoom({ bridge }: { bridge: Bridge }) {
           the detail panel's inline "no rows" line, and since the full-screen rules
           were defined later they won the cascade and dragged the panel's little
           empty line into the middle of the screen. */}
-      {radarModel.agents.length === 0 ? (
+      {radarModel.agents.length === 0 && !brickyard ? (
         <div className="wd-radar-void" aria-live="polite">
           <span className="wd-radar-void-pulse" aria-hidden />
           {/* An empty scope because everything is hidden is not the same state as an

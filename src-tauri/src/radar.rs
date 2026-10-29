@@ -21,6 +21,7 @@
 //! * [`identity`] — agent naming/identity + subagent-termination decisions.
 //! * [`agent`] — per-agent construction + recent-activity tailing.
 //! * [`teams`] — Claude agent-team rosters, the source of real member names.
+//! * [`build_log`] — one agent's events folded into the Brickyard build log (pure).
 //! * [`assemble`] — the pure top-level forest join ([`assemble()`]).
 //! * [`live`] — live transcript refresh + open-session scanning ([`recompute_radar_state`]).
 
@@ -32,6 +33,7 @@ pub mod procs;
 
 mod agent;
 mod assemble;
+mod build_log;
 mod context;
 mod identity;
 mod live;
@@ -43,6 +45,7 @@ mod teams;
 // ── public API (kept byte-identical to the pre-split `crate::radar` surface) ──
 pub use assemble::assemble;
 pub use awaiting::AwaitingReason;
+pub use build_log::{build_log, BuildAction, BuildStep};
 pub use live::{recompute_radar_state, recompute_radar_state_with, refresh_live_context};
 pub use liveness::{AgentStatus, LiveSession};
 pub use model::{

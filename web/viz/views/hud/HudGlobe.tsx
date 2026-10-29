@@ -25,6 +25,7 @@
 import { EffectComposer, Bloom } from '@react-three/postprocessing';
 import { Environment, Lightformer } from '@react-three/drei';
 import { RadarGlobeBody } from '@/viz/modules/radar/RadarGlobeBody';
+import { StarCatalog } from '@/viz/shared/scene/StarCatalog';
 import type { RadarStatus } from '@/viz/shared/types/radarTypes';
 
 /**
@@ -59,6 +60,31 @@ export function HudSceneRig() {
         <Lightformer form="ring" intensity={1.1} color="#ffffff" position={[2, 4, 2]} scale={[2, 2, 1]} />
       </Environment>
     </>
+  );
+}
+
+/**
+ * The war room's sky, behind the panel's globes.
+ *
+ * Same catalog, same shells, same glacial drift: a globe floating on flat black read as
+ * a cut-out of the war room rather than a window onto it, and the notch section made
+ * that obvious by putting the two a keystroke apart. `StarCatalog` takes the camera
+ * numbers (see its own note on why an ortho projection cannot fake this with distance);
+ * the two here are the panel's.
+ *
+ * DENSITY is the one number that is not the war room's. 40,000 points is a room you fly
+ * a camera through; a panel gets a quarter of them. Lower than this and the sky stops
+ * being a field and starts being countable dots, which reads as dirt on the glass
+ * rather than depth behind it.
+ */
+export function HudSky({ width, height }: { width: number; height: number }) {
+  // The shells are spheres, so the sky fills the panel when its innermost one contains
+  // the box's CORNERS, not its edges. The margin keeps the shell's dense rim off screen.
+  const cover = (Math.hypot(width, height) / 2) * 1.15;
+  return (
+    <group position={[width / 2, -height / 2, 0]}>
+      <StarCatalog cover={cover} behind={140} density={0.25} />
+    </group>
   );
 }
 

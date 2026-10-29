@@ -139,6 +139,35 @@ pub(crate) fn recompute_and_emit_radar(
     );
     cache_radar_state(cache, state.clone());
     let _ = app.emit("radar_state", &state);
+    // The same state, to any external host running our HUD bundle (the boring.notch
+    // section). Mirrored here rather than intercepted at the Tauri event bus so the two
+    // sinks are visible in one place and neither can silently outlive the other.
+    if crate::bridge::has_subscribers() {
+        if let Ok(v) = serde_json::to_value(&state) {
+            crate::bridge::publish("radar_state", v);
+        }
+    }
+    // An agent that has just stopped on the operator is the one state the menu bar
+    // should not wait to be asked about. Fires on the TRANSITION only, and never steals
+    // the keyboard: see `crate::attention`.
+    if crate::attention::auto_open_enabled() {
+        let waiting = crate::attention::newly_awaiting(&state);
+        if !waiting.is_empty() {
+            // ONE surface, whichever one the operator is actually running. When
+            // boring.notch is attached its notch IS the menu bar for this, and our own
+            // panel opening in front of it would be the same alert twice, one of them
+            // covering the other. `publish_attention` answers whether the host took it,
+            // so the choice is made by a held connection rather than by a setting that
+            // could disagree with reality.
+            let payload = crate::attention::alert_payload(&state, &waiting);
+            if crate::bridge::publish_attention(payload) {
+                tracing::debug!(agents = ?waiting, "agent awaiting the operator; handed to the notch");
+            } else {
+                tracing::debug!(agents = ?waiting, "agent awaiting the operator; summoning the HUD");
+                crate::summon_hud_for_attention(app);
+            }
+        }
+    }
     agent_count
 }
 

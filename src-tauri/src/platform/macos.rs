@@ -57,6 +57,39 @@ pub fn activate_self() {
     NSApplication::sharedApplication(mtm).activate();
 }
 
+/// Put a window on screen WITHOUT activating the app or making it key.
+///
+/// `NSWindow::orderFrontRegardless`, and there is no Tauri API for it. `show()` alone
+/// is not enough for a background app: a borderless, transparent, never-key window that
+/// a background process merely un-hides does not get ordered into the front level, so
+/// the menu-bar HUD's auto-summon showed a window nobody could see. The click path never
+/// hit this because `set_focus` orders the window front as a side effect of making it
+/// key, and making it key is exactly what an auto-summon must not do (see
+/// `lib.rs::show_hud`).
+///
+/// `ns_window` must be the `NSWindow` pointer from Tauri's `WebviewWindow::ns_window`.
+/// A null pointer or a call off the main thread is a no-op, not a crash.
+pub fn order_front_without_activating(ns_window: *mut std::ffi::c_void) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSWindow;
+
+    if ns_window.is_null() {
+        return;
+    }
+    if MainThreadMarker::new().is_none() {
+        tracing::warn!("order_front_without_activating called off the main thread; ignoring");
+        return;
+    }
+    // SAFETY: the pointer comes from `WebviewWindow::ns_window`, which returns the
+    // window's own `NSWindow`, and we are on the main thread (checked above). The
+    // reference does not outlive this call, and `orderFrontRegardless` neither retains
+    // nor frees it.
+    unsafe {
+        let window: &NSWindow = &*(ns_window as *const NSWindow);
+        window.orderFrontRegardless();
+    }
+}
+
 #[cfg(test)]
 mod activation_tests {
     /// `-[NSApplication activate]` arrived in macOS 14. Calling a selector the running

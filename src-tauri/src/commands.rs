@@ -172,6 +172,48 @@ pub async fn hud_hide(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("hud") {
         let _ = w.hide();
     }
+    crate::set_pending_summon(None);
+    Ok(())
+}
+
+/// The summon the HUD has not drawn yet, claimed exactly once.
+///
+/// A summon is PUSHED as an event and also held here, because the push alone is not
+/// reliable at the one moment this feature exists for: the HUD's webview may still be
+/// loading when the window is shown, and an event emitted at a page that does not exist
+/// yet is simply lost. HudRoot asks for this on mount and opens the panel from the answer.
+///
+/// Returns `None` when the window is not actually visible: a summon that has been
+/// dismissed or hidden since must not replay a panel nobody is waiting for. `None` while
+/// the window IS up tells the frontend the window is STRANDED and should be hidden.
+#[tauri::command]
+pub async fn hud_pending_summon(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    use tauri::Manager;
+    let visible = app
+        .get_webview_window("hud")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if !visible {
+        crate::set_pending_summon(None);
+        return Ok(None);
+    }
+    Ok(crate::pending_summon().lock().ok().and_then(|mut p| p.take()))
+}
+
+/// Hand the HUD the keyboard.
+///
+/// Only an AUTO summon needs this. That one arrives unfocused on purpose (it must not
+/// eat the keystrokes of whatever the operator was typing when an agent blocked), and
+/// an unfocused window gets no blur, so it also has no "the user looked away" signal
+/// and its first click would be spent activating it. The frontend calls this the moment
+/// the pointer reaches the panel: reaching for it IS the deliberate act that a tray
+/// click would have been, and from here the panel behaves exactly like a clicked one.
+#[tauri::command]
+pub async fn hud_take_focus(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("hud") {
+        let _ = w.set_focus();
+    }
     Ok(())
 }
 
@@ -205,6 +247,23 @@ pub async fn hud_focus_agent(app: tauri::AppHandle, agent_id: String) -> Result<
 #[tauri::command]
 pub async fn get_radar_state(state: tauri::State<'_, AppState>) -> Result<RadarState, String> {
     Ok(fresh_radar_state_for_read(&state))
+}
+
+/// The Brickyard build log for one agent: every build action after `after` (a `seq`
+/// cursor), or the whole log when `after` is absent. Reads WARDEN's own store only, and
+/// like the radar it never reaches the observer projection.
+#[tauri::command]
+pub async fn get_build_log(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+    after: Option<u32>,
+) -> Result<Vec<radar::BuildStep>, String> {
+    let events = state.store.build_events(&agent_id).map_err(|e| e.to_string())?;
+    let log = radar::build_log(&events);
+    Ok(match after {
+        Some(cursor) => log.into_iter().filter(|s| s.seq > cursor).collect(),
+        None => log,
+    })
 }
 
 /// The longest session name WARDEN will store or write. Keeps a pathological paste out
@@ -582,7 +641,7 @@ pub async fn preview_observed_state(
     ))
 }
 
-fn fresh_radar_state_for_read(state: &AppState) -> RadarState {
+pub(crate) fn fresh_radar_state_for_read(state: &AppState) -> RadarState {
     fresh_radar_state_for_read_with(state, &crate::platform::process_index())
 }
 

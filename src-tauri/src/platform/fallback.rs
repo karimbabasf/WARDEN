@@ -18,6 +18,12 @@ pub fn is_reopen_event(event: &tauri::RunEvent) -> bool {
 /// already raises the app, so `set_focus` alone is the whole gesture.
 pub fn activate_self() {}
 
+/// Same reason: elsewhere `show()` already orders the window in, so there is no second
+/// half to do.
+pub fn order_front_without_activating(ns_window: *mut std::ffi::c_void) {
+    let _ = ns_window;
+}
+
 /// No tty lookup yet. Reported as "no controlling terminal" rather than guessed,
 /// so the panel says it cannot find the window instead of raising the wrong one.
 pub fn controlling_tty(pid: u32) -> Option<String> {

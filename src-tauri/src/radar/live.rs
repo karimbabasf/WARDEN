@@ -31,10 +31,12 @@ pub fn refresh_live_context(store: &Store, sessions_dir: &Path) -> usize {
 /// avoids re-reading/hashing live transcript files on every heartbeat while preserving
 /// live nesting when new data actually arrives.
 pub fn recompute_radar_state(store: &Store, sessions_dir: &Path) -> super::RadarState {
-    // One process sweep per recompute. This is what lets a harness that publishes
-    // no pid (Codex today, Grok and Hermes next) lose its globe the moment the
-    // process dies, instead of waiting for a file to be archived or to age out.
-    recompute_radar_state_with(store, sessions_dir, &crate::platform::process_index())
+    // The process sweep. This is what lets a harness that publishes no pid (Codex
+    // today, Grok and Hermes next) lose its globe the moment the process dies, instead
+    // of waiting for a file to be archived or to age out. Cached for a short TTL rather
+    // than re-run per recompute: it is two subprocess spawns and was three quarters of
+    // what a recompute cost. See `procs::cached_process_index`.
+    recompute_radar_state_with(store, sessions_dir, &super::procs::cached_process_index())
 }
 
 /// [`recompute_radar_state`] with the process table INJECTED.

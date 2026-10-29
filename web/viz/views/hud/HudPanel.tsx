@@ -57,13 +57,15 @@
 
 import { useCallback, useMemo, useRef, type ReactNode, type RefObject } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
+
+import { useHostVisible } from '@/viz/shared/state/hudTransport';
 import * as THREE from 'three';
 import type { RadarAgent } from '@/viz/shared/types/radarTypes';
 import { radarHarness } from '@/viz/modules/radar/radarTheme';
 import { useReducedMotion } from '@/viz/shared/scene/reducedMotion';
 import { spring, springSnap, springStep, type Spring } from '@/viz/shared/lib/spring';
 import { genieFrame, genieProgress, smootherstep } from './hudGenie';
-import { HudBloom, HudGlobe, HudSceneRig } from './HudGlobe';
+import { HudBloom, HudGlobe, HudSceneRig, HudSky } from './HudGlobe';
 import {
   HUD_CELL_H,
   HUD_CELL_W,
@@ -72,6 +74,7 @@ import {
   HUD_MAX_H,
   HUD_MAX_W,
   hudCellCentre,
+  hudEmbedLayout,
   hudGlobeRadius,
   hudKidCentre,
   hudLayout,
@@ -148,6 +151,8 @@ export function HudPanel({
   phase,
   neck,
   windowW,
+  embedded,
+  hostBox,
   hoveredId,
   onClosed,
   onPick,
@@ -157,11 +162,19 @@ export function HudPanel({
   phase: HudPhase;
   neck: HudNeck;
   windowW: number;
+  /** Painting inside somebody else's panel (the notch section), not our own window.
+   *  The host owns the material, the corner radius, the shadow and the open/close
+   *  animation, so this panel draws none of them: see the `.is-embedded` block in
+   *  hud.css and the `embedded` branches in HudDriver. */
+  embedded: boolean;
+  /** The host's content box in CSS px. Ignored unless `embedded`. */
+  hostBox: { width: number; height: number };
   hoveredId: string | null;
   onClosed: () => void;
   onPick: (agent: RadarAgent) => void;
   onHover: (id: string | null) => void;
 }) {
+  const hostVisible = useHostVisible();
   const reduced = useReducedMotion();
   const clipRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -173,15 +186,34 @@ export function HudPanel({
   // Height depends on the moons, not just the session count, so the layout is fed the
   // per-root kid counts rather than a total (see hudLayout).
   const kidCounts = useMemo(() => nodes.map((n) => n.kids.length), [nodes]);
-  const grid = useMemo<HudGrid>(() => hudLayout(kidCounts), [kidCounts]);
+  const grid = useMemo<HudGrid>(
+    () => (embedded ? hudEmbedLayout(kidCounts, hostBox) : hudLayout(kidCounts)),
+    [kidCounts, embedded, hostBox],
+  );
+  // The canvas is cut once at the largest box its host can ask for. In our own window
+  // that is the island at full size; in the section it is the host's box, which is
+  // fixed for the life of the view. The camera's frustum is `manual` (R3F marks it so
+  // the moment a `left`/`right` is passed) and therefore never follows a resize on its
+  // own, so the driver syncs it: see the top of its frame loop.
+  const canvasW = embedded ? grid.width : HUD_MAX_W;
+  const canvasH = embedded ? grid.height : HUD_MAX_H;
   const visible = useMemo(() => nodes.slice(0, grid.visible), [nodes, grid.visible]);
   const summary = useMemo(() => hudSummary(nodes.map((n) => n.agent)), [nodes]);
+  // Sliced to what the host has room for. `hudSort` already ordered them need-first,
+  // so a cap drops the quiet ones; the true count stays on the cell's status word, so
+  // a short strip under-draws and never under-reports.
   const kidSlots = useMemo<KidSlot[]>(
     () =>
-      visible.flatMap((n) =>
-        n.kids.map((agent, index) => ({ agent, parentId: n.agent.id, index, count: n.kids.length })),
-      ),
-    [visible],
+      visible.flatMap((n) => {
+        const drawn = n.kids.slice(0, grid.kidCap);
+        return drawn.map((agent, index) => ({
+          agent,
+          parentId: n.agent.id,
+          index,
+          count: drawn.length,
+        }));
+      }),
+    [visible, grid.kidCap],
   );
   // The live cells and moons, plus the ones still leaving. The grid above is laid out
   // from the live list only: a leaving cell holds no slot.
@@ -210,18 +242,26 @@ export function HudPanel({
                     else plateEls.current.delete(n.agent.id);
                   }}
                   className={`wd-hud-plate${hoveredId === n.agent.id ? ' is-hovered' : ''}`}
-                  style={{ width: HUD_CELL_W, height: HUD_CELL_H }}
+                  style={{ width: grid.pitch, height: HUD_CELL_H }}
                 />
               ))}
             </div>
 
             <Canvas
               className="wd-hud-canvas"
-              style={{ width: HUD_MAX_W, height: HUD_MAX_H }}
+              style={{ width: canvasW, height: canvasH }}
               orthographic
-              camera={{ position: [0, 0, 40], left: 0, right: HUD_MAX_W, top: 0, bottom: -HUD_MAX_H, near: 0.1, far: 200 }}
+              // `far` is thousands, not hundreds, and it is the sky that needs it: the
+              // star shells scale up to cover a panel measured in CSS pixels (see
+              // HudSky), so they sit a long way behind a scene that is otherwise flat
+              // at z=0. An ortho frustum costs nothing for the depth it does not use.
+              camera={{ position: [0, 0, 40], left: 0, right: HUD_MAX_W, top: 0, bottom: -HUD_MAX_H, near: 0.1, far: 4000 }}
               gl={{ alpha: true, antialias: true, powerPreference: 'high-performance' }}
-              frameloop={phase === 'closed' ? 'never' : 'always'}
+              // 'never' when the host is not showing us. In our own window `hostVisible`
+              // is a constant true and this is exactly the old expression; in the notch
+              // section the panel is ALWAYS open, so without this term the scene would
+              // render at display rate forever behind a closed notch.
+              frameloop={phase === 'closed' || !hostVisible ? 'never' : 'always'}
               dpr={[1, 2]}
               onCreated={({ gl }) => {
                 gl.toneMapping = THREE.ACESFilmicToneMapping;
@@ -229,11 +269,18 @@ export function HudPanel({
               }}
             >
               <HudSceneRig />
+              {/* FIRST in the tree and furthest back: the void the globes hang in.
+                  Sized to the live canvas, so the section's box and our own panel each
+                  get a sky that fills them. */}
+              <HudSky width={canvasW} height={canvasH} />
               <HudDriver
                 phase={phase}
                 grid={grid}
                 neck={neck}
                 windowW={windowW}
+                embedded={embedded}
+                canvasW={canvasW}
+                canvasH={canvasH}
                 shown={shown}
                 shownKids={shownKids}
                 reduced={reduced}
@@ -277,14 +324,21 @@ export function HudPanel({
             </Canvas>
 
             <div className="wd-hud-content">
-              <div ref={headRef} className="wd-hud-head">
-                {summary.awaiting > 0 && <i className="wd-hud-alert-dot" aria-hidden />}
-                <span>{hudSummaryLabel(summary)}</span>
-              </div>
+              {/* Dropped in the section, and not only to save its 24px. The notch draws
+                  its own header naming this tab, so a second centred caps line under it
+                  was the same label twice; the alert it carries is already on every
+                  awaiting cell, in the same crimson on the same beat. */}
+              {!embedded && (
+                <div ref={headRef} className="wd-hud-head">
+                  {summary.awaiting > 0 && <i className="wd-hud-alert-dot" aria-hidden />}
+                  <span>{hudSummaryLabel(summary)}</span>
+                </div>
+              )}
               {shown.map(({ item: n, leaving }) => (
                 <HudCell
                   key={n.agent.id}
                   node={n}
+                  width={grid.pitch}
                   leaving={leaving}
                   hovered={hoveredId === n.agent.id}
                   elRef={(el) => {
@@ -375,6 +429,9 @@ function HudDriver({
   grid,
   neck,
   windowW,
+  embedded,
+  canvasW,
+  canvasH,
   shown,
   shownKids,
   reduced,
@@ -391,6 +448,9 @@ function HudDriver({
   grid: HudGrid;
   neck: HudNeck;
   windowW: number;
+  embedded: boolean;
+  canvasW: number;
+  canvasH: number;
   shown: Lingering<HudNode>[];
   shownKids: Lingering<KidSlot>[];
   reduced: boolean;
@@ -398,6 +458,7 @@ function HudDriver({
   clipRef: RefObject<HTMLDivElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
   stageRef: RefObject<HTMLDivElement | null>;
+  /** Null in the section, where the host draws the header. */
   headRef: RefObject<HTMLDivElement | null>;
   cellEls: RefObject<Map<string, HTMLButtonElement>>;
   /** The hover plates, drawn behind the canvas and moved with their cells. */
@@ -410,7 +471,18 @@ function HudDriver({
   const cellAnims = useRef(new Map<string, CellAnim>());
   const kidAnims = useRef(new Map<string, KidAnim>());
 
-  useFrame((_state, dtRaw) => {
+  useFrame((state, dtRaw) => {
+    // The ortho frustum is in CSS px and R3F will not maintain it: passing `left`/
+    // `right` marks the camera `manual`, which is exactly what stops it recentring on
+    // (0,0) but also what stops it following the canvas. One compare a frame, and a
+    // section that opens on a different display gets the right frustum on the next.
+    const cam = state.camera as THREE.OrthographicCamera;
+    if (cam.right !== canvasW || cam.bottom !== -canvasH) {
+      cam.right = canvasW;
+      cam.bottom = -canvasH;
+      cam.updateProjectionMatrix();
+    }
+
     const dt = Math.min(dtRaw, 0.05);
     const c = clock.current;
     c.elapsed += dt * 1000;
@@ -443,7 +515,7 @@ function HudDriver({
     const panel = panelRef.current;
     const stage = stageRef.current;
     const head = headRef.current;
-    if (!clip || !panel || !stage || !head) return;
+    if (!clip || !panel || !stage) return;
 
     const closing = phase === 'closing';
     // `closed` has to hold the COLLAPSED frame, not fall through to the open one.
@@ -455,7 +527,14 @@ function HudDriver({
     // Size springs while the panel is on screen; frozen while the genie plays, because
     // the clip is already doing the moving and a box that also shrinks reads as two
     // effects fighting.
-    if (!closing && !shut) {
+    // THE SECTION HAS NO ISLAND. Its box is the host's box: it does not grow out of a
+    // tray icon, it cannot be dismissed into one, and the notch is already running its
+    // own open spring around it. A second spring here would be two panels arriving on
+    // two curves, which is the drift the whole embed was built to avoid.
+    if (embedded) {
+      w.current = springSnap(grid.width);
+      h.current = springSnap(grid.height);
+    } else if (!closing && !shut) {
       if (reduced) {
         w.current = springSnap(grid.width);
         h.current = springSnap(grid.height);
@@ -466,11 +545,11 @@ function HudDriver({
     }
     const aw = w.current.value;
     const ah = h.current.value;
-    const left = hudPanelLeft(neck.centreX, aw, windowW);
+    const left = embedded ? 0 : hudPanelLeft(neck.centreX, aw, windowW);
     const sinceOpen = c.elapsed - c.openedAt;
     const sinceClose = c.elapsed - c.closedAt;
 
-    const genieT = shut ? 1 : closing ? genieProgress(sinceClose) : 0;
+    const genieT = embedded ? 0 : shut ? 1 : closing ? genieProgress(sinceClose) : 0;
     // The reduced-motion path: no funnel, no size morph, just a short cross-fade.
     const fade = shut
       ? 0
@@ -489,21 +568,26 @@ function HudDriver({
     clip.style.transform = `translate3d(${Math.round(left)}px, 0, 0)`;
     clip.style.clipPath = g.clipPath;
     // The material fades up as the box starts to grow; the genie owns the other end.
-    clip.style.opacity = reduced
-      ? fade.toFixed(3)
-      : shut
-        ? '0'
-        : Math.min(1, sinceOpen / MATERIAL_IN_MS).toFixed(3);
+    clip.style.opacity = embedded
+      ? '1'
+      : reduced
+        ? fade.toFixed(3)
+        : shut
+          ? '0'
+          : Math.min(1, sinceOpen / MATERIAL_IN_MS).toFixed(3);
     // A pill is fully round; the rectangle settles at 18px. Deriving the radius from
-    // the live height makes the corner morph free and impossible to desync.
-    panel.style.borderRadius = `${Math.min(18, ah / 2).toFixed(1)}px`;
+    // the live height makes the corner morph free and impossible to desync. The
+    // section has no corners of its own to round: the notch's are the only ones.
+    panel.style.borderRadius = embedded ? '0px' : `${Math.min(18, ah / 2).toFixed(1)}px`;
 
     stage.style.transform = g.contentTransform;
     stage.style.transformOrigin = g.contentOrigin;
     stage.style.opacity = String(g.contentOpacity);
-    head.style.opacity = (
-      reduced || closing || shut ? 1 : smootherstep((sinceOpen - HEAD_DELAY_MS) / HEAD_IN_MS)
-    ).toFixed(3);
+    if (head) {
+      head.style.opacity = (
+        reduced || closing || shut ? 1 : smootherstep((sinceOpen - HEAD_DELAY_MS) / HEAD_IN_MS)
+      ).toFixed(3);
+    }
 
     // ── cells ──────────────────────────────────────────────────────────────────
     // The springs run relative to the panel's centre line (see the header note); the
@@ -526,8 +610,19 @@ function HudDriver({
       if (!a) {
         // A ghost the loop never saw alive has nowhere to leave from.
         if (!target) continue;
+        // THE UNFOLD, and it is the section's one piece of theatre. Our own island
+        // grows out of a tray icon, so its cells are already in place when the box
+        // reaches them; a section has no icon to grow from, and cells that simply
+        // faded up in their slots read as a page loading inside the notch rather than
+        // as the notch opening. So the opening batch starts pulled toward the centre
+        // line and springs out to its slots while the host's own panel expands around
+        // it: one motion, borrowed from the host, on open only. 0.45 and not 0 because
+        // travelling the full half-width reads as a fling, not a spread. A cell that
+        // joins later still blooms where it stands.
+        const restX = target.x - mid;
+        const seedX = embedded && inBatch && !reduced ? restX * 0.45 : restX;
         a = {
-          x: spring(target.x - mid),
+          x: spring(seedX),
           y: spring(target.y),
           bornAt: inBatch ? c.openedAt + CELLS_LEAD_MS + i * STAGGER_MS : c.elapsed,
           bloom: !inBatch,
@@ -560,7 +655,7 @@ function HudDriver({
       // One transform, two elements: the plate lives in a different stacking layer from
       // the cell (it has to, to sit under the globes) but must never drift from it.
       const transform =
-        `translate3d(${Math.round(x - HUD_CELL_W / 2)}px, ` +
+        `translate3d(${Math.round(x - grid.pitch / 2)}px, ` +
         `${Math.round(y - HUD_CELL_H / 2 + (1 - e) * 7)}px, 0) ` +
         `scale(${((0.94 + e * 0.06) * (1 - exit * 0.08)).toFixed(3)})`;
       const el = cellEls.current.get(id);
@@ -648,6 +743,7 @@ function HudDriver({
 
 function HudCell({
   node,
+  width,
   leaving,
   hovered,
   elRef,
@@ -655,6 +751,10 @@ function HudCell({
   onHover,
 }: {
   node: HudNode;
+  /** The cell's box, which is the grid's pitch: wider in the section, where the width
+   *  is given rather than derived, so a task name gets more of a line before it
+   *  truncates. */
+  width: number;
   /** Fading out where it stands: still drawn, no longer offered. */
   leaving: boolean;
   hovered: boolean;
@@ -675,7 +775,7 @@ function HudCell({
       ref={elRef}
       type="button"
       className={`wd-hud-cell is-${status}${hovered ? ' is-hovered' : ''}`}
-      style={{ width: HUD_CELL_W, height: HUD_CELL_H }}
+      style={{ width, height: HUD_CELL_H }}
       onPointerEnter={onEnter}
       onPointerLeave={onLeave}
       onClick={() => onPick(agent)}

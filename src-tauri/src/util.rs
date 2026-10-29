@@ -18,6 +18,23 @@ pub fn hash64(bytes: &[u8]) -> u64 {
     let digest = Sha256::digest(bytes);
     u64::from_be_bytes(digest[0..8].try_into().expect("32-byte SHA-256 digest yields an 8-byte array"))
 }
+/// Modification time of a file as nanoseconds since the epoch, or `0` when the
+/// platform will not say.
+///
+/// Paired with the file's LENGTH this is the cheap "has anything touched this
+/// transcript" oracle the live ingest opens with. It exists because the honest
+/// answer used to cost a full read plus a SHA-256 of the whole file, on every
+/// filesystem event, for every live transcript: `refresh_live_context` measured
+/// 3.1s on a real corpus and almost all of it was re-hashing bytes already parsed.
+/// `0` is reserved for "unknown" and never compares equal, so a platform that
+/// cannot report an mtime falls back to exactly the old behaviour.
+pub fn mtime_nanos(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
 pub fn parse_ts(v: Option<&serde_json::Value>) -> DateTime<Utc> {
     v.and_then(|x| x.as_str())
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())

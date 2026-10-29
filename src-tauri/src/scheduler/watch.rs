@@ -176,37 +176,69 @@ pub fn ingest_file_once_reporting(
         None => return Ok(LiveIngest::default()), // not under any watched root, ignore
     };
 
-    // A file may vanish between the FSEvent and our read; treat as nothing to do.
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(_) => return Ok(LiveIngest::default()),
+    // STAT BEFORE READ. A file may vanish between the FSEvent and our look; treat as
+    // nothing to do. This used to open with `fs::read` + SHA-256 of the WHOLE file, on
+    // every event, for every live transcript, purely to decide whether anything had
+    // changed — which is why `refresh_live_context` measured 3.1s on a real corpus while
+    // ingesting 508 events. Length and mtime answer the same question from one `stat`.
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(LiveIngest::default());
     };
-    let len = bytes.len() as u64;
+    let len = meta.len();
     if len == 0 {
         return Ok(LiveIngest::default());
     }
-    let hash = hash64(&bytes);
-    let mut off = store.watermark_offset(path)?;
+    let mtime_ns = crate::util::mtime_nanos(&meta);
+    let mark = store.source_mark(path)?;
 
-    if len == off {
-        // No growth. If the content hash also matches what we stored, there is
-        // genuinely nothing new (a touch / metadata-only event). Otherwise the
-        // file was rewritten in place at the same length → full reparse.
-        let unchanged = store
-            .source_raw_hash(path)?
-            .map(|h| h == hash)
-            .unwrap_or(false);
-        if unchanged {
-            return Ok(LiveIngest::default());
-        }
-        off = 0;
-    } else if len < off {
+    // Nothing has touched the file since we last read it. `0` is the reserved "unknown"
+    // mtime (an older schema row, or a platform that will not say) and never matches, so
+    // an unknown mark falls through to the read path exactly as before.
+    if mtime_ns != 0 && mark.mtime_ns == mtime_ns && mark.size == len {
+        return Ok(LiveIngest::default());
+    }
+
+    let mut off = mark.offset;
+    if len < off {
         // Truncated or rewritten shorter than the watermark → start over.
         off = 0;
     }
 
-    let (slice, watermark_offset) = complete_jsonl_prefix(&bytes[off as usize..], off);
+    // READ ONLY WHAT WE HAVE NOT PARSED. An append is the overwhelmingly common case and
+    // it needs the tail alone; the whole file is read only on first sight, after a
+    // truncation, or to settle a same-length rewrite. `bytes` is always `file[off..]`,
+    // so the parse below is unchanged either way.
+    let (bytes, hash) = if off > 0 && off < len {
+        let tail = match read_from(path, off) {
+            Ok(b) => b,
+            Err(_) => return Ok(LiveIngest::default()),
+        };
+        let hash = hash64(&tail);
+        (tail, hash)
+    } else {
+        let all = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => return Ok(LiveIngest::default()),
+        };
+        let hash = hash64(&all);
+        if off == len {
+            // No growth, but the stat moved: either a touch that left the bytes alone or
+            // a rewrite in place at the same length. The content hash is the only thing
+            // that separates them, and this is now the ONLY path that pays for it.
+            if store.source_raw_hash(path)?.map(|h| h == hash) == Some(true) {
+                store.set_source_stat(path, len, mtime_ns)?;
+                return Ok(LiveIngest::default());
+            }
+            off = 0;
+        }
+        (all, hash)
+    };
+
+    let (slice, watermark_offset) = complete_jsonl_prefix(&bytes, off);
     if slice.is_empty() {
+        // A half-written line and nothing else. Stamp the stat anyway or the next event
+        // re-reads these same bytes to reach the same conclusion.
+        store.set_source_stat(path, len, mtime_ns)?;
         return Ok(LiveIngest::default());
     }
     let batches = adapter
@@ -233,7 +265,24 @@ pub fn ingest_file_once_reporting(
         // a line was half-written, leave those bytes unwatermarked for retry.
         store.upsert_session_batch(&b.session, &b.turns, &b.events, watermark_offset)?;
     }
+    // The size/mtime the SKIP above compares against, stamped from the stat taken BEFORE
+    // the read: if the file grew while we were reading it, storing the smaller length
+    // means the next event looks again, which is the safe direction to be wrong in.
+    store.set_source_stat(path, len, mtime_ns)?;
     Ok(report)
+}
+
+/// Read a file from `offset` to EOF.
+///
+/// The append path's whole point: a live transcript is mostly bytes we have already
+/// parsed, and re-reading them is the single most expensive thing the live ingest did.
+fn read_from(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::Start(offset))?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 /// Owns the live `RecommendedWatcher`s so they outlive `setup()`. A bare
