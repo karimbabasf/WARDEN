@@ -6,45 +6,72 @@
 
 <p align="center">
   <b>The agent that watches your agents.</b><br/>
-  A live radar for your local coding agents.
+  A live 3D radar for every Claude Code and Codex session on your Mac.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-macOS-0b0f0d?style=flat-square" alt="macOS" />
   <img src="https://img.shields.io/badge/license-MIT-76ff9d?style=flat-square" alt="MIT license" />
   <img src="https://img.shields.io/badge/built%20with-Tauri%20%C2%B7%20Rust%20%C2%B7%20React%20Three%20Fiber-1b6f3a?style=flat-square" alt="Built with Tauri, Rust, and React Three Fiber" />
+  <img src="https://img.shields.io/badge/API%20keys-none-0b0f0d?style=flat-square" alt="No API keys" />
+</p>
+
+<p align="center">
+  <a href="#what-you-see">Radar</a> ·
+  <a href="#brickyard">Brickyard</a> ·
+  <a href="#menu-bar-and-notch">Menu bar and notch</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#quickstart">Quickstart</a>
 </p>
 
 ---
 
-You run Claude Code and Codex all day. A root agent here, a swarm of Explore subagents there, a Codex session in another repo. You never actually see the shape of it: who is working right now, who quietly went idle, whose context window is about to run out.
+You run Claude Code and Codex all day. A root agent here, a swarm of Explore subagents there, a Codex session in another repo. You never see the shape of it: who is working, who went idle, who is stuck waiting on you, and whose context window is about to run out.
 
-WARDEN shows you. It is a macOS desktop app that tails the transcripts your agents already write and renders every session as a live agent on a 3D radar. Open it and your whole fleet is on one screen.
+WARDEN shows you. It tails the transcripts your agents already write and draws every session as a live globe on a 3D radar. Open it and your whole fleet is on one screen.
 
-It is read-only and fully local. WARDEN never writes to your projects, makes no network calls, and needs no API keys. It only reads the logs your agents already leave on disk.
+| | |
+|---|---|
+| **Local** | Reads the logs already on disk. No API keys, no account, no socket open at rest. |
+| **Read-only** | Never writes to your projects. The one write outside its own database is a session title you rename from the app. |
+| **Honest** | Every glow, link and count traces to a real signal. Nothing on screen is invented. |
+| **Light** | Paces itself to 30 fps when it sits behind your work, and stops drawing when it is hidden. |
 
 ## What you see
 
-Every globe on the radar maps to a real signal, never a fabricated one.
-
 - **Each agent is a globe.** Its core burns from a dim ember to white-hot as its context window fills, so a glance tells you who is running out of room.
-- **Subagents orbit their parent.** The forest mirrors the real spawn hierarchy: a root agent, the Explore or planning subagents it launched, and their children in turn.
-- **Colour is the harness.** Claude Code is emerald, Codex is violet, an unknown harness stays a neutral slate. Colour is always paired with a glyph and a label, so it is never the only signal.
-- **Motion is status.** A working agent pulses bright and quick, an idle one breathes slow and dim.
-- **Rails are folders.** Agents group onto one rail per project directory, so two agents in the same repo sit together.
+- **Three states, not two.** A working agent blazes and breathes. An idle one sits dim. An agent **waiting on you** (a question, a plan to approve, a permission prompt) strobes red, so a blocked agent never looks like a finished one.
+- **Subagents orbit their parent.** The tree mirrors the real spawn hierarchy, team members included, with their real names.
+- **Colour is the harness.** Claude Code is emerald, Codex is violet. Colour always comes with a glyph and a label.
+- **Rails are folders.** Agents group by project directory, so two agents in the same repo sit together.
 
-Click a globe to fly the camera in and open its detail panel: the exact context-window breakdown, a live feed of its recent tool calls and messages, its real children, and its model, uptime, and estimated cost.
+Click a globe to fly in and open its panel: the context-window breakdown, a live feed of tool calls and messages, the files it is reading and writing, its children, model, uptime and estimated cost. **Take me there** raises the exact terminal tab the agent runs in.
 
 ## Brickyard
 
-Press `B`, or use the switch at the top right, to trade the radar for a workshop. Every root agent gets a bench and builds a real LEGO set from its own work: each file write or command run places the next brick from the set's real instructions, a failed call pulls that brick back off, and a plan or todo update turns a page in the instruction book. Subagents and teammates walk in as extra builders, take a submodel to a side table, and attach it when they finish. A finished set goes on the shelf behind the bench and the next one opens.
+<p align="center">
+  <img src="docs/brickyard.png" alt="The Brickyard: each agent has a bench where a minifig builds a real LEGO set, with an open instruction book and finished sets on the shelf" width="860" />
+</p>
 
-- **Click a bench** for its panel: the set, brick and step counts, a 3D preview of the model now and finished, the open instruction page, and a build log where every row is a real tool call.
-- **Click a brick** to see the tool call that placed it.
-- **Click the book** to fly in and read the open pages.
-- **Click a set on the shelf** to inspect the finished model on a turntable and see who built it.
+Press `B`, or use the switch at the top right, to trade the radar for a workshop. Every root agent gets a bench and builds a real LEGO set from its own work.
 
-The sets and parts come from the [LDraw](https://www.ldraw.org) Official Model Repository and Parts Library under CC BY 2.0 / 4.0, packed into `public/brickyard/` by `scripts/brickyard/pack.mjs` so the app still opens no network connection. Authors are credited in [`public/brickyard/ATTRIBUTION.txt`](public/brickyard/ATTRIBUTION.txt). LEGO is a trademark of the LEGO Group, which does not sponsor or endorse this project.
+| The agent does | On the bench |
+|---|---|
+| Writes a file or runs a command | The next brick from the real instructions goes on |
+| A call fails | That brick comes back off |
+| Updates its plan or todo list | The instruction book turns a page |
+| Spawns a subagent or teammate | A new builder walks in and takes a submodel to a side table |
+| Finishes a set | It goes on the shelf and the next box opens |
+
+Click a bench for its set, brick and step counts, a 3D preview, the open instruction page and a build log where every row is a real tool call. Click a brick to see the call that placed it, the book to read it, or a shelved set to spin it on a turntable.
+
+Sets and parts come from the [LDraw](https://www.ldraw.org) Official Model Repository and Parts Library under CC BY 2.0 / 4.0, packed into `public/brickyard/` by `scripts/brickyard/pack.mjs` so the app still needs no network. Authors are credited in [`public/brickyard/ATTRIBUTION.txt`](public/brickyard/ATTRIBUTION.txt). LEGO is a trademark of the LEGO Group, which does not sponsor or endorse this project.
+
+## Menu bar and notch
+
+WARDEN lives in the menu bar too. The tray opens a compact HUD with the same globes as the radar. An agent that needs you opens the panel by itself, and a click on its globe takes you straight to its terminal.
+
+The same HUD can run inside a notch app. WARDEN serves its own bundle over a loopback bridge (`127.0.0.1`, a token minted per launch, foreign origins refused), so the notch draws the real globes, not a copy.
 
 ## How it works
 
@@ -55,92 +82,83 @@ The sets and parts come from the [LDraw](https://www.ldraw.org) Official Model R
    canonical IR   ->   SQLite + FTS5   (byte-offset watermarks)
         |
         v
-   radar recompute: liveness, context weight, subagent hierarchy
+   radar recompute: liveness, awaiting, context weight, hierarchy
         |   radar_state
         v
-   R3F constellation + detail panel   (the window opens straight to it)
+   radar  ·  Brickyard  ·  menu-bar HUD  ·  notch bridge
 ```
 
-- **Watch.** File adapters tail the logs your agents already produce (`~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/rollout-*.jsonl`). Startup backfills history, then `FSEvents` streams new writes live. Watermarks are byte offsets, so a coalesced burst of writes is never double-counted and schema drift never drops a session.
-- **Normalize.** Every harness, whatever its log format, maps into one canonical Rust intermediate representation and lands in a local SQLite + FTS5 store. Adding a new agent is one adapter file with zero downstream changes.
-- **Compute.** On every change, WARDEN recomputes the live forest: which sessions are open, how full each context window is, and which sessions spawned which, resolved from the real subagent links.
-- **Render.** The forest is pushed to the UI as a `radar_state` event and drawn by a React Three Fiber scene. The window opens straight to the radar, so there is nothing to summon and nothing to configure.
-
-Honest visualization is the rule throughout: a globe's heat, a subagent link, an activity line, all trace to a computed value. Nothing on screen is invented.
+- **Watch.** Adapters tail `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/rollout-*.jsonl`. Startup backfills history, then FSEvents streams new writes. Watermarks are byte offsets, so a burst of writes is never counted twice and schema drift never drops a session.
+- **Normalize.** Every harness maps into one Rust intermediate representation stored in SQLite + FTS5. A new harness is one adapter file and zero downstream changes.
+- **Compute.** On each change WARDEN rebuilds the live forest: which sessions are open, which wait on you, how full each context is, and who spawned whom. A one-second floor caps CPU; an agent arriving or leaving skips the queue.
+- **Render.** The forest goes to the UI as a `radar_state` event and React Three Fiber draws it. The Brickyard folds each agent's tool calls into a build log on the Rust side and plays it back brick by brick.
 
 ## Quickstart
 
-Prerequisites: macOS (Apple Silicon), a Rust toolchain (stable, 1.85 or newer), and [pnpm](https://pnpm.io).
+You need macOS on Apple Silicon, Rust stable 1.85 or newer, and [pnpm](https://pnpm.io).
 
 ```bash
 pnpm install
-pnpm tauri dev      # build and launch the app
+pnpm tauri dev      # build and launch
+pnpm tauri build    # package a macOS app
 ```
 
-The window opens straight to the radar. If you have Claude Code or Codex sessions on disk, your agents appear within a second or two. Otherwise the radar waits, watching, until one starts.
+The window opens straight to the radar. Any Claude Code or Codex sessions on disk appear within a second or two.
 
-Build a distributable macOS app:
+### Try it in a browser
 
-```bash
-pnpm tauri build
-```
+No Rust build needed. Run `pnpm dev`, then open:
 
-### Try the radar in a browser
-
-You can eyeball the radar in a plain browser against a mock forest, no Rust build required:
-
-```bash
-pnpm dev            # then open http://127.0.0.1:1420/radar-lab.html
-```
-
-The Brickyard has its own sandbox with simulated agents at `/brickyard-lab.html`. `?pre=300` starts the benches 300 tool calls in, `?speed=4` runs the agents faster, and `?select=0` opens the first bench's panel.
+| Page | What it shows |
+|---|---|
+| `/radar-lab.html` | The radar and detail panel against a mock forest |
+| `/brickyard-lab.html` | The Brickyard with simulated agents. `?pre=300` starts 300 calls in, `?speed=4` runs faster, `?select=0` opens the first bench |
+| `/war-room-lab.html` | The whole app shell, for layout checks |
+| `/hud-lab.html` | The menu-bar HUD |
 
 ## Configuration
 
-WARDEN needs no configuration. Every setting is an optional override (see [`.env.example`](.env.example)):
+None needed. Every setting is an optional override (see [`.env.example`](.env.example)):
 
-| Variable | Meaning |
+| Variable | Default |
 |---|---|
-| `WARDEN_DB_PATH` | Where the SQLite index lives (default `~/.warden/warden.db`). |
-| `WARDEN_CLAUDE_PROJECTS` | Claude Code transcript root (default `~/.claude/projects`). |
-| `WARDEN_CODEX_SESSIONS` | Codex session root (default `~/.codex/sessions`). |
+| `WARDEN_DB_PATH` | `~/.warden/warden.db` |
+| `WARDEN_CLAUDE_PROJECTS` | `~/.claude/projects` |
+| `WARDEN_CODEX_SESSIONS` | `~/.codex/sessions` |
 
 ## Project layout
 
 ```
-src-tauri/            Rust core (single crate)
-  src/ir.rs           canonical intermediate representation
-  src/ingest/         Adapter trait + registry + claude_code.rs / codex.rs
-  src/store.rs        rusqlite + FTS5 store (byte-offset watermarks)
-  src/radar/          the live agent-forest model
-  src/scheduler/      watch (live ingest) and radar (recompute) drivers
-  src/platform/       the macOS seam
-  src/lib.rs          Tauri setup: window, tray, watchers
-  src/commands.rs     Tauri IPC commands
-web/                  TypeScript + React Three Fiber island
-  main.ts             Tauri event router
-  viz/modules/radar/  the constellation, layout, detail panel, hover card
-  viz/modules/brickyard/ the Brickyard: benches, minifig rig, instruction pages
-  viz/views/war-room/ the app shell (brand, filter, breadcrumb)
-  viz/shared/         state, types, theme, scene helpers
-public/brickyard/     packed LDraw sets, minifig parts, attribution
-scripts/brickyard/    pack.mjs, which builds public/brickyard/ from LDraw
-docs/radar.png        the screenshot above
+src-tauri/src/        Rust core (single crate)
+  ir.rs               canonical intermediate representation
+  ingest/             adapter trait, claude_code.rs, codex.rs
+  store.rs            SQLite + FTS5 store
+  radar/              the live forest: liveness, awaiting, hierarchy, build log
+  scheduler/          live ingest and recompute drivers
+  terminal.rs         "take me there": agent to terminal tab
+  platform/           the macOS seam
+web/viz/
+  modules/radar/      constellation, globe, detail panel
+  modules/brickyard/  benches, minifig rig, instruction pages
+  views/war-room/     the app shell
+  views/hud/          the menu-bar HUD
+  shared/             state, types, theme, scene helpers
+public/brickyard/     packed LDraw sets and attribution
 ```
 
-More detail on the layering rules lives in [`CLAUDE.md`](CLAUDE.md).
+Layering rules and design notes live in [`CLAUDE.md`](CLAUDE.md).
 
 ## Development
 
 ```bash
-cd src-tauri && cargo test        # Rust unit + golden tests
-cd src-tauri && cargo clippy      # lint (denies production unwrap)
-pnpm build                        # tsc + vite bundle
-pnpm test                         # vitest
-pnpm check:arch                   # frontend import-boundary check
+cd src-tauri && cargo test     # Rust unit and golden tests
+cd src-tauri && cargo clippy   # lint (denies production unwrap)
+pnpm build                     # typecheck and bundle
+pnpm test                      # vitest
+pnpm check:arch                # frontend import boundaries
 ```
 
-The frontend is feature-sliced: imports point one direction only (`app -> views -> modules -> shared`), enforced by `pnpm check:arch`. The Rust core keeps `tauri` confined to `lib.rs` and `commands.rs`, with all OS-specific code isolated in `platform/` so a future port is one adapter file.
+Frontend imports point one way only (`app -> views -> modules -> shared`), enforced by `pnpm check:arch`. In Rust, `tauri` stays inside `lib.rs` and `commands.rs`, and OS code stays inside `platform/`.
 
 ## License
 
