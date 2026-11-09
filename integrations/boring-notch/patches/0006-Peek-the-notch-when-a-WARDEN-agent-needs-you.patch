@@ -1,0 +1,515 @@
+From 70212d3f0633e56e40c89f2e9031e34c0adbd556 Mon Sep 17 00:00:00 2001
+From: Karim Baba <karim.sf09@gmail.com>
+Date: Tue, 8 Sep 2026 10:21:25 -0700
+Subject: [PATCH 6/8] Peek the notch when a WARDEN agent needs you
+
+WARDEN's own menu-bar panel used to open for this. With the section
+running that was the same alert twice, one covering the other.
+
+WardenAttentionMonitor holds WARDEN's /attention stream natively, next to
+the web view rather than inside it: the page's event stream is open only
+while the section is on screen, and the whole point of an alert is that
+it arrives when you are not looking at the notch. Holding that stream is
+also what tells WARDEN to stay down, so the toggle in Settings hands the
+alert straight back and there is no state where both speak or neither.
+
+The peek keeps the three properties that made WARDEN's summon a
+notification rather than an interruption: it fires on the transition, it
+takes no focus, and it leaves after six seconds unless the pointer
+arrived, which is the operator answering it.
+
+Also: a wardenHost script-message handler, so a globe click can put the
+panel away at once instead of leaving the notch open over the terminal
+window it just asked for.
+---
+ boringNotch.xcodeproj/project.pbxproj         |   4 +
+ boringNotch/boringNotchApp.swift              |  96 +++++++++
+ .../components/Settings/SettingsView.swift    |  20 +-
+ .../Warden/WardenAttentionMonitor.swift       | 203 ++++++++++++++++++
+ .../components/Warden/WardenSectionView.swift |  33 +++
+ boringNotch/models/Constants.swift            |   9 +
+ 6 files changed, 364 insertions(+), 1 deletion(-)
+ create mode 100644 boringNotch/components/Warden/WardenAttentionMonitor.swift
+
+diff --git a/boringNotch.xcodeproj/project.pbxproj b/boringNotch.xcodeproj/project.pbxproj
+index e3746c0..739b813 100644
+--- a/boringNotch.xcodeproj/project.pbxproj
++++ b/boringNotch.xcodeproj/project.pbxproj
+@@ -113,6 +113,7 @@
+ 		9A0887322C7A693000C160EA /* TabButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A0887312C7A693000C160EA /* TabButton.swift */; };
+ 		9A0887352C7AFF8E00C160EA /* TabSelectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A0887342C7AFF8E00C160EA /* TabSelectionView.swift */; };
+ 		D7A110012E00000000000002 /* WardenSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A110012E00000000000001 /* WardenSectionView.swift */; };
++		D7A110012E00000000000012 /* WardenAttentionMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A110012E00000000000011 /* WardenAttentionMonitor.swift */; };
+ 		9A987A0D2C73CA66005CA465 /* ShelfView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A987A032C73CA66005CA465 /* ShelfView.swift */; };
+ 		9A987A102C73CA8D005CA465 /* Collections in Frameworks */ = {isa = PBXBuildFile; productRef = 9A987A0F2C73CA8D005CA465 /* Collections */; };
+ 		9AB0C6BD2C73C9CB00F7CD30 /* NotchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AB0C6BB2C73C9CB00F7CD30 /* NotchHomeView.swift */; };
+@@ -284,6 +285,7 @@
+ 		9A0887312C7A693000C160EA /* TabButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabButton.swift; sourceTree = "<group>"; };
+ 		9A0887342C7AFF8E00C160EA /* TabSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabSelectionView.swift; sourceTree = "<group>"; };
+ 		D7A110012E00000000000001 /* WardenSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardenSectionView.swift; sourceTree = "<group>"; };
++		D7A110012E00000000000011 /* WardenAttentionMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardenAttentionMonitor.swift; sourceTree = "<group>"; };
+ 		9A987A032C73CA66005CA465 /* ShelfView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ShelfView.swift; sourceTree = "<group>"; };
+ 		9AB0C6BB2C73C9CB00F7CD30 /* NotchHomeView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = NotchHomeView.swift; sourceTree = "<group>"; };
+ 		B10348D82C74E56000475897 /* ConditionalModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConditionalModifier.swift; sourceTree = "<group>"; };
+@@ -654,6 +656,7 @@
+ 			isa = PBXGroup;
+ 			children = (
+ 				D7A110012E00000000000001 /* WardenSectionView.swift */,
++				D7A110012E00000000000011 /* WardenAttentionMonitor.swift */,
+ 			);
+ 			path = Warden;
+ 			sourceTree = "<group>";
+@@ -1017,6 +1020,7 @@
+ 				11F748842ECB27DC00F841DB /* MusicSlotConfigurationView.swift in Sources */,
+ 				9A0887352C7AFF8E00C160EA /* TabSelectionView.swift in Sources */,
+ 				D7A110012E00000000000002 /* WardenSectionView.swift in Sources */,
++				D7A110012E00000000000012 /* WardenAttentionMonitor.swift in Sources */,
+ 				112FB7352CCF16F70015238C /* NotchSpaceManager.swift in Sources */,
+ 				14FC6E502C7DED5600C7BEA5 /* DataTypes+Extensions.swift in Sources */,
+ 				1153BD982D9881F900979FB0 /* AppleScriptHelper.swift in Sources */,
+diff --git a/boringNotch/boringNotchApp.swift b/boringNotch/boringNotchApp.swift
+index ac1b936..96fe4f3 100644
+--- a/boringNotch/boringNotchApp.swift
++++ b/boringNotch/boringNotchApp.swift
+@@ -60,6 +60,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
+     var whatsNewWindow: NSWindow?
+     var timer: Timer?
+     var closeNotchTask: Task<Void, Never>?
++    private var wardenPeekTask: Task<Void, Never>?
++    private var wardenAlertCancellable: AnyCancellable?
+     private var previousScreens: [NSScreen]?
+     private var onboardingWindowController: NSWindowController?
+     private var screenLockedObserver: Any?
+@@ -192,6 +194,95 @@ class AppDelegate: NSObject, NSApplicationDelegate {
+         }
+     }
+ 
++    // MARK: - WARDEN
++
++    /// Hold the attention stream, and peek the notch when an agent stops on the operator.
++    ///
++    /// Two things start here, and the first one is why the second is allowed to exist:
++    /// holding that stream is what tells WARDEN its own menu-bar panel must stay down
++    /// (see `WardenAttentionMonitor`). Drop the connection and WARDEN is answering for
++    /// itself again on the next block, so there is no way to end up with two alerts or
++    /// with none.
++    private func setupWarden() {
++        WardenAttentionMonitor.shared.start()
++        wardenAlertCancellable = WardenAttentionMonitor.shared.alerts.sink { [weak self] alert in
++            Task { @MainActor in self?.peekWardenAlert(alert) }
++        }
++        NotificationCenter.default.addObserver(
++            forName: Notification.Name.wardenCloseNotch, object: nil, queue: nil
++        ) { [weak self] _ in
++            Task { @MainActor in self?.closeWardenPeek() }
++        }
++    }
++
++    /// An agent has just stopped on the operator: show them, then leave.
++    ///
++    /// This is WARDEN's own auto-summon, moved into the notch, and it keeps the three
++    /// properties that made that one a notification rather than an interruption. It
++    /// fires on the TRANSITION (WARDEN already folded the level away before publishing).
++    /// It takes no focus: opening the notch moves no window and steals no keystroke.
++    /// And it leaves on its own clock, six seconds, the same number the panel uses,
++    /// unless the pointer arrived, which is the operator answering it.
++    @MainActor
++    private func peekWardenAlert(_ alert: WardenAttentionAlert) {
++        guard Defaults[.wardenAttentionAlerts], !coordinator.firstLaunch else { return }
++        let viewModel = notchViewModelUnderMouse()
++        // Already open is already answered: the fleet is on screen, and re-opening a
++        // notch the operator is using would yank the tab out from under them.
++        guard viewModel.notchState == .closed else { return }
++
++        // Cancel the shortcut's own close clock: it would shut this peek early.
++        closeNotchTask?.cancel()
++        closeNotchTask = nil
++
++        coordinator.currentView = .warden
++        withAnimation(.smooth) { viewModel.open() }
++        NSLog("WARDEN: \(alert.awaiting) agent(s) waiting; peeking the notch")
++
++        wardenPeekTask?.cancel()
++        wardenPeekTask = Task { [weak viewModel] in
++            try? await Task.sleep(for: .seconds(6))
++            guard !Task.isCancelled, let viewModel else { return }
++            await MainActor.run {
++                // Reaching for it cancels the clock. Hover is the only "the operator is
++                // looking at this" signal a notch has, and closing under the pointer is
++                // the one way to make a helpful peek hostile.
++                guard !viewModel.isMouseHovering(), viewModel.notchState == .open else { return }
++                withAnimation(.smooth) { viewModel.close() }
++            }
++        }
++    }
++
++    /// Put the panel away because the section asked: a globe was clicked and the
++    /// terminal it names is coming forward. Nothing here waits for that raise (it is
++    /// 150ms warm, up to 800ms on the first Apple event of a session); the click was the
++    /// decision, and the notch sitting over the window it just summoned was the whole of
++    /// what "delayed" meant.
++    @MainActor
++    private func closeWardenPeek() {
++        wardenPeekTask?.cancel()
++        wardenPeekTask = nil
++        let viewModel = notchViewModelUnderMouse()
++        guard viewModel.notchState == .open else { return }
++        withAnimation(.smooth) { viewModel.close() }
++    }
++
++    /// The notch the pointer is on, or the only one there is.
++    ///
++    /// Same rule the open/close shortcut uses: with one notch there is nothing to pick,
++    /// and with one per display the pointer names which display the operator is at.
++    @MainActor
++    private func notchViewModelUnderMouse() -> BoringViewModel {
++        guard Defaults[.showOnAllDisplays] else { return vm }
++        let mouseLocation = NSEvent.mouseLocation
++        for screen in NSScreen.screens where screen.frame.contains(mouseLocation) {
++            if let uuid = screen.displayUUID, let screenViewModel = viewModels[uuid] {
++                return screenViewModel
++            }
++        }
++        return vm
++    }
++
+     private func setupDragDetectorForScreen(_ screen: NSScreen) {
+         guard let uuid = screen.displayUUID else { return }
+         
+@@ -422,6 +513,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
+ 
+         setupDragDetectors()
+ 
++        setupWarden()
++
+         if coordinator.firstLaunch {
+             DispatchQueue.main.async {
+                 self.showOnboardingWindow()
+@@ -603,6 +696,9 @@ extension Notification.Name {
+     static let showOnAllDisplaysChanged = Notification.Name("showOnAllDisplaysChanged")
+     static let automaticallySwitchDisplayChanged = Notification.Name("automaticallySwitchDisplayChanged")
+     static let expandedDragDetectionChanged = Notification.Name("expandedDragDetectionChanged")
++    /// The WARDEN section asking for its host panel to be put away, because a globe was
++    /// clicked and the terminal it names is coming forward. See `WardenSectionView`.
++    static let wardenCloseNotch = Notification.Name("WardenCloseNotch")
+ }
+ 
+ extension CGRect: @retroactive Hashable {
+diff --git a/boringNotch/components/Settings/SettingsView.swift b/boringNotch/components/Settings/SettingsView.swift
+index cff23f3..e874b24 100644
+--- a/boringNotch/components/Settings/SettingsView.swift
++++ b/boringNotch/components/Settings/SettingsView.swift
+@@ -147,7 +147,10 @@ struct GeneralSettings: View {
+     @Default(.automaticallySwitchDisplay) var automaticallySwitchDisplay
+     @Default(.enableGestures) var enableGestures
+     @Default(.openNotchOnHover) var openNotchOnHover
+-    
++    /// Observed so the WARDEN row states whether the connection is actually up. A toggle
++    /// that is on while nothing is listening is the one thing this pane must not imply.
++    @ObservedObject var wardenMonitor = WardenAttentionMonitor.shared
++
+ 
+     var body: some View {
+         Form {
+@@ -345,6 +348,21 @@ struct GeneralSettings: View {
+         } header: {
+             Text("Notch behavior")
+         }
++
++        Section {
++            Defaults.Toggle(key: .wardenAttentionAlerts) {
++                Text("Peek when an agent needs you")
++            }
++            Text(
++                wardenMonitor.connected
++                    ? "Connected to WARDEN. Its own menu-bar panel stays down while this is on."
++                    : "WARDEN is not running. Nothing to show."
++            )
++            .font(.caption)
++            .foregroundStyle(.secondary)
++        } header: {
++            Text("WARDEN")
++        }
+     }
+ }
+ 
+diff --git a/boringNotch/components/Warden/WardenAttentionMonitor.swift b/boringNotch/components/Warden/WardenAttentionMonitor.swift
+new file mode 100644
+index 0000000..d1671a7
+--- /dev/null
++++ b/boringNotch/components/Warden/WardenAttentionMonitor.swift
+@@ -0,0 +1,203 @@
++//
++//  WardenAttentionMonitor.swift
++//  boringNotch
++//
++//  "An agent has just stopped on you." The notch says it now, and WARDEN's own menu-bar
++//  panel stays down while we are the one saying it.
++//
++//  WHY THIS IS NOT DONE IN THE WEB VIEW. The section already receives WARDEN's radar
++//  state, so it knows perfectly well when a globe turns red. It just cannot TELL anyone:
++//  the page's event stream is open only while the section is on screen (that is what
++//  keeps a hidden WebGL scene from driving a 120Hz display all day), and the whole point
++//  of an alert is that it arrives when you are NOT looking at the notch. So this is a
++//  native client, held open for the life of the app, next to the web view rather than
++//  inside it.
++//
++//  THE HELD CONNECTION IS ALSO THE ANSWER TO A SECOND QUESTION. WARDEN used to open its
++//  own panel under the menu bar whenever an agent blocked. With the section running,
++//  that is the same alert twice, one of them covering the other. WARDEN decides which
++//  surface speaks by asking whether anybody is holding this stream (`bridge.rs ::
++//  host_attached`), so connecting IS the handover and disconnecting gives it straight
++//  back. There is no second setting to keep in sync, and no state to get stuck in: kill
++//  boring.notch and WARDEN's panel is answering again on the next block.
++//
++
++import Combine
++import Defaults
++import Foundation
++
++// MARK: - Wire types
++
++/// One agent that has just stopped on the operator.
++///
++/// `reason` is WARDEN's CLOSED vocabulary (`question` / `approval` / `input`), never a
++/// harness's own dialog text: see `radar/awaiting.rs`. Optional because an older
++/// transcript can carry the block without the reason.
++struct WardenAwaitingAgent: Decodable, Equatable {
++    let id: String
++    let name: String
++    let harness: String
++    let reason: String?
++
++    /// The line the notch shows. Written for the operator, mirroring
++    /// `web/viz/shared/lib/awaitingCopy.ts` so the notch and the globes agree on words.
++    var line: String {
++        switch reason {
++        case "question": return "asked you a question"
++        case "approval": return "needs your approval"
++        default: return "needs your input"
++        }
++    }
++}
++
++/// The alert itself: who just blocked, and how many are waiting in total.
++struct WardenAttentionAlert: Decodable, Equatable {
++    let agents: [WardenAwaitingAgent]
++    /// EVERY agent waiting, not just the new ones. "3 agents need you" is the line the
++    /// operator acts on; the transition is only what decided to speak.
++    let awaiting: Int
++}
++
++/// The SSE envelope WARDEN publishes.
++private struct WardenBridgeEvent: Decodable {
++    let event: String
++}
++
++private struct WardenAttentionEnvelope: Decodable {
++    let event: String
++    let payload: WardenAttentionAlert
++}
++
++// MARK: - Monitor
++
++@MainActor
++final class WardenAttentionMonitor: ObservableObject {
++    static let shared = WardenAttentionMonitor()
++
++    /// Fires once per transition into awaiting. Not `@Published`: an alert is an EVENT,
++    /// and a published value would re-deliver the last one to every new subscriber.
++    let alerts = PassthroughSubject<WardenAttentionAlert, Never>()
++
++    /// Is the stream up right now? Read by the settings pane so "WARDEN is not running"
++    /// is a visible state rather than a silent one.
++    @Published private(set) var connected = false
++
++    private var task: Task<Void, Never>?
++    private var enabledCancellable: AnyCancellable?
++
++    /// A session of our own, because the default one's 60s request timeout would tear
++    /// down a stream that is idle by design. WARDEN's keep-alive comments would usually
++    /// beat it, but "usually" is not a reason to leave the trap set.
++    private lazy var session: URLSession = {
++        let config = URLSessionConfiguration.ephemeral
++        config.timeoutIntervalForRequest = .infinity
++        config.timeoutIntervalForResource = .infinity
++        config.waitsForConnectivity = false
++        config.httpShouldUsePipelining = false
++        return URLSession(configuration: config)
++    }()
++
++    private init() {
++        // The toggle is the operator's way to hand the alert back to WARDEN's own panel,
++        // and it has to act at once in both directions: turning it off must DROP the
++        // connection, because the connection is what tells WARDEN to stay quiet.
++        enabledCancellable = Defaults.publisher(.wardenAttentionAlerts)
++            .sink { [weak self] change in
++                Task { @MainActor in
++                    if change.newValue { self?.start() } else { self?.stop() }
++                }
++            }
++    }
++
++    func start() {
++        guard Defaults[.wardenAttentionAlerts], task == nil else { return }
++        task = Task { [weak self] in await self?.run() }
++    }
++
++    func stop() {
++        task?.cancel()
++        task = nil
++        connected = false
++    }
++
++    /// Connect, read, reconnect. Forever, until cancelled.
++    ///
++    /// Every exit from `readStream` is a reconnect, not a failure to report: WARDEN not
++    /// being up is the ordinary case (it is a separate app the operator starts when they
++    /// want it), so this waits and asks again rather than surfacing an error nobody can
++    /// act on. The backoff is what keeps that from being a poll: 2s while WARDEN is
++    /// absent, and no delay at all after a stream that had actually been running, so a
++    /// WARDEN restart is picked up on the next handshake rather than a backoff later.
++    private func run() async {
++        var backoff: UInt64 = 2
++        while !Task.isCancelled {
++            guard let handshake = Self.readHandshake(),
++                  let url = URL(string: "http://127.0.0.1:\(handshake.port)/attention")
++            else {
++                try? await Task.sleep(for: .seconds(2))
++                continue
++            }
++            var request = URLRequest(url: url)
++            request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
++            request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
++            request.timeoutInterval = .infinity
++
++            let ranClean = await readStream(request)
++            if Task.isCancelled { return }
++            backoff = ranClean ? 1 : min(backoff * 2, 10)
++            try? await Task.sleep(for: .seconds(Double(backoff)))
++        }
++    }
++
++    /// Read one connection to exhaustion. Returns whether it ever actually delivered.
++    private func readStream(_ request: URLRequest) async -> Bool {
++        var delivered = false
++        do {
++            let (bytes, response) = try await session.bytes(for: request)
++            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
++                return false
++            }
++            connected = true
++            defer { connected = false }
++
++            // Minimal SSE: WARDEN sends one JSON object per `data:` line and never
++            // splits one across lines, so there is no multi-line frame to reassemble.
++            // Everything else on the wire (`:` keep-alives, blank separators) is skipped
++            // rather than parsed.
++            for try await line in bytes.lines {
++                if Task.isCancelled { break }
++                guard let json = line.dropPrefixIfPresent("data:")?
++                    .trimmingCharacters(in: .whitespaces)
++                    .data(using: .utf8)
++                else { continue }
++                delivered = true
++                guard let kind = try? JSONDecoder().decode(WardenBridgeEvent.self, from: json),
++                      kind.event == "warden_attention",
++                      let envelope = try? JSONDecoder().decode(WardenAttentionEnvelope.self, from: json)
++                else { continue }
++                alerts.send(envelope.payload)
++            }
++        } catch {
++            return delivered
++        }
++        return delivered
++    }
++
++    /// `{port, token}`, written by WARDEN at 0600 for this launch.
++    ///
++    /// The REAL home directory, not `NSHomeDirectory()`: we are sandboxed, so that call
++    /// answers with our container. Same read `WardenBridgeWatcher` does, and it works for
++    /// the same reason: the read-only home-relative exception this fork adds for
++    /// `/.warden/`.
++    private static func readHandshake() -> WardenHandshake? {
++        guard let data = try? Data(contentsOf: WardenBridgeWatcher.handshakeURL) else { return nil }
++        return try? JSONDecoder().decode(WardenHandshake.self, from: data)
++    }
++}
++
++private extension String {
++    /// The line's payload when it is a `data:` line, `nil` otherwise.
++    func dropPrefixIfPresent(_ prefix: String) -> String? {
++        hasPrefix(prefix) ? String(dropFirst(prefix.count)) : nil
++    }
++}
+diff --git a/boringNotch/components/Warden/WardenSectionView.swift b/boringNotch/components/Warden/WardenSectionView.swift
+index 77c171e..3aaf386 100644
+--- a/boringNotch/components/Warden/WardenSectionView.swift
++++ b/boringNotch/components/Warden/WardenSectionView.swift
+@@ -81,6 +81,32 @@ final class WardenBridgeWatcher: ObservableObject {
+     }
+ }
+ 
++// MARK: - Page -> host
++
++/// The section's script-message handler.
++///
++/// A singleton because `WKUserContentController` RETAINS its handler and the web view is
++/// cached for the life of the app: a per-view handler would keep a retired coordinator
++/// (and, through it, whatever it referenced) alive behind every WARDEN restart.
++///
++/// It reads exactly one action and ignores everything else. The page is ours, but a
++/// script-message handler is still a hole in the sandbox around a web view, so it stays
++/// a closed vocabulary rather than anything shaped like a command.
++@MainActor
++final class WardenHostBridge: NSObject, WKScriptMessageHandler {
++    static let shared = WardenHostBridge()
++
++    func userContentController(
++        _ userContentController: WKUserContentController,
++        didReceive message: WKScriptMessage
++    ) {
++        guard let body = message.body as? [String: Any],
++              body["action"] as? String == "close"
++        else { return }
++        NotificationCenter.default.post(name: Notification.Name.wardenCloseNotch, object: nil)
++    }
++}
++
+ // MARK: - Web view
+ 
+ /// WARDEN's HUD bundle, hosted.
+@@ -123,6 +149,13 @@ enum WardenWebViewCache {
+             forMainFrameOnly: true
+         )
+         config.userContentController.addUserScript(script)
++        // The one channel that runs page -> host. The page uses it for exactly one
++        // thing: "I have been clicked, put your panel away", because a globe click means
++        // take me to that terminal and the notch was sitting over the window it had just
++        // asked for. WARDEN's own panel funnels away on that click; this is the
++        // section's equivalent, and it is a REQUEST rather than the page dismissing
++        // itself, because the panel is the host's and only the host can bring it back.
++        config.userContentController.add(WardenHostBridge.shared, name: "wardenHost")
+ 
+         let webView = WKWebView(frame: .zero, configuration: config)
+         webView.navigationDelegate = coordinator
+diff --git a/boringNotch/models/Constants.swift b/boringNotch/models/Constants.swift
+index 8477434..7d86eee 100644
+--- a/boringNotch/models/Constants.swift
++++ b/boringNotch/models/Constants.swift
+@@ -75,6 +75,15 @@ extension Defaults.Keys {
+     static let automaticallySwitchDisplay = Key<Bool>("automaticallySwitchDisplay", default: true)
+     static let releaseName = Key<String>("releaseName", default: "Flying Rabbit 🐇🪽")
+     
++    // MARK: WARDEN
++    /// Peek the notch open when one of WARDEN's agents stops on you.
++    ///
++    /// Off hands the alert straight back to WARDEN, which opens its own menu-bar panel
++    /// instead: the connection this switch holds is what tells WARDEN to stay quiet, so
++    /// there is never a state where both speak or neither does. See
++    /// `WardenAttentionMonitor`.
++    static let wardenAttentionAlerts = Key<Bool>("wardenAttentionAlerts", default: true)
++
+     // MARK: Behavior
+     static let minimumHoverDuration = Key<TimeInterval>("minimumHoverDuration", default: 0.3)
+     static let enableHaptics = Key<Bool>("enableHaptics", default: true)

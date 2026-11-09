@@ -1,0 +1,62 @@
+From 8b6818b07ca18d203430061e2d68ec423de4a6ed Mon Sep 17 00:00:00 2001
+From: Karim Baba <karim.sf09@gmail.com>
+Date: Mon, 7 Sep 2026 15:56:58 -0700
+Subject: [PATCH 2/8] Tell the WARDEN page when the section is off screen
+
+Without this the section is a battery bug. The HUD canvas renders whenever
+its panel is open and in the section the panel is always open, so a hidden
+tab would keep a WebGL scene driving the display and polling every 750ms for
+frames nobody can see. A WKWebView taken out of the view hierarchy does not
+learn that on its own: document.hidden stays false.
+
+onAppear and onDisappear cover both ways this section leaves the screen,
+another tab being picked and the notch closing, because ContentView builds
+the tab body only while notchState is .open. The web view itself stays
+cached, so it comes back warm rather than rebuilding a WebGL context, but it
+comes back idle.
+
+Measured through the bridge, per 3s: 14,737 draw calls visible against 0
+hidden, and 4 polls against 0.
+---
+ .../components/Warden/WardenSectionView.swift | 21 +++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/boringNotch/components/Warden/WardenSectionView.swift b/boringNotch/components/Warden/WardenSectionView.swift
+index c208515..77c171e 100644
+--- a/boringNotch/components/Warden/WardenSectionView.swift
++++ b/boringNotch/components/Warden/WardenSectionView.swift
+@@ -96,6 +96,20 @@ final class WardenBridgeWatcher: ObservableObject {
+ enum WardenWebViewCache {
+     private static var cached: (key: WardenHandshake, view: WKWebView)?
+ 
++    /// Tell the page whether it is on screen.
++    ///
++    /// THIS IS THE PERFORMANCE SWITCH, and without it the section is a battery bug. The
++    /// HUD canvas renders at display rate whenever its panel is open, and in the section
++    /// the panel is always open, so a hidden tab would keep a WebGL scene driving a 120Hz
++    /// display, plus a 750ms poll, for frames nobody can see. Nothing about a WKWebView
++    /// taken out of the view hierarchy tells the page that happened: `document.hidden`
++    /// stays false. So we say it. False also closes the page's event stream, which is
++    /// what lets WARDEN skip serializing radar state while nothing is attached.
++    static func setVisible(_ visible: Bool) {
++        guard let view = cached?.view else { return }
++        view.evaluateJavaScript("window.__wardenSetVisible && window.__wardenSetVisible(\(visible));")
++    }
++
+     static func view(for handshake: WardenHandshake, coordinator: WardenWebView.Coordinator) -> WKWebView {
+         if let c = cached, c.key == handshake { return c.view }
+ 
+@@ -182,6 +196,13 @@ struct WardenSectionView: View {
+                     // Keyed on the handshake so a WARDEN restart builds a fresh view
+                     // rather than reusing one holding a dead token and a closed stream.
+                     .id("\(handshake.port)-\(handshake.token)")
++                    // Appear and disappear cover BOTH ways this section leaves the screen:
++                    // another tab is picked, and the notch closes (ContentView builds the
++                    // whole tab body only while notchState is .open). The web view itself
++                    // is cached and survives, which is the point: it comes back warm
++                    // instead of rebuilding a WebGL context, but it comes back idle.
++                    .onAppear { WardenWebViewCache.setVisible(true) }
++                    .onDisappear { WardenWebViewCache.setVisible(false) }
+             } else {
+                 VStack(spacing: 6) {
+                     Image(systemName: "circle.hexagongrid")

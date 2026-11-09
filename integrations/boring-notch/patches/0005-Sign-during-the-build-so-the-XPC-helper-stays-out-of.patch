@@ -1,0 +1,97 @@
+From 3641541e474ecd3a3c864926d39da5275179ae22 Mon Sep 17 00:00:00 2001
+From: Karim Baba <karim.sf09@gmail.com>
+Date: Mon, 7 Sep 2026 17:02:50 -0700
+Subject: [PATCH 5/8] Sign during the build so the XPC helper stays out of the
+ sandbox
+
+Request Accessibility was a dead button. codesign --deep applies ONE set of
+entitlements to every nested item, so the helper was installed carrying the
+app's, sandbox included. Its own file says app-sandbox false for a reason:
+AXIsProcessTrustedWithOptions is a no-op inside the sandbox, so the click
+reached the helper, the helper asked, and TCC said nothing. The proof it was
+sandboxed is a container macOS made for it at 16:20 today and never before.
+
+The same line also signed with the raw entitlements file rather than the one
+Xcode processes, so Sparkle's two mach-lookup names shipped as the literal
+string $(PRODUCT_BUNDLE_IDENTIFIER)-spks. Letting xcodebuild sign fixes both:
+each target gets its own entitlements and its own variable expansion.
+
+Hardened runtime has to come off for this build, which is new only in the
+sense that --deep was quietly doing it already: codesign drops the flag unless
+asked to keep it. It turns on library validation, and an ad-hoc binary has no
+team, so the app refuses its own Lottie, Sparkle and MediaRemoteAdapter and
+dies in dyld before main. It buys nothing without notarisation, which needs a
+Developer ID this build does not use. The project keeps it on for real builds.
+
+The script now fails loudly if the helper comes out sandboxed, because the
+only symptom is a button that does nothing.
+
+Verified on the installed bundle: helper app-sandbox false, mach-lookup names
+expanded, app and helper both running, flags 0x2(adhoc).
+---
+ scripts/build-and-install.sh | 39 ++++++++++++++++++++++++++----------
+ 1 file changed, 28 insertions(+), 11 deletions(-)
+
+diff --git a/scripts/build-and-install.sh b/scripts/build-and-install.sh
+index 9d78fe0..9a90e1e 100755
+--- a/scripts/build-and-install.sh
++++ b/scripts/build-and-install.sh
+@@ -37,15 +37,30 @@ if ! xcodebuild -list -project boringNotch.xcodeproj >/dev/null 2>&1; then
+   fi
+ fi
+ 
+-echo "==> Building (this takes a few minutes the first time)"
++# Let the build sign. Ad-hoc ("-") needs no identity, no account and no provisioning
++# profile, so this still builds on any machine, and it is the only way each target gets
++# ITS OWN entitlements: the app sandboxed, the XPC helper NOT. Signing the finished
++# bundle by hand instead cannot tell those apart. Manual style because automatic style
++# with an empty team goes looking for a profile that does not exist.
++#
++# Hardened runtime off, and only here. It turns on library validation, which lets a
++# process load a library only from its own team, and ad-hoc has no team: the app would
++# refuse its own bundled Lottie, Sparkle and MediaRemoteAdapter and die in dyld before
++# main. Hardened runtime buys nothing without notarisation, which needs a Developer ID
++# this build deliberately does not use. The project keeps it ON for real builds.
++echo "==> Building and signing ad-hoc (this takes a few minutes the first time)"
+ xcodebuild \
+   -project boringNotch.xcodeproj \
+   -scheme boringNotch \
+   -configuration Release \
+   -derivedDataPath "$DERIVED" \
+   CODE_SIGN_IDENTITY="-" \
+-  CODE_SIGNING_REQUIRED=NO \
+-  CODE_SIGNING_ALLOWED=NO \
++  CODE_SIGN_STYLE=Manual \
++  DEVELOPMENT_TEAM="" \
++  PROVISIONING_PROFILE_SPECIFIER="" \
++  CODE_SIGNING_REQUIRED=YES \
++  CODE_SIGNING_ALLOWED=YES \
++  ENABLE_HARDENED_RUNTIME=NO \
+   build
+ 
+ BUILT="$DERIVED/Build/Products/Release/$APP_NAME"
+@@ -54,14 +69,16 @@ if [ ! -d "$BUILT" ]; then
+   exit 1
+ fi
+ 
+-# Sign locally WITH the entitlements. Signing is switched off during the build so a
+-# machine with no identity can compile at all, but the sandbox and the read-only
+-# exception for ~/.warden/ are entitlements, and an unsigned bundle carries none of
+-# them: the section would launch and then fail to read the handshake.
+-echo "==> Signing ad-hoc with entitlements"
+-codesign --force --deep --sign - \
+-  --entitlements boringNotch/boringNotch.entitlements \
+-  "$BUILT"
++# The helper must stay outside the sandbox or the accessibility prompt never appears:
++# AXIsProcessTrustedWithOptions is a no-op in a sandboxed process, so "Request
++# Accessibility" would look like a dead button. Check it rather than trust it, because
++# the failure is silent and only shows up as that button doing nothing.
++HELPER="$BUILT/Contents/XPCServices/BoringNotchXPCHelper.xpc"
++if codesign -d --entitlements - --xml "$HELPER" 2>/dev/null |
++   grep -q "com.apple.security.app-sandbox</key><true/>"; then
++  echo "The XPC helper came out sandboxed. Accessibility would be dead. Stopping."
++  exit 1
++fi
+ 
+ echo "==> Replacing /Applications/$APP_NAME"
+ osascript -e 'quit app "boringNotch"' 2>/dev/null || true

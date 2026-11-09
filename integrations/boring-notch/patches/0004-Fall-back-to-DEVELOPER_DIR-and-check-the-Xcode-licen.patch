@@ -1,0 +1,51 @@
+From 78b4c9a48435a26a7c7e535c3e61e06678f817ce Mon Sep 17 00:00:00 2001
+From: Karim Baba <karim.sf09@gmail.com>
+Date: Mon, 7 Sep 2026 16:08:08 -0700
+Subject: [PATCH 4/8] Fall back to DEVELOPER_DIR and check the Xcode licence
+
+DEVELOPER_DIR wins over xcode-select and needs no sudo, so a machine with
+Xcode installed but never switched to it builds anyway. The licence is the
+one step the script cannot take: agreeing writes to /Library and is a legal
+agreement, so it wants root and a person. Say so and name the two commands
+rather than failing with Xcode's own message buried in a build log.
+---
+ scripts/build-and-install.sh | 22 +++++++++++++++++++---
+ 1 file changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/scripts/build-and-install.sh b/scripts/build-and-install.sh
+index 3126087..9d78fe0 100755
+--- a/scripts/build-and-install.sh
++++ b/scripts/build-and-install.sh
+@@ -14,13 +14,29 @@ ROOT="$PWD"
+ DERIVED="$ROOT/.build"
+ APP_NAME="boringNotch.app"
+ 
++# Prefer a real Xcode even when xcode-select still points at the command line tools.
++# DEVELOPER_DIR wins over xcode-select and needs no sudo, so a machine that has Xcode
++# installed but never switched to it builds anyway.
++if [ -d /Applications/Xcode.app ] && [ -z "${DEVELOPER_DIR:-}" ]; then
++  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
++fi
++
+ if ! xcodebuild -version >/dev/null 2>&1; then
+-  echo "Xcode is not installed, or the command line tools are still the active developer"
+-  echo "directory. Install Xcode from the App Store, then run:"
+-  echo "  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
++  echo "Xcode is not installed. Get it from the App Store, then re-run this."
+   exit 1
+ fi
+ 
++# The licence is the one thing this script cannot do for you: agreeing to it writes to
++# /Library and is a legal agreement, so it wants root and a person.
++if ! xcodebuild -list -project boringNotch.xcodeproj >/dev/null 2>&1; then
++  if xcodebuild -list -project boringNotch.xcodeproj 2>&1 | grep -q "license"; then
++    echo "Xcode's licence has not been accepted yet. Run these two, then re-run this:"
++    echo "  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
++    echo "  sudo xcodebuild -license accept"
++    exit 1
++  fi
++fi
++
+ echo "==> Building (this takes a few minutes the first time)"
+ xcodebuild \
+   -project boringNotch.xcodeproj \

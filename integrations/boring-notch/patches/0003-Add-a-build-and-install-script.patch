@@ -1,0 +1,85 @@
+From f9eb5604514b45abb369c259c9e049a0b572b6f0 Mon Sep 17 00:00:00 2001
+From: Karim Baba <karim.sf09@gmail.com>
+Date: Mon, 7 Sep 2026 16:00:32 -0700
+Subject: [PATCH 3/8] Add a build and install script
+
+The project already signs ad-hoc on macOS, so building this fork needs Xcode
+and nothing else: no developer account, no provisioning profile. Signing is
+switched off during the build and reapplied afterwards WITH the entitlements,
+because the sandbox and the read-only exception for ~/.warden/ are
+entitlements and an unsigned bundle carries none of them, which would leave
+the section unable to read the handshake it just launched to find.
+---
+ scripts/build-and-install.sh | 63 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+ create mode 100755 scripts/build-and-install.sh
+
+diff --git a/scripts/build-and-install.sh b/scripts/build-and-install.sh
+new file mode 100755
+index 0000000..3126087
+--- /dev/null
++++ b/scripts/build-and-install.sh
+@@ -0,0 +1,63 @@
++#!/usr/bin/env bash
++# Build this fork and put it in /Applications, replacing whatever is there.
++#
++# The project already signs ad-hoc on macOS (CODE_SIGN_IDENTITY[sdk=macosx*] = "-",
++# DEVELOPMENT_TEAM empty), so this needs Xcode and nothing else: no Apple developer
++# account, no provisioning profile.
++#
++# Usage: scripts/build-and-install.sh
++
++set -euo pipefail
++
++cd "$(dirname "$0")/.."
++ROOT="$PWD"
++DERIVED="$ROOT/.build"
++APP_NAME="boringNotch.app"
++
++if ! xcodebuild -version >/dev/null 2>&1; then
++  echo "Xcode is not installed, or the command line tools are still the active developer"
++  echo "directory. Install Xcode from the App Store, then run:"
++  echo "  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
++  exit 1
++fi
++
++echo "==> Building (this takes a few minutes the first time)"
++xcodebuild \
++  -project boringNotch.xcodeproj \
++  -scheme boringNotch \
++  -configuration Release \
++  -derivedDataPath "$DERIVED" \
++  CODE_SIGN_IDENTITY="-" \
++  CODE_SIGNING_REQUIRED=NO \
++  CODE_SIGNING_ALLOWED=NO \
++  build
++
++BUILT="$DERIVED/Build/Products/Release/$APP_NAME"
++if [ ! -d "$BUILT" ]; then
++  echo "Build reported success but $BUILT is not there. Stopping rather than guessing."
++  exit 1
++fi
++
++# Sign locally WITH the entitlements. Signing is switched off during the build so a
++# machine with no identity can compile at all, but the sandbox and the read-only
++# exception for ~/.warden/ are entitlements, and an unsigned bundle carries none of
++# them: the section would launch and then fail to read the handshake.
++echo "==> Signing ad-hoc with entitlements"
++codesign --force --deep --sign - \
++  --entitlements boringNotch/boringNotch.entitlements \
++  "$BUILT"
++
++echo "==> Replacing /Applications/$APP_NAME"
++osascript -e 'quit app "boringNotch"' 2>/dev/null || true
++sleep 1
++rm -rf "/Applications/$APP_NAME"
++cp -R "$BUILT" /Applications/
++xattr -dr com.apple.quarantine "/Applications/$APP_NAME" 2>/dev/null || true
++
++echo "==> Launching"
++open "/Applications/$APP_NAME"
++
++echo
++echo "Done. Open the notch and pick the WARDEN tab."
++echo "The globes need WARDEN running: it writes ~/.warden/bridge.json, which is what"
++echo "the section attaches to. No WARDEN means the tab says so and keeps watching."

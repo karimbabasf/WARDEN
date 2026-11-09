@@ -1,0 +1,412 @@
+From d36e53ad316c86de191135067d86dc3ff9e1426c Mon Sep 17 00:00:00 2001
+From: Karim Baba <karim.sf09@gmail.com>
+Date: Thu, 10 Sep 2026 12:58:46 -0700
+Subject: [PATCH 8/8] Start WARDEN from the section that noticed it was down
+
+The empty state said "WARDEN is not running" and left the obvious next
+move somewhere else entirely: the Dock, Spotlight, or a login agent that
+only fires at boot. It is a button now. The launch goes through
+LaunchServices by bundle id rather than a spawned `open`, which the
+sandbox would have stopped at /Applications, and which also means the
+button works wherever WARDEN is installed.
+
+The spinner ends on the HANDSHAKE, not on the launch: LaunchServices
+reports success the moment the process exists, several steps before
+there is anything for the section to attach to. The watcher drops to a
+250ms poll for the same window, so the globes arrive when WARDEN is
+ready rather than up to two seconds later, and a 15s backstop turns
+"WARDEN started, but its bridge did not" into a line a person can read
+instead of a spinner that never stops.
+
+One thing this cannot do: pass `--hidden`. WARDEN reads that from argv
+and would keep its war-room window down, which is what a click in the
+notch actually wants. NSWorkspace drops OpenConfiguration.arguments for
+a sandboxed caller: the same test binary, signed twice, launches WARDEN
+as `warden --hidden` without the sandbox entitlement and as bare
+`warden` with it. So the flag is left off rather than passed and
+silently ignored, and WARDEN opens its window on this launch the way it
+does on any other.
+---
+ boringNotch.xcodeproj/project.pbxproj         |   4 +
+ .../components/Warden/WardenLauncher.swift    | 135 +++++++++++++++
+ .../components/Warden/WardenSectionView.swift | 159 ++++++++++++++++--
+ 3 files changed, 287 insertions(+), 11 deletions(-)
+ create mode 100644 boringNotch/components/Warden/WardenLauncher.swift
+
+diff --git a/boringNotch.xcodeproj/project.pbxproj b/boringNotch.xcodeproj/project.pbxproj
+index 739b813..e418086 100644
+--- a/boringNotch.xcodeproj/project.pbxproj
++++ b/boringNotch.xcodeproj/project.pbxproj
+@@ -114,6 +114,7 @@
+ 		9A0887352C7AFF8E00C160EA /* TabSelectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A0887342C7AFF8E00C160EA /* TabSelectionView.swift */; };
+ 		D7A110012E00000000000002 /* WardenSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A110012E00000000000001 /* WardenSectionView.swift */; };
+ 		D7A110012E00000000000012 /* WardenAttentionMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A110012E00000000000011 /* WardenAttentionMonitor.swift */; };
++		D7A110012E00000000000022 /* WardenLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A110012E00000000000021 /* WardenLauncher.swift */; };
+ 		9A987A0D2C73CA66005CA465 /* ShelfView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A987A032C73CA66005CA465 /* ShelfView.swift */; };
+ 		9A987A102C73CA8D005CA465 /* Collections in Frameworks */ = {isa = PBXBuildFile; productRef = 9A987A0F2C73CA8D005CA465 /* Collections */; };
+ 		9AB0C6BD2C73C9CB00F7CD30 /* NotchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AB0C6BB2C73C9CB00F7CD30 /* NotchHomeView.swift */; };
+@@ -286,6 +287,7 @@
+ 		9A0887342C7AFF8E00C160EA /* TabSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabSelectionView.swift; sourceTree = "<group>"; };
+ 		D7A110012E00000000000001 /* WardenSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardenSectionView.swift; sourceTree = "<group>"; };
+ 		D7A110012E00000000000011 /* WardenAttentionMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardenAttentionMonitor.swift; sourceTree = "<group>"; };
++		D7A110012E00000000000021 /* WardenLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardenLauncher.swift; sourceTree = "<group>"; };
+ 		9A987A032C73CA66005CA465 /* ShelfView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ShelfView.swift; sourceTree = "<group>"; };
+ 		9AB0C6BB2C73C9CB00F7CD30 /* NotchHomeView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = NotchHomeView.swift; sourceTree = "<group>"; };
+ 		B10348D82C74E56000475897 /* ConditionalModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConditionalModifier.swift; sourceTree = "<group>"; };
+@@ -657,6 +659,7 @@
+ 			children = (
+ 				D7A110012E00000000000001 /* WardenSectionView.swift */,
+ 				D7A110012E00000000000011 /* WardenAttentionMonitor.swift */,
++				D7A110012E00000000000021 /* WardenLauncher.swift */,
+ 			);
+ 			path = Warden;
+ 			sourceTree = "<group>";
+@@ -1021,6 +1024,7 @@
+ 				9A0887352C7AFF8E00C160EA /* TabSelectionView.swift in Sources */,
+ 				D7A110012E00000000000002 /* WardenSectionView.swift in Sources */,
+ 				D7A110012E00000000000012 /* WardenAttentionMonitor.swift in Sources */,
++				D7A110012E00000000000022 /* WardenLauncher.swift in Sources */,
+ 				112FB7352CCF16F70015238C /* NotchSpaceManager.swift in Sources */,
+ 				14FC6E502C7DED5600C7BEA5 /* DataTypes+Extensions.swift in Sources */,
+ 				1153BD982D9881F900979FB0 /* AppleScriptHelper.swift in Sources */,
+diff --git a/boringNotch/components/Warden/WardenLauncher.swift b/boringNotch/components/Warden/WardenLauncher.swift
+new file mode 100644
+index 0000000..68b7907
+--- /dev/null
++++ b/boringNotch/components/Warden/WardenLauncher.swift
+@@ -0,0 +1,135 @@
++//
++//  WardenLauncher.swift
++//  boringNotch
++//
++//  Start WARDEN from the notch, for the state the section spends most of its life in.
++//
++//  The section could already SEE that WARDEN was down and could only say so, which left
++//  the one obvious next move (start it) somewhere else entirely: the Dock, Spotlight, or
++//  a login agent that only fires at boot. This is that move, on the surface that noticed.
++//
++//  WHY LAUNCHSERVICES AND NOT `open`. We are sandboxed. A spawned `/usr/bin/open` would
++//  inherit our sandbox and would need a path we are allowed to read, and /Applications is
++//  not one of them: the only file exception this fork carries is read-only `~/.warden/`.
++//  `NSWorkspace` asks LaunchServices instead, which is a lookup by bundle id rather than
++//  a file read, and launching another app is something the sandbox has always allowed.
++//  It also means the button works wherever WARDEN is installed, not only in /Applications.
++//
++//  WHY NO `--hidden`, THOUGH IT IS THE FLAG YOU WOULD REACH FOR. WARDEN reads `--hidden`
++//  from its own argv and skips the war-room window when it is there (`lib.rs ::
++//  starts_hidden`), which is exactly what a click in the notch wants: the globes IN THE
++//  NOTCH, not a 3D window in front of whatever the operator was doing. It cannot be had
++//  from here. `NSWorkspace.OpenConfiguration.arguments` is DROPPED for a sandboxed
++//  caller: the same test binary, signed twice, launches WARDEN as `warden --hidden`
++//  without the sandbox entitlement and as bare `warden` with it. So the argument is left
++//  off rather than passed and silently ignored, and WARDEN opens its window on this
++//  launch the way it does on any other. Getting the window to stay down needs a route
++//  that is not argv (WARDEN honouring something else, or the unsandboxed XPC helper
++//  doing the launch), and neither belongs behind a button in an empty state.
++
++import AppKit
++import SwiftUI
++
++@MainActor
++final class WardenLauncher: ObservableObject {
++    enum Phase: Equatable {
++        case idle
++        case launching
++        /// A line short enough for the notch, already written for a person.
++        case failed(String)
++    }
++
++    @Published private(set) var phase: Phase = .idle
++
++    /// WARDEN's bundle id (`src-tauri/tauri.conf.json`). The identity we ask
++    /// LaunchServices for, so a WARDEN that lives somewhere other than /Applications
++    /// still starts.
++    private static let bundleIdentifier = "com.warden.app"
++
++    /// Where WARDEN is, or nil when it is not installed at all.
++    ///
++    /// Recomputed on every read rather than cached: WARDEN can be installed, moved or
++    /// deleted while boring.notch is running, and a cached answer would leave a button
++    /// that starts nothing, or no button beside a WARDEN that is right there.
++    static var installedURL: URL? {
++        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
++    }
++
++    /// Is WARDEN's process up right now?
++    ///
++    /// Only used to tell two failures apart when a launch times out, because they need
++    /// different things from the operator: a WARDEN that never started is a launch
++    /// problem, and a WARDEN that is running without a bridge is WARDEN's problem.
++    private static var isRunning: Bool {
++        !NSWorkspace.shared.runningApplications
++            .filter { $0.bundleIdentifier == bundleIdentifier }
++            .isEmpty
++    }
++
++    /// How long to wait for `~/.warden/bridge.json` before calling it a failure.
++    ///
++    /// WARDEN writes the handshake in well under a second from cold, and the watcher
++    /// that reads it is quickened to 250ms for the same window, so this is not a
++    /// duration anybody should ever see. It is the backstop for the case where WARDEN
++    /// starts and its bridge does not, which would otherwise be a spinner forever.
++    private static let handshakeTimeout: Duration = .seconds(15)
++
++    private var timeout: Task<Void, Never>?
++
++    /// Start WARDEN, and wait for it to say it is up.
++    ///
++    /// "Up" is the HANDSHAKE, not the launch: LaunchServices reports success the moment
++    /// the process is created, which is several steps before there is anything for the
++    /// section to attach to. So the spinner is ended by `handshakeArrived()`, called by
++    /// the section when the file lands, and never by this method.
++    func launch() {
++        guard phase != .launching else { return }
++        guard let url = Self.installedURL else {
++            phase = .failed("WARDEN is not installed")
++            return
++        }
++
++        phase = .launching
++
++        let configuration = NSWorkspace.OpenConfiguration()
++        // Do not ASK for the front. The operator clicked a panel hanging off the menu
++        // bar, so they were in the middle of something else. WARDEN will raise its own
++        // window anyway (see the note at the top of this file), but that is WARDEN's
++        // decision about WARDEN, and it is the one that a person can take up with it.
++        configuration.activates = false
++
++        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] _, error in
++            guard let error else { return }
++            NSLog("WARDEN: launch failed: \(error.localizedDescription)")
++            Task { @MainActor in
++                self?.fail("WARDEN would not start")
++            }
++        }
++
++        timeout = Task { [weak self] in
++            try? await Task.sleep(for: Self.handshakeTimeout)
++            guard !Task.isCancelled else { return }
++            self?.fail(Self.isRunning ? "WARDEN started, but its bridge did not"
++                                      : "WARDEN did not come up")
++        }
++    }
++
++    /// The handshake landed: the section is about to swap to the globes.
++    ///
++    /// Resetting to `.idle` rather than adding a `.running` phase, because the launcher
++    /// is only ever on screen while WARDEN is down. A phase for a state this view never
++    /// draws would be a lie kept warm for nobody.
++    func handshakeArrived() {
++        timeout?.cancel()
++        timeout = nil
++        phase = .idle
++    }
++
++    private func fail(_ message: String) {
++        timeout?.cancel()
++        timeout = nil
++        phase = .failed(message)
++    }
++
++    deinit { timeout?.cancel() }
++}
+diff --git a/boringNotch/components/Warden/WardenSectionView.swift b/boringNotch/components/Warden/WardenSectionView.swift
+index 3aaf386..fd8a761 100644
+--- a/boringNotch/components/Warden/WardenSectionView.swift
++++ b/boringNotch/components/Warden/WardenSectionView.swift
+@@ -55,19 +55,55 @@ final class WardenBridgeWatcher: ObservableObject {
+             .appendingPathComponent("bridge.json")
+     }
+ 
++    /// The resting cadence, and the one used while a launch we started is in flight.
++    private static let idleInterval: TimeInterval = 2.0
++    private static let quickInterval: TimeInterval = 0.25
++
++    /// When to stop polling fast, or nil when we are not.
++    private var quickenUntil: Date?
++
+     init() {
+         reload()
+         // Polled rather than watched with a DispatchSource. A file watcher needs an open
+         // descriptor on a file that may not exist yet, and has to be torn down and rebuilt
+         // every time WARDEN rewrites it; the state we are tracking changes at most once
+         // per WARDEN launch, so 2s of latency on it costs nothing a person can see.
+-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+-            Task { @MainActor in self?.reload() }
+-        }
++        schedule(every: Self.idleInterval)
+     }
+ 
+     deinit { timer?.invalidate() }
+ 
++    /// Poll fast for a moment, because we know the file is about to change.
++    ///
++    /// 2s is the right cadence for a handshake that is rewritten once per WARDEN launch,
++    /// and the wrong one for the single moment we STARTED that launch ourselves. WARDEN
++    /// writes the file in well under a second, so at the resting cadence the globes would
++    /// arrive up to two seconds after WARDEN was already serving them, and a button whose
++    /// result lands two seconds late reads as a button that did not work.
++    func quicken(for duration: TimeInterval) {
++        quickenUntil = Date().addingTimeInterval(duration)
++        schedule(every: Self.quickInterval)
++    }
++
++    private func schedule(every interval: TimeInterval) {
++        timer?.invalidate()
++        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
++            Task { @MainActor in self?.tick() }
++        }
++    }
++
++    private func tick() {
++        reload()
++        // Drop back as soon as the fast window has done its job, whether that is because
++        // the handshake landed or because it never will. Nothing here should leave a
++        // 250ms timer running against a file that changes once a day.
++        guard let until = quickenUntil else { return }
++        if handshake != nil || Date() >= until {
++            quickenUntil = nil
++            schedule(every: Self.idleInterval)
++        }
++    }
++
+     func reload() {
+         guard let data = try? Data(contentsOf: Self.handshakeURL),
+               let next = try? JSONDecoder().decode(WardenHandshake.self, from: data)
+@@ -218,9 +254,10 @@ struct WardenWebView: NSViewRepresentable {
+ 
+ // MARK: - Section
+ 
+-/// The tab's content: the globes when WARDEN is up, an honest line when it is not.
++/// The tab's content: the globes when WARDEN is up, and the way to start it when not.
+ struct WardenSectionView: View {
+     @StateObject private var watcher = WardenBridgeWatcher()
++    @StateObject private var launcher = WardenLauncher()
+ 
+     var body: some View {
+         Group {
+@@ -237,17 +274,117 @@ struct WardenSectionView: View {
+                     .onAppear { WardenWebViewCache.setVisible(true) }
+                     .onDisappear { WardenWebViewCache.setVisible(false) }
+             } else {
+-                VStack(spacing: 6) {
+-                    Image(systemName: "circle.hexagongrid")
+-                        .font(.system(size: 18, weight: .light))
+-                        .foregroundStyle(.tertiary)
+-                    Text("WARDEN is not running")
+-                        .font(.caption)
+-                        .foregroundStyle(.secondary)
++                WardenIdleView(launcher: launcher) {
++                    launcher.launch()
++                    // Watch fast for as long as the launcher is willing to wait, so the
++                    // globes arrive when WARDEN is ready rather than on the next resting
++                    // tick.
++                    watcher.quicken(for: 15)
+                 }
+                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+             }
+         }
+         .frame(maxWidth: .infinity, maxHeight: .infinity)
++        // The launch ends when the HANDSHAKE lands, not when LaunchServices returns, so
++        // this is what stops the spinner. Watching the handshake rather than the view
++        // swap also covers the case the button did not cause: WARDEN started from the
++        // Dock while the section was sitting here.
++        .onChange(of: watcher.handshake) { _, handshake in
++            if handshake != nil { launcher.handshakeArrived() }
++        }
++    }
++}
++
++// MARK: - Empty state
++
++/// What the section says when WARDEN is down, and the one thing it offers to do about it.
++private struct WardenIdleView: View {
++    @ObservedObject var launcher: WardenLauncher
++    let start: () -> Void
++
++    /// No WARDEN on the machine means no button. An enabled button that cannot work, or
++    /// a disabled one with no way to enable it, would both be worse than a plain line
++    /// saying what is actually missing.
++    private var isInstalled: Bool { WardenLauncher.installedURL != nil }
++
++    private var message: String {
++        switch launcher.phase {
++        case .launching: return "Starting WARDEN"
++        case .failed(let reason): return reason
++        case .idle: return isInstalled ? "WARDEN is not running" : "WARDEN is not installed"
++        }
++    }
++
++    var body: some View {
++        VStack(spacing: 8) {
++            Image(systemName: "circle.hexagongrid")
++                .font(.system(size: 18, weight: .light))
++                .foregroundStyle(.tertiary)
++
++            Text(message)
++                .font(.caption)
++                .foregroundStyle(.secondary)
++                // Crossfade rather than a cut, because the line changes UNDER a pointer
++                // that has not moved: without it, "WARDEN is not running" becoming
++                // "Starting WARDEN" reads as a glitch rather than an answer.
++                .contentTransition(.opacity)
++                .animation(.easeOut(duration: 0.15), value: message)
++
++            if launcher.phase == .launching {
++                ProgressView()
++                    .controlSize(.small)
++                    // Held to the button's own height so the swap does not move the line
++                    // above it. A caption that jumps when you click is the interface
++                    // losing its place, not reporting progress.
++                    .frame(height: 22)
++            } else if isInstalled {
++                Button(startTitle, action: start)
++                    .buttonStyle(WardenStartButtonStyle())
++            }
++        }
++    }
++
++    /// A failed launch offers the same action under a different word, because "Start
++    /// WARDEN" after being told it would not start reads as if the first click was
++    /// never received.
++    private var startTitle: String {
++        if case .failed = launcher.phase { return "Try again" }
++        return "Start WARDEN"
++    }
++}
++
++/// A pill for the notch's black: a hairline over a fill that lifts on hover.
++///
++/// Its own style rather than `BouncingButtonStyle`, which is built for the media
++/// controls: 12pt of padding and a 0.9 spring under a caption in an empty state would be
++/// a control shouting over the line that explains it.
++private struct WardenStartButtonStyle: ButtonStyle {
++    func makeBody(configuration: Configuration) -> some View {
++        Pill(configuration: configuration)
++    }
++
++    private struct Pill: View {
++        let configuration: ButtonStyleConfiguration
++        @State private var isHovering = false
++
++        var body: some View {
++            configuration.label
++                .font(.caption.weight(.medium))
++                .foregroundStyle(isHovering ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
++                .padding(.horizontal, 10)
++                .padding(.vertical, 4)
++                .background(
++                    Capsule()
++                        .fill(.white.opacity(isHovering ? 0.12 : 0.06))
++                        .strokeBorder(.white.opacity(0.08), lineWidth: 1)
++                )
++                // The press is the only part that has to be instant: it is the interface
++                // saying it heard the click, and it is over before the launch it starts.
++                .scaleEffect(configuration.isPressed ? 0.97 : 1)
++                .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
++                .onHover { hovering in
++                    withAnimation(.easeOut(duration: 0.15)) { isHovering = hovering }
++                }
++        }
+     }
+ }

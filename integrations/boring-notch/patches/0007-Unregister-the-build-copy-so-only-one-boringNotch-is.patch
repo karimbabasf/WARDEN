@@ -1,0 +1,33 @@
+From 9d18123617bf38796197fc931d293b1d6d0d746c Mon Sep 17 00:00:00 2001
+From: Karim Baba <karim.sf09@gmail.com>
+Date: Wed, 9 Sep 2026 14:08:39 -0700
+Subject: [PATCH 7/8] Unregister the build copy so only one boringNotch is
+ installable
+
+---
+ scripts/build-and-install.sh | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/scripts/build-and-install.sh b/scripts/build-and-install.sh
+index 9a90e1e..1e128c2 100755
+--- a/scripts/build-and-install.sh
++++ b/scripts/build-and-install.sh
+@@ -87,6 +87,18 @@ rm -rf "/Applications/$APP_NAME"
+ cp -R "$BUILT" /Applications/
+ xattr -dr com.apple.quarantine "/Applications/$APP_NAME" 2>/dev/null || true
+ 
++# Xcode registers what it builds, so the copy under .build/ becomes a SECOND boringNotch
++# in Launchpad and Spotlight beside the one we just installed. Same bundle id, same
++# binary, and picking the wrong one runs an app that no update will ever replace.
++# Unregistering the build product leaves /Applications as the only boringNotch a person
++# can launch. The .metadata_never_index file keeps Spotlight off the whole build tree.
++LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
++if [ -x "$LSREGISTER" ]; then
++  "$LSREGISTER" -u "$BUILT" 2>/dev/null || true
++  "$LSREGISTER" -u "$BUILT/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" 2>/dev/null || true
++fi
++touch "$DERIVED/.metadata_never_index" 2>/dev/null || true
++
+ echo "==> Launching"
+ open "/Applications/$APP_NAME"
+ 
